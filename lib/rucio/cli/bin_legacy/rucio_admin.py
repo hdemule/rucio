@@ -766,7 +766,11 @@ def list_scopes(args, client, logger, console, spinner):
         scopes = client.list_scope_owners()
         with_owner = True
 
+    def print_query_identity() -> None:
+        print(f'>>> Resource queried by {getattr(client, "account", None) or "unknown"}')
+
     if (cli_config == 'rich') and (not args.csv):
+        print_query_identity()
         if len(scopes) == 0:
             spinner.stop()
         elif not with_owner:
@@ -780,6 +784,7 @@ def list_scopes(args, client, logger, console, spinner):
             spinner.stop()
             RichUtils.print_output(table, console=console, no_pager=args.no_pager)
     else:
+        print_query_identity()
         if len(scopes) == 0:
             pass
         elif args.csv:
