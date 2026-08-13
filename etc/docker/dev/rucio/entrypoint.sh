@@ -18,6 +18,11 @@ if [ -z "$RUCIO_HOME" ]; then
     RUCIO_HOME=/opt/rucio
 fi
 
+case ":${PYTHONPATH:-}:" in
+    *:/opt/rucio/policy-packages:*) ;;
+    *) export PYTHONPATH="/opt/rucio/policy-packages${PYTHONPATH:+:${PYTHONPATH}}" ;;
+esac
+
 mkdir -p "$RUCIO_HOME/etc"
 
 generate_rucio_cfg(){

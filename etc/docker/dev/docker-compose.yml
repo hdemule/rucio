@@ -27,11 +27,13 @@ services:
       - ../../../tools:/opt/rucio/tools:Z
       - ../../../bin:/opt/rucio/bin:Z
       - ../../../lib:/opt/rucio/lib:Z
+      - ../../../policy-packages:/opt/rucio/policy-packages:Z
       - ../../../tests:/opt/rucio/tests:Z
       - ../../../:/rucio_source:Z
     environment:
       - REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
       - RUCIO_SOURCE_DIR=/rucio_source
+      - PYTHONPATH=/opt/rucio/policy-packages${PYTHONPATH:+:${PYTHONPATH}}
       - RDBMS
 
   rucio:
@@ -55,11 +57,13 @@ services:
       - ../../../tools:/opt/rucio/tools:Z
       - ../../../bin:/opt/rucio/bin:Z
       - ../../../lib:/opt/rucio/lib:Z
+      - ../../../policy-packages:/opt/rucio/policy-packages:Z
       - ../../../tests:/opt/rucio/tests:Z
       - ../../../:/rucio_source
     environment:
       - REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
       - RUCIO_SOURCE_DIR=/rucio_source
+      - PYTHONPATH=/opt/rucio/policy-packages${PYTHONPATH:+:${PYTHONPATH}}
       - RDBMS
       - DEV_PROFILES
     depends_on:
