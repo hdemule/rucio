@@ -54,6 +54,11 @@ services:
       - ../../certs/ssh/ruciouser_sshkey.pub:/root/.ssh/ruciouser_sshkey.pub:z
       - ../../certs/ssh/ruciouser_sshkey:/root/.ssh/ruciouser_sshkey:z
       - ./rucio/idpsecrets.json:/opt/rucio/etc/idpsecrets.json:ro
+      - ../../../containter_upload/etc/rucio-alice.cfg:/opt/rucio/etc/rucio-alice.cfg:ro
+      - ../../../containter_upload/etc/rucio-bob.cfg:/opt/rucio/etc/rucio-bob.cfg:ro
+      - ../../../containter_upload/circle.png:/opt/rucio/circle.png
+      - ../../../containter_upload/square.png:/opt/rucio/square.png
+      - ../../../containter_upload/triangle.png:/opt/rucio/triangle.png
       - ../../../tools:/opt/rucio/tools:Z
       - ../../../bin:/opt/rucio/bin:Z
       - ../../../lib:/opt/rucio/lib:Z
