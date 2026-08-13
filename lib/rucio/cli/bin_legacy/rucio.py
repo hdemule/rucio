@@ -511,7 +511,7 @@ def list_scopes(args, client, logger, console, spinner):
         with_owner = True
 
     def print_query_identity() -> None:
-        print(f'>>> Resource queried by {getattr(client, "account", None) or "unknown"}')
+        print(f'>>> Resource queried by {getattr(client, "account", None) or "unknown"} (not admin)')
 
     if (cli_config == 'rich') and (not args.csv):
         print_query_identity()
