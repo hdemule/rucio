@@ -18,12 +18,10 @@ if [ -z "$RUCIO_HOME" ]; then
     RUCIO_HOME=/opt/rucio
 fi
 
-case ":${PYTHONPATH:-}:" in
-    *:/opt/rucio/policy-packages:*) ;;
-    *) export PYTHONPATH="/opt/rucio/policy-packages${PYTHONPATH:+:${PYTHONPATH}}" ;;
-esac
-
 mkdir -p "$RUCIO_HOME/etc"
+
+echo "Installing local RBAC policy package"
+python3 -m pip install --disable-pip-version-check --no-build-isolation --no-deps --force-reinstall /opt/rucio/policy-packages
 
 generate_rucio_cfg(){
   	local override=$1
