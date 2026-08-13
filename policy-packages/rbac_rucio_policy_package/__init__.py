@@ -1,10 +1,10 @@
 SUPPORTED_VERSION = [">=35.0.0"]
 
 def get_algorithms():
-    from atlas_role_rucio_policy_package.archive_tape_metadata import ATLASArchiveMetadataPlugin
-    from atlas_role_rucio_policy_package.scope import ATLASScopeExtractionAlgorithm
-    from atlas_role_rucio_policy_package.non_deterministic_pfn import ATLASNonDeterministicPFNAlgorithm
-    from atlas_role_rucio_policy_package.pfn2lfn import ATLASRSEDeterministicScopeTranslation
+    from rbac_rucio_policy_package.archive_tape_metadata import ATLASArchiveMetadataPlugin
+    from rbac_rucio_policy_package.scope import ATLASScopeExtractionAlgorithm
+    from rbac_rucio_policy_package.non_deterministic_pfn import ATLASNonDeterministicPFNAlgorithm
+    from rbac_rucio_policy_package.pfn2lfn import ATLASRSEDeterministicScopeTranslation
 
     return {
         'non_deterministic_pfn': {
