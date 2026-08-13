@@ -15,7 +15,7 @@
 from flask import Flask, Response, jsonify, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccountNotFound, Duplicate, ScopeNotFound, VONotFound
+from rucio.common.exception import AccessDenied, AccountNotFound, Duplicate, ScopeNotFound, VONotFound
 from rucio.gateway.scope import add_scope, get_scopes, list_scopes, list_scopes_with_account, update_scope
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
 from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, check_accept_header_wrapper_flask, generate_http_error_flask, response_headers
@@ -210,10 +210,11 @@ class ScopeOwnershipList(ErrorHandlingMethodView):
           406:
             description: "Not acceptable"
         """
-        scopes = list_scopes_with_account(vo=request.environ['vo'])
-        res = []
-        for dictionary in scopes:
-            res.append(dictionary)
+        try:
+            scopes = list_scopes_with_account(issuer=request.environ['issuer'], vo=request.environ['vo'])
+            res = [dictionary for dictionary in scopes]
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         return jsonify(res)
 
 
