@@ -49,11 +49,10 @@ def list_scopes(filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) 
         return [scope.external for scope in core_scope.list_scopes(filter_=filter_, session=session)]
 
 
-def list_scopes_with_account(issuer: str, filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> 'Generator[dict[str, Any]]':
+def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> 'Generator[dict[str, Any]]':
     """
     Lists all scopes.
 
-    :param issuer: Account identifier which issues the command.
     :param filter_: Dictionary of attributes by which the input data should be filtered
     :param vo: The VO to act on.
 
@@ -67,10 +66,6 @@ def list_scopes_with_account(issuer: str, filter_: Optional[dict[str, Any]] = No
         filter_['scope'] = InternalScope(scope='*', vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_scopes_with_account', kwargs=filter_, session=session)
-        if not auth_result.allowed:
-            raise AccessDenied('Account %s can not list scopes with account. %s' % (issuer, auth_result.message))
-
         scopes = core_scope.list_scopes_with_account(filter_=filter_, session=session)
         for scope in scopes:
             yield gateway_update_return_dict(scope, session=session)
