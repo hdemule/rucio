@@ -32,6 +32,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
 
     perm = {
         'list_dids': perm_list_dids,
+        'get_did': perm_get_did,
         }
 
     handler = perm.get(action)
@@ -43,6 +44,49 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
 
 def _is_root(issuer) -> bool:
     return issuer.external == 'root'
+
+
+def _read_scopes(issuer: "InternalAccount", session: "Session") -> list[str]:
+    """
+    Returns the list of scopes that the account is allowed to read.
+    This function doesn't check whether the account is an admin or root, it just extracts the 'read_scopes' account attribute.
+
+    :param issuer: Account identifier which issues the command.
+    :param session: The DB session to use
+    :returns: List of scopes that the account is allowed to read.
+    """
+    account_attributes = list_account_attributes(account=issuer, session=session)
+
+    read_scopes_pattern = ""
+
+    for kv in account_attributes:
+        if kv["key"] == "read_scopes":
+            read_scopes_pattern = kv["value"]
+            if type(read_scopes_pattern) is not str:
+                raise ValueError(f"Account attribute are misconfigured, 'read_scopes' must be a string, got {type(read_scopes_pattern)}")
+            break
+
+    # "scope1,scope2,scope3" => ["scope1", "scope2", "scope3"]
+    read_scopes = [s.strip() for s in read_scopes_pattern.split(",") if s.strip()]
+
+    return read_scopes
+
+
+def _can_read_scope(issuer: "InternalAccount", scope: str, session: "Session") -> bool:
+    """
+    Checks if an account can read a scope. Admins and root can read all scopes by default, other accounts can read scopes that are listed in the 'read_scopes' account attribute.
+
+    :param issuer: Account identifier which issues the command.
+    :param scope: The scope to check.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+        return True
+
+    read_scopes = _read_scopes(issuer=issuer, session=session)
+
+    return scope in read_scopes
 
 
 def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -66,22 +110,16 @@ def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
-        return True
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
 
-    scope_queried = str(kwargs.get('scope'))
-    account_attributes = list_account_attributes(account=issuer, session=session)
 
-    allowed_scopes_pattern = ""
+def perm_get_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can get a DID.
 
-    for kv in account_attributes:
-        if kv["key"] == "read_scopes":
-            allowed_scopes_pattern = kv["value"]
-            if type(allowed_scopes_pattern) is not str:
-                raise ValueError(f"Account attribute are misconfigured, 'read_scopes' must be a string, got {type(allowed_scopes_pattern)}")
-            break
-
-    # "scope1,scope2,scope3" => ["scope1", "scope2", "scope3"]
-    allowed_scopes = [s.strip() for s in allowed_scopes_pattern.split(",") if s.strip()]
-
-    return scope_queried in allowed_scopes
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)

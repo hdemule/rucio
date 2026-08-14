@@ -606,7 +606,7 @@ class DIDs(ErrorHandlingMethodView):
                     dynamic_depth = None
             elif 'dynamic' in request.args:
                 dynamic_depth = DIDType.FILE
-            did = get_did(scope=scope, name=name, dynamic_depth=dynamic_depth, vo=request.environ['vo'])
+            did = get_did(issuer=request.environ['issuer'], scope=scope, name=name, dynamic_depth=dynamic_depth, vo=request.environ['vo'])
             return Response(render_json(**did), content_type='application/json')
         except ValueError as error:
             return generate_http_error_flask(400, error)
@@ -1953,7 +1953,7 @@ class Rules(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                get_did(scope=scope, name=name, vo=vo)
+                get_did(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo)
                 for rule in list_replication_rules({'scope': scope, 'name': name}, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
