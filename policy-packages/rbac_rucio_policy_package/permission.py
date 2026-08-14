@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from rucio.common.types import InternalAccount
 
 
-def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any], session: "Session") -> bool:
+def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any], session: "Session") -> "Optional[bool]":
     """
     Checks if an account has the specified permission to
     execute an action with parameters.
@@ -27,15 +27,18 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
     :param action:  The action(API call) called by the account.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
-    :returns: True if account is allowed, otherwise False
+    :returns: True/False if this package handles the action, None to defer to the generic policy
     """
 
     perm = {
-        'add_scope': perm_add_scope,
-        'list_scopes_with_account': perm_list_scope_with_account, 
+        'list_dids': perm_list_dids,
         }
 
-    return perm.get(action, perm_default)(issuer=issuer, kwargs=kwargs, session=session)
+    handler = perm.get(action)
+    if handler is None:
+        return None
+
+    return handler(issuer=issuer, kwargs=kwargs, session=session)
 
 
 def _is_root(issuer) -> bool:
@@ -54,26 +57,31 @@ def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
 
 
-def perm_add_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can add a scope to an account.
+    Checks if an account can list DIDs in a scope.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+        return True
 
+    scope_queried = str(kwargs.get('scope'))
+    account_attributes = list_account_attributes(account=issuer, session=session)
 
-def perm_list_scope_with_account(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
-    """
-    Checks if an account can list scopes with their corresponding account.
+    allowed_scopes_pattern = ""
 
-    :param issuer: Account identifier which issues the command.
-    :param kwargs: List of arguments for the action.
-    :param session: The DB session to use
-    :returns: True if account is allowed, otherwise False
-    """
+    for kv in account_attributes:
+        if kv["key"] == "read_scopes":
+            allowed_scopes_pattern = kv["value"]
+            if type(allowed_scopes_pattern) is not str:
+                raise ValueError(f"Account attribute are misconfigured, 'read_scopes' must be a string, got {type(allowed_scopes_pattern)}")
+            break
 
-    return True  # TODO: DEV test
+    # "scope1,scope2,scope3" => ["scope1", "scope2", "scope3"]
+    allowed_scopes = [s.strip() for s in allowed_scopes_pattern.split(",") if s.strip()]
+
+    return scope_queried in allowed_scopes

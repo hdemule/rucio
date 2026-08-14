@@ -278,7 +278,9 @@ class Search(ErrorHandlingMethodView):
         recursive = param_get_bool(request.args, 'recursive', default=False)
         try:
             def generate(vo):
-                for did in list_dids(scope=scope,
+                for did in list_dids(
+                                     issuer=request.environ['issuer'],
+                                     scope=scope,
                                      filters=filters,
                                      did_type=did_type,
                                      limit=limit,
