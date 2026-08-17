@@ -32,6 +32,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
 
     perm = {
         'list_dids': perm_list_dids,
+        'list_parent_dids': perm_list_parent_dids,
         'get_did': perm_get_did,
         'get_metadata': perm_get_metadata,
         'get_metadata_bulk': perm_get_metadata,  # Bulk metadata retrieval uses the same permission check as single metadata retrieval
@@ -109,6 +110,18 @@ def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
 def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can list DIDs in a scope.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_list_parent_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list parent DIDs of a DID.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
