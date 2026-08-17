@@ -743,6 +743,7 @@ def get_dataset_by_guid(
 
 
 def list_parent_dids(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -758,6 +759,10 @@ def list_parent_dids(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_parent_dids', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not list parent data identifiers for %s:%s. %s' % (issuer, scope, name, auth_result.message))
+
         dids = did.list_parent_dids(scope=internal_scope, name=name, session=session)
 
         for d in dids:

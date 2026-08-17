@@ -1301,12 +1301,14 @@ class Parents(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for dataset in list_parent_dids(scope=scope, name=name, vo=vo):
+                for dataset in list_parent_dids(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**dataset) + "\n"
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
