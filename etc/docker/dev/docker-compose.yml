@@ -34,6 +34,7 @@ services:
       - REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
       - RUCIO_SOURCE_DIR=/rucio_source
       - RDBMS
+      - PYTHONWARNINGS=ignore::FutureWarning
 
   rucio:
     container_name: ${RUCIO_HTTPD_CONTAINER_NAME:-dev-rucio-1}
@@ -69,6 +70,7 @@ services:
       - RUCIO_SOURCE_DIR=/rucio_source
       - RDBMS
       - DEV_PROFILES
+      - PYTHONWARNINGS=ignore::FutureWarning
     depends_on:
       oracle:
         condition: service_healthy
