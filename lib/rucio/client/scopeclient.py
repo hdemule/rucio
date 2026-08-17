@@ -60,7 +60,6 @@ class ScopeClient(BaseClient):
         AccountNotFound
             If account doesn't exist.
         """
-
         path = '/'.join([self.SCOPE_BASEURL, account, 'scopes', quote_plus(scope)])
         url = build_url(choice(self.list_hosts), path=path)
         r = self._send_request(url, method=HTTPMethod.POST)
