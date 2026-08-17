@@ -411,6 +411,7 @@ def list_content_history(
 
 
 def bulk_list_files(
+    issuer: str,
     dids: 'Iterable[dict[str, Any]]',
     long: bool = False,
     vo: str = DEFAULT_VO,
@@ -422,11 +423,16 @@ def bulk_list_files(
     :param long:       A boolean to choose if more metadata are returned or not.
     :param vo:         The VO to act on.
     """
-
-    for did_ in dids:
-        did_['scope'] = InternalScope(did_['scope'], vo=vo)
+    dids = list(dids)  # Convert to list to allow multiple iterations
 
     with db_session(DatabaseOperationType.READ) as session:
+        for did_ in dids:
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': did_['scope']}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s can not list files for data identifier in scope %s. %s' % (issuer, did_['scope'], auth_result.message))
+
+            did_['scope'] = InternalScope(did_['scope'], vo=vo)
+
         for file_ in did.bulk_list_files(dids=dids, long=long, session=session):
             yield gateway_update_return_dict(file_, session=session)
 
@@ -658,18 +664,10 @@ def get_metadata_bulk(
 
     with db_session(DatabaseOperationType.READ) as session:
         for entry in dids:
-            auth_result = rucio.gateway.permission.has_permission(
-                issuer=issuer,
-                vo=vo,
-                action='get_metadata',
-                kwargs={'scope': entry['scope'], 'name': entry['name'], 'plugin': plugin},
-                session=session,
-            )
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_metadata', kwargs={'scope': entry['scope'], 'name': entry['name'], 'plugin': plugin}, session=session)
             if not auth_result.allowed:
-                raise AccessDenied(
-                    'Account %s can not get metadata for data identifier %s:%s. %s'
-                    % (issuer, entry['scope'], entry['name'], auth_result.message)
-                )
+                raise AccessDenied('Account %s can not get metadata for data identifier %s:%s. %s' % (issuer, entry['scope'], entry['name'], auth_result.message))
+
             entry['scope'] = InternalScope(entry['scope'], vo=vo)
 
         meta = did.get_metadata_bulk(dids, inherit=inherit, plugin=plugin, session=session)

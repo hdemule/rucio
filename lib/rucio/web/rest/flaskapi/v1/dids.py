@@ -1244,7 +1244,7 @@ class BulkFiles(ErrorHandlingMethodView):
         dids = param_get(parameters, 'dids', default=[])
         try:
             def generate(vo):
-                for did in bulk_list_files(dids=dids, vo=vo):
+                for did in bulk_list_files(issuer=request.environ['issuer'], dids=dids, vo=vo):
                     yield render_json(**did) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
