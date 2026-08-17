@@ -33,6 +33,11 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
     perm = {
         'list_dids': perm_list_dids,
         'get_did': perm_get_did,
+        'get_metadata': perm_get_metadata,
+        'get_metadata_bulk': perm_get_metadata,  # Bulk metadata retrieval uses the same permission check as single metadata retrieval
+        'list_content': perm_list_content,
+        'list_content_history': perm_list_content_history,
+        'list_files': perm_list_files,
         }
 
     handler = perm.get(action)
@@ -116,6 +121,57 @@ def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
 def perm_get_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can get a DID.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_get_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can get metadata of a DID.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_list_content(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the content of a DID.
+    ! Note: Check that a user cannot read anything if the parent scope is not readable. Otherwise, consider filter data instead.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_list_content_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the content history of a DID.
+    ! Note: Check that a user cannot read anything if the parent scope is not readable. Otherwise, consider filter data instead.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the files of a DID.
+    ! Note: Check that a user cannot read anything if the parent scope is not readable. Otherwise, consider filter data instead.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
