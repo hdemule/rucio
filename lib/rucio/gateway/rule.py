@@ -154,7 +154,15 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
             auth_result = has_permission(issuer=issuer, vo=vo, action='access_rule_vo', kwargs=kwargs, session=session)
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not access rules at other VOs. %s' % (issuer, auth_result.message))
+
         result = rule.get_rule(rule_id, session=session)
+        scope = result['scope']
+        kwargs = {'scope': scope}
+
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replication_rule', kwargs=kwargs, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not access rules from scope %s. %s' % (issuer, scope, auth_result.message))
+
         return gateway_update_return_dict(result, session=session)
 
 
@@ -211,6 +219,7 @@ def list_replication_rule_history(
 
 
 def list_replication_rule_full_history(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -224,6 +233,10 @@ def list_replication_rule_full_history(
     """
     scope_internal = InternalScope(scope, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_full_history', kwargs={'scope': scope_internal, 'name': name}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not access rules at other VOs under scope %s. %s' % (issuer, scope_internal, auth_result.message))
+
         rules = rule.list_rule_full_history(scope_internal, name, session=session)
         for r in rules:
             yield gateway_update_return_dict(r, session=session)

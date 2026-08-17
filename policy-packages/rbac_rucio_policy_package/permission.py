@@ -39,6 +39,8 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_content': perm_list_content,
         'list_content_history': perm_list_content_history,
         'list_files': perm_list_files,
+        'list_replication_rule_full_history': perm_list_replication_rule_full_history,
+        'get_replication_rule': perm_get_replication_rule,
         }
 
     handler = perm.get(action)
@@ -192,3 +194,26 @@ def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     :returns: True if account is allowed, otherwise False
     """
     return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_list_replication_rule_full_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the full replication rule history of a DID.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_get_replication_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the full replication rule history of a DID.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
