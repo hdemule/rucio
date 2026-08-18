@@ -16,6 +16,8 @@
 
 import os
 
+import pytest
+
 from rucio.tests.common import execute
 
 # def test_config():
@@ -42,104 +44,295 @@ from rucio.tests.common import execute
 #     assert out.find('admin') != -1
 
 
+def _login(account):
+    """RBAC(USER): Login as a specific account"""
+    original_config = os.environ.get('RUCIO_CONFIG')
+
+    if account == 'root' or account is None:
+        os.environ.pop('RUCIO_CONFIG', None)
+    else:
+        os.environ['RUCIO_CONFIG'] = f'etc/rucio-{account}.cfg'
+
+    return original_config
+
+
 class TestDID:
-    def test_did_list_content_rbac(self):
+
+    @pytest.mark.deprecated
+    def test_bulk_list_files(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio list-files bob:file1 bob:file2')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio list-files bob:file1 bob:file2')
+        assert exitcode == 0
+
+        exitcode, out, err = execute('rucio list-files bob:file1 root:file1')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login('alice')
+        exitcode, out, err = execute('rucio list-files bob:file1 bob:file2')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_dataset_by_guid(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_get_did(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio did show bob:bob_ds')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio did show bob:bob_ds')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio did show bob:bob_ds')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_get_metadata(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio did metadata list bob:bob_ds')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio did metadata list bob:bob_ds')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio did metadata list bob:bob_ds')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_get_metadata_bulk(self):
+        pytest.skip("similar to test_get_metadata, but in a for loop for multiple DIDs")
+
+    def test_get_users_following_did(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_archive_content(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_content(self):
         """RBAC(USER): rucio did content list bob:bob_ds is only visible to root and bob, not alice"""
-        original_config = os.environ.get('RUCIO_CONFIG')
-        try:
-            # root has admin rights and can see any scope
-            os.environ.pop('RUCIO_CONFIG', None)
-            exitcode, out, err = execute('rucio did content list bob:bob_ds')
-            assert exitcode == 0
 
-            # bob owns the bob scope, so he can list its content
-            os.environ['RUCIO_CONFIG'] = 'etc/rucio-bob.cfg'
-            exitcode, out, err = execute('rucio did content list bob:bob_ds')
-            assert exitcode == 0
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio did content list bob:bob_ds')
+        assert exitcode == 0
 
-            # alice has no read_scopes access to bob's scope, so this must fail
-            os.environ['RUCIO_CONFIG'] = 'etc/rucio-alice.cfg'
-            exitcode, out, err = execute('rucio did content list bob:bob_ds')
-            assert exitcode == 2  # AccessDenied Error
+        _login('bob')
+        exitcode, out, err = execute('rucio did content list bob:bob_ds')
+        assert exitcode == 0
 
-        finally:
-            if original_config is not None:
-                os.environ['RUCIO_CONFIG'] = original_config
-            else:
-                os.environ.pop('RUCIO_CONFIG', None)
+        _login('alice')
+        exitcode, out, err = execute('rucio did content list bob:bob_ds')
+        assert exitcode == 2  # AccessDenied Error
 
-    def test_did_list(self):
-        original_config = os.environ.get('RUCIO_CONFIG')
-        try:
-            # root has admin rights and can see any scope
-            os.environ.pop('RUCIO_CONFIG', None)
-            exitcode, out, err = execute('rucio did list bob:*')
-            assert exitcode == 0
+        _login(original_config)
 
-            # bob owns the bob scope, so he can list its content
-            os.environ['RUCIO_CONFIG'] = 'etc/rucio-bob.cfg'
-            exitcode, out, err = execute('rucio did list bob:*')
-            assert exitcode == 0
+    def test_list_content_history(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio did content history bob:file1')
+        assert exitcode == 0
 
-            # alice has no read_scopes access to bob's scope, so this must fail
-            os.environ['RUCIO_CONFIG'] = 'etc/rucio-alice.cfg'
-            exitcode, out, err = execute('rucio did list bob:*')
-            assert exitcode == 2  # AccessDenied Error
+        _login('bob')
+        exitcode, out, err = execute('rucio did content history bob:file1')
+        assert exitcode == 0
 
-        finally:
-            if original_config is not None:
-                os.environ['RUCIO_CONFIG'] = original_config
-            else:
-                os.environ.pop('RUCIO_CONFIG', None)
+        _login('alice')
+        exitcode, out, err = execute('rucio did content history bob:file1')
+        assert exitcode == 2  # AccessDenied Error
 
-    def test_did_show(self):
-        original_config = os.environ.get('RUCIO_CONFIG')
-        try:
-            # root has admin rights and can see any scope
-            os.environ.pop('RUCIO_CONFIG', None)
-            exitcode, out, err = execute('rucio did show bob:bob_ds')
-            assert exitcode == 0
+        _login(original_config)
 
-            # bob owns the bob scope, so he can list its content
-            os.environ['RUCIO_CONFIG'] = 'etc/rucio-bob.cfg'
-            exitcode, out, err = execute('rucio did show bob:bob_ds')
-            assert exitcode == 0
+    def test_list_dids(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio did list bob:*')
+        assert exitcode == 0
 
-            # alice has no read_scopes access to bob's scope, so this must fail
-            os.environ['RUCIO_CONFIG'] = 'etc/rucio-alice.cfg'
-            exitcode, out, err = execute('rucio did show bob:bob_ds')
-            assert exitcode == 2  # AccessDenied Error
+        _login('bob')
+        exitcode, out, err = execute('rucio did list bob:*')
+        assert exitcode == 0
 
-        finally:
-            if original_config is not None:
-                os.environ['RUCIO_CONFIG'] = original_config
-            else:
-                os.environ.pop('RUCIO_CONFIG', None)
+        _login('alice')
+        exitcode, out, err = execute('rucio did list bob:*')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    @pytest.mark.deprecated
+    def test_list_files(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio list-files bob:bob_ds')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio list-files bob:bob_ds')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio list-files bob:bob_ds')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_list_new_dids(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_parent_dids(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio did list bob:file1 --parent')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio did list bob:file1 --parent')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio did list bob:file1 --parent')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_scope_list(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestLOCK:
-    pass
+    def test_get_dataset_locks(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestOPENDATA:
-    pass
+    def test_get_opendata_did(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_opendata_dids(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestREPLICA:
-    pass
+    def test_get_bad_replicas_summary(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_get_did_from_pfns(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_get_suspicious_files(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_bad_replicas_status(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_dataset_replicas(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_dataset_replicas_bulk(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_dataset_replicas_vp(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_datasets_per_rse(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_replicas(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestREQUEST:
-    pass
+    def test_get_request_by_did(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_get_request_history_by_did(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_requests(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_requests_history(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestRULE:
-    pass
+    def test_examine_replication_rule(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio rule show 741d5368b85143d4a9136590552a1bd8 --examine')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio rule show 741d5368b85143d4a9136590552a1bd8 --examine')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio rule show 741d5368b85143d4a9136590552a1bd8 --examine')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_get_replication_rule(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio rule show 741d5368b85143d4a9136590552a1bd8')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio rule show 741d5368b85143d4a9136590552a1bd8')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio rule show 741d5368b85143d4a9136590552a1bd8')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_list_associated_replication_rules_for_file(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_replication_rule_full_history(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_replication_rule_history(self):
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio rule history bob:file1')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio rule history bob:file1')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio rule history bob:file1')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
+
+    def test_list_replication_rules(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestSCOPE:
-    pass
+    def test_get_scopes(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_scopes(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_scopes_with_account(self):
+        pytest.skip("Not implemented yet...")
 
 
 class TestSUBSCRIPTION:
-    pass
+    def test_get_subscription_by_id(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_subscription_rule_states(self):
+        pytest.skip("Not implemented yet...")
+
+    def test_list_subscriptions(self):
+        pytest.skip("Not implemented yet...")
