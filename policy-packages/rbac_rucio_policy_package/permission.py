@@ -30,7 +30,6 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
     :param session: The DB session to use
     :returns: True/False if this package handles the action, None to defer to the generic policy
     """
-    logging.log(logging.ERROR, "[HUGO] HAS_PERMISSION, issuer: %s, action: %s, kwargs: %s", issuer, action, kwargs)
     perm = {
         'list_dids': perm_list_dids,
         'list_parent_dids': perm_list_parent_dids,
@@ -48,6 +47,8 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
     handler = perm.get(action)
     if handler is None:
         return None
+
+    logging.log(logging.ERROR, "[HUGO] HAS_PERMISSION, issuer: %s, action: %s, kwargs: %s, handler: %s", issuer, action, kwargs, handler.__name__)
 
     return handler(issuer=issuer, kwargs=kwargs, session=session)
 
