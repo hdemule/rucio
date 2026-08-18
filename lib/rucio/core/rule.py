@@ -3091,6 +3091,7 @@ def examine_rule(
             models.ReplicationRule.id == rule_id
         )
         rule = session.execute(stmt).scalar_one()
+        result['scope'] = rule.scope
         if rule.state == RuleState.OK:
             result['rule_error'] = 'This replication rule is OK'
         elif rule.state == RuleState.REPLICATING:
