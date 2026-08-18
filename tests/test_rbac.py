@@ -18,6 +18,8 @@ import os
 
 import pytest
 
+from rucio.common.types import InternalScope
+from rucio.core.rule import list_rules
 from rucio.tests.common import execute
 
 # def test_config():
@@ -54,6 +56,14 @@ def _login(account):
         os.environ['RUCIO_CONFIG'] = f'etc/rucio-{account}.cfg'
 
     return original_config
+
+
+def _get_rule_id(name, vo):
+    """RBAC(USER): Look up the id of the replication rule for alice:<name> directly from the database"""
+    scope = InternalScope('alice', vo=vo)
+    rules = list(list_rules(filters={'scope': scope, 'name': name}))
+    assert rules, f'No replication rule found for alice:{name}'
+    return rules[0]['id']
 
 
 class TestDID:
@@ -153,15 +163,15 @@ class TestDID:
 
     def test_list_dids(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio did list bob:*')
+        exitcode, out, err = execute('rucio did list alice:*')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio did list bob:*')
+        exitcode, out, err = execute('rucio did list alice:*')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio did list bob:*')
+        exitcode, out, err = execute('rucio did list alice:*')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
@@ -274,32 +284,36 @@ class TestREQUEST:
 
 
 class TestRULE:
-    def test_examine_replication_rule(self):
+    def test_examine_replication_rule(self, vo):
+        rule_id = _get_rule_id('square.png', vo)
+
         original_config = _login('root')
-        exitcode, out, err = execute('rucio rule show d14b0085dc0043b599e0c55d015038d9 --examine')
+        exitcode, out, err = execute(f'rucio rule show {rule_id} --examine')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio rule show d14b0085dc0043b599e0c55d015038d9 --examine')
+        exitcode, out, err = execute(f'rucio rule show {rule_id} --examine')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio rule show d14b0085dc0043b599e0c55d015038d9 --examine')
+        exitcode, out, err = execute(f'rucio rule show {rule_id} --examine')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
 
-    def test_get_replication_rule(self):
+    def test_get_replication_rule(self, vo):
+        rule_id = _get_rule_id('square.png', vo)
+
         original_config = _login('root')
-        exitcode, out, err = execute('rucio rule show d14b0085dc0043b599e0c55d015038d9')
+        exitcode, out, err = execute(f'rucio rule show {rule_id}')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio rule show d14b0085dc0043b599e0c55d015038d9')
+        exitcode, out, err = execute(f'rucio rule show {rule_id}')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio rule show d14b0085dc0043b599e0c55d015038d9')
+        exitcode, out, err = execute(f'rucio rule show {rule_id}')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
