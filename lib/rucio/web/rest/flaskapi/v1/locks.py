@@ -208,7 +208,7 @@ class LocksByScopeName(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for lock in get_dataset_locks(scope, name, vo=vo):
+                for lock in get_dataset_locks(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**lock) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
