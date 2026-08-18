@@ -233,7 +233,7 @@ def list_replication_rule_full_history(
     """
     scope_internal = InternalScope(scope, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
-        auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_full_history', kwargs={'scope': scope_internal, 'name': name}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_full_history', kwargs={'scope': scope_internal.external, 'name': name}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s can not access rules at other VOs under scope %s. %s' % (issuer, scope_internal, auth_result.message))
 
