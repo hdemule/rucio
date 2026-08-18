@@ -157,7 +157,7 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
 
         result = rule.get_rule(rule_id, session=session)
         scope = result['scope']
-        kwargs = {'scope': scope}
+        kwargs = {'scope': scope.external}
 
         auth_result = has_permission(issuer=issuer, vo=vo, action='get_replication_rule', kwargs=kwargs, session=session)
         if not auth_result.allowed:
@@ -377,6 +377,13 @@ def examine_replication_rule(
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not access rules at other VOs. %s' % (issuer, auth_result.message))
         result = rule.examine_rule(rule_id, session=session)
+        scope = result['scope']
+        kwargs = {'scope': scope.external}
+
+        auth_result = has_permission(issuer=issuer, vo=vo, action='examine_replication_rule', kwargs=kwargs, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not access rules from scope %s. %s' % (issuer, scope, auth_result.message))
+
         result = gateway_update_return_dict(result, session=session)
         if 'transfers' in result:
             result['transfers'] = [gateway_update_return_dict(t, session=session) for t in result['transfers']]
