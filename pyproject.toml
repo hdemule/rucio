@@ -21,7 +21,7 @@ dependencies = [
   'rich<=15.0.0',
   'typing_extensions<=4.16.0',
   'argcomplete<=3.7.0',
-  'boto',  # no upper limit is set in .in or .txt req files
+  'boto', # no upper limit is set in .in or .txt req files
   'python-magic<=0.4.27',
   'paramiko<=5.0.0',
   'boto3<=1.42.97',
@@ -37,6 +37,7 @@ dependencies = [
   'flask<=3.1.3',
   'oic<=1.7.0',
   'prometheus_client<=0.25.0',
+  "pytest>=8.4.2",
 ]
 requires-python = ">=3.9"
 authors = [
