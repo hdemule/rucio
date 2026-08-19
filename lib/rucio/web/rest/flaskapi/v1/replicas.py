@@ -1531,7 +1531,7 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(_deep, vo):
-                for row in list_dataset_replicas_vp(scope=scope, name=name, deep=_deep, vo=vo):
+                for row in list_dataset_replicas_vp(issuer=request.environ['issuer'], scope=scope, name=name, deep=_deep, vo=vo):
                     yield dumps(row, cls=APIEncoder) + '\n'
 
             deep = param_get_bool(request.args, 'deep', default=False)
@@ -1539,6 +1539,8 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
             return try_stream(generate(_deep=deep, vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
 
 class ReplicasRSE(ErrorHandlingMethodView):

@@ -493,6 +493,7 @@ def list_dataset_replicas_bulk(
 
 
 def list_dataset_replicas_vp(
+        issuer: str,
         scope: str,
         name: str,
         deep: bool = False,
@@ -512,6 +513,9 @@ def list_dataset_replicas_vp(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas_vp', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise exception.AccessDenied('Account %s can not list dataset replicas (VP) for scope %s. %s' % (issuer, scope, auth_result.message))
         for r in replica.list_dataset_replicas_vp(scope=internal_scope, name=name, deep=deep, session=session):
             yield gateway_update_return_dict(r, session=session)
 
