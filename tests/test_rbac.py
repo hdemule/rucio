@@ -45,6 +45,22 @@ from rucio.tests.common import execute
 #     _, out, _ = execute('rucio account attribute list root')
 #     assert out.find('admin') != -1
 
+# REST API Usage:
+# CA_CERT=/etc/grid-security/certificates/5fca1cb1.0
+
+# TOKEN=$(curl -sS --cacert "$CA_CERT" -D - -o /dev/null \
+#   -H 'X-Rucio-Account: alice' \
+#   -H 'X-Rucio-Username: alice' \
+#   -H 'X-Rucio-Password: secret' \
+#   "$BASE_URL/auth/userpass" \
+#   | tr -d '\r' | awk -F': ' 'tolower($1) == "x-rucio-auth-token" {print $2}')
+
+# curl --fail --silent --show-error \
+#   --cacert "$CA_CERT" \
+#   --header 'Accept: application/json' \
+#   --header "X-Rucio-Auth-Token: $TOKEN" \
+#   "$BASE_URL/dids/alice/square.png/status?dynamic_depth=FILE"
+
 
 def _login(account):
     """RBAC(USER): Login as a specific account"""
