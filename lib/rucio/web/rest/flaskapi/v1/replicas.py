@@ -1375,7 +1375,7 @@ class DatasetReplicas(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(_deep, vo):
-                for row in list_dataset_replicas(scope=scope, name=name, deep=_deep, vo=vo):
+                for row in list_dataset_replicas(issuer=request.environ['issuer'], scope=scope, name=name, deep=_deep, vo=vo):
                     yield dumps(row, cls=APIEncoder) + '\n'
 
             deep = param_get_bool(request.args, 'deep', default=False)
@@ -1383,6 +1383,8 @@ class DatasetReplicas(ErrorHandlingMethodView):
             return try_stream(generate(_deep=deep, vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
 
 class DatasetReplicasBulk(ErrorHandlingMethodView):
@@ -1482,12 +1484,14 @@ class DatasetReplicasBulk(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for row in list_dataset_replicas_bulk(dids=dids, vo=vo):
+                for row in list_dataset_replicas_bulk(issuer=request.environ['issuer'], dids=dids, vo=vo):
                     yield dumps(row, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except InvalidObject as error:
             return generate_http_error_flask(400, error, f'Cannot validate DIDs: {error}')
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
 
 class DatasetReplicasVP(ErrorHandlingMethodView):

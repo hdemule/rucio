@@ -254,10 +254,34 @@ class TestREPLICA:
         pytest.skip("Not implemented yet...")
 
     def test_list_dataset_replicas(self):
-        pytest.skip("Not implemented yet...")
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio replica list dataset alice:alice_ds')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio replica list dataset alice:alice_ds')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio replica list dataset alice:alice_ds')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
 
     def test_list_dataset_replicas_bulk(self):
-        pytest.skip("Not implemented yet...")
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio replica list dataset alice:alice_ds alice:alice_ds2')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio replica list dataset alice:alice_ds alice:alice_ds2')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio replica list dataset alice:alice_ds alice:alice_ds2')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
 
     def test_list_dataset_replicas_vp(self):
         pytest.skip("Not implemented yet...")
@@ -266,7 +290,19 @@ class TestREPLICA:
         pytest.skip("Not implemented yet...")
 
     def test_list_replicas(self):
-        pytest.skip("Not implemented yet...")
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio replica list file alice:square.png')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio replica list file alice:square.png')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio replica list file alice:square.png')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
 
 
 class TestREQUEST:
@@ -319,7 +355,19 @@ class TestRULE:
         _login(original_config)
 
     def test_list_associated_replication_rules_for_file(self):
-        pytest.skip("Not implemented yet...")
+        original_config = _login('root')
+        exitcode, out, err = execute('rucio rule list --file alice:square.png')
+        assert exitcode == 0
+
+        _login('alice')
+        exitcode, out, err = execute('rucio rule list --file alice:square.png')
+        assert exitcode == 0
+
+        _login('bob')
+        exitcode, out, err = execute('rucio rule list --file alice:square.png')
+        assert exitcode == 2  # AccessDenied Error
+
+        _login(original_config)
 
     def test_list_replication_rule_full_history(self):
         pytest.skip("Not implemented yet...")

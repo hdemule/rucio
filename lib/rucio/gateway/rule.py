@@ -243,6 +243,7 @@ def list_replication_rule_full_history(
 
 
 def list_associated_replication_rules_for_file(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -256,6 +257,10 @@ def list_associated_replication_rules_for_file(
     """
     scope_internal = InternalScope(scope, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope_internal.external}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not access rules at other VOs under scope %s. %s' % (issuer, scope_internal, auth_result.message))
+
         rules = rule.list_associated_rules_for_file(scope=scope_internal, name=name, session=session)
         for r in rules:
             yield gateway_update_return_dict(r, session=session)
