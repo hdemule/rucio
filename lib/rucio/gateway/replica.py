@@ -274,6 +274,10 @@ def list_replicas(
             sign_urls = True
 
         for d in dids:
+            auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_replicas', kwargs={'scope': d['scope']}, session=session)
+            if not auth_result.allowed:
+                raise exception.AccessDenied('Account %s can not list replicas for scope %s. %s' % (issuer, d['scope'], auth_result.message))
+
             d['scope'] = InternalScope(d['scope'], vo=vo)
 
         replicas = replica.list_replicas(dids=dids, schemes=schemes, unavailable=unavailable,
@@ -422,6 +426,7 @@ def update_replicas_states(
 
 
 def list_dataset_replicas(
+        issuer: str,
         scope: str,
         name: str,
         deep: bool = False,
@@ -439,6 +444,10 @@ def list_dataset_replicas(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise exception.AccessDenied('Account %s can not list dataset replicas for scope %s. %s' % (issuer, scope, auth_result.message))
+
         replicas = replica.list_dataset_replicas(scope=internal_scope, name=name, deep=deep, session=session)
 
         for r in replicas:
@@ -447,6 +456,7 @@ def list_dataset_replicas(
 
 
 def list_dataset_replicas_bulk(
+        issuer: str,
         dids: 'Iterable[dict[str, Any]]',
         vo: str = DEFAULT_VO
 ) -> 'Iterator[dict[str, Any]]':
@@ -471,6 +481,11 @@ def list_dataset_replicas_bulk(
         names_by_intscope[internal_scope] = names_by_scope[scope]
 
     with db_session(DatabaseOperationType.READ) as session:
+        for scope in names_by_intscope:
+            auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas_bulk', kwargs={'scope': scope.external}, session=session)
+            if not auth_result.allowed:
+                raise exception.AccessDenied('Account %s can not list dataset replicas for scope %s. %s' % (issuer, scope.external, auth_result.message))
+
         replicas = replica.list_dataset_replicas_bulk(names_by_intscope, session=session)
 
         for r in replicas:
