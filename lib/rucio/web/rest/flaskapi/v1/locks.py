@@ -15,7 +15,7 @@
 from flask import Flask, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import RSENotFound
+from rucio.common.exception import AccessDenied, RSENotFound
 from rucio.common.utils import render_json
 from rucio.gateway.lock import get_dataset_locks, get_dataset_locks_bulk, get_dataset_locks_by_rse
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
@@ -214,6 +214,8 @@ class LocksByScopeName(ErrorHandlingMethodView):
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
 
 class DatasetLocksForDids(ErrorHandlingMethodView):
