@@ -2057,6 +2057,8 @@ class AssociatedRules(ErrorHandlingMethodView):
             return generate_http_error_flask(400, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
 
 class GUIDLookup(ErrorHandlingMethodView):
