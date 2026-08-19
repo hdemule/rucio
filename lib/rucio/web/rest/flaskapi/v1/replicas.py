@@ -757,6 +757,8 @@ class ListReplicas(ErrorHandlingMethodView):
             return try_stream(response_generator, content_type=content_type)
         except (InvalidObject, DataIdentifierNotFound, SortingAlgorithmNotSupported) as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
 
 class ReplicasDIDs(ErrorHandlingMethodView):

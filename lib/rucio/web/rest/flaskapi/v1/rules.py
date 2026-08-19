@@ -753,7 +753,7 @@ class RuleHistoryFull(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(403, error)
+            return generate_http_error_flask(401, error)
 
 
 class RuleAnalysis(ErrorHandlingMethodView):
@@ -824,7 +824,10 @@ class RuleAnalysis(ErrorHandlingMethodView):
           406:
             description: "Not acceptable."
         """
-        analysis = examine_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        try:
+            analysis = examine_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         return Response(render_json(**analysis), content_type='application/json')
 
 
