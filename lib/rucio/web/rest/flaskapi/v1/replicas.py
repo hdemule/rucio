@@ -650,8 +650,8 @@ class ListReplicas(ErrorHandlingMethodView):
                       type: array
           400:
             description: "Cannot decode json parameter list."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           404:
             description: "DID not found."
           406:
@@ -758,7 +758,7 @@ class ListReplicas(ErrorHandlingMethodView):
         except (InvalidObject, DataIdentifierNotFound, SortingAlgorithmNotSupported) as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class ReplicasDIDs(ErrorHandlingMethodView):
@@ -1366,8 +1366,8 @@ class DatasetReplicas(ErrorHandlingMethodView):
                         description: "The date-time the replica was accessed."
                         type: string
                         format: date-time
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           404:
             description: "Not found"
           406:
@@ -1386,7 +1386,7 @@ class DatasetReplicas(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class DatasetReplicasBulk(ErrorHandlingMethodView):
@@ -1472,8 +1472,8 @@ class DatasetReplicasBulk(ErrorHandlingMethodView):
                         format: date-time
           400:
             description: "Bad Request."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           404:
             description: "Not found"
           406:
@@ -1493,7 +1493,7 @@ class DatasetReplicasBulk(ErrorHandlingMethodView):
         except InvalidObject as error:
             return generate_http_error_flask(400, error, f'Cannot validate DIDs: {error}')
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class DatasetReplicasVP(ErrorHandlingMethodView):
@@ -1516,14 +1516,14 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
           style: simple
         - name: deep
           in: query
-          description: "Flag to ennable lookup at the file level."
+          description: "Flag to enable lookup at the file level."
           schema:
             type: boolean
         responses:
           200:
             description: "OK. This needs documentation!"
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           406:
             description: "Not acceptable"
         """
@@ -1540,7 +1540,7 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class ReplicasRSE(ErrorHandlingMethodView):
