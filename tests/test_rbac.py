@@ -59,7 +59,7 @@ from rucio.tests.common import execute
 #   --cacert "$CA_CERT" \
 #   --header 'Accept: application/json' \
 #   --header "X-Rucio-Auth-Token: $TOKEN" \
-#   "$BASE_URL/dids/alice/square.png/status?dynamic_depth=FILE"
+#   "$BASE_URL/dids/alice/file1.png/status?dynamic_depth=FILE"
 
 
 def _login(account):
@@ -87,18 +87,18 @@ class TestDID:
     @pytest.mark.deprecated
     def test_bulk_list_files(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio list-files alice:square.png alice:triangle.png')
+        exitcode, out, err = execute('rucio list-files alice:file1.png alice:file2.png')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio list-files alice:square.png alice:triangle.png')
+        exitcode, out, err = execute('rucio list-files alice:file1.png alice:file2.png')
         assert exitcode == 0
 
-        exitcode, out, err = execute('rucio list-files alice:square.png root:file1')
+        exitcode, out, err = execute('rucio list-files alice:file1.png root:file1')
         assert exitcode == 2  # AccessDenied Error
 
         _login('bob')
-        exitcode, out, err = execute('rucio list-files alice:square.png alice:triangle.png')
+        exitcode, out, err = execute('rucio list-files alice:file1.png alice:file2.png')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
@@ -164,15 +164,15 @@ class TestDID:
 
     def test_list_content_history(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio did content history alice:square.png')
+        exitcode, out, err = execute('rucio did content history alice:file1.png')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio did content history alice:square.png')
+        exitcode, out, err = execute('rucio did content history alice:file1.png')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio did content history alice:square.png')
+        exitcode, out, err = execute('rucio did content history alice:file1.png')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
@@ -213,15 +213,15 @@ class TestDID:
 
     def test_list_parent_dids(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio did list alice:square.png --parent')
+        exitcode, out, err = execute('rucio did list alice:file1.png --parent')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio did list alice:square.png --parent')
+        exitcode, out, err = execute('rucio did list alice:file1.png --parent')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio did list alice:square.png --parent')
+        exitcode, out, err = execute('rucio did list alice:file1.png --parent')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
@@ -234,15 +234,15 @@ class TestLOCK:
     def test_get_dataset_locks(self):
         original_config = _login('root')
         # Indirect Call through `rule` command
-        exitcode, out, err = execute('rucio rule list --did alice:square.png --traverse')
+        exitcode, out, err = execute('rucio rule list --did alice:file1.png --traverse')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio rule list --did alice:square.png --traverse')
+        exitcode, out, err = execute('rucio rule list --did alice:file1.png --traverse')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio rule list --did alice:square.png --traverse')
+        exitcode, out, err = execute('rucio rule list --did alice:file1.png --traverse')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
@@ -307,15 +307,15 @@ class TestREPLICA:
 
     def test_list_replicas(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio replica list file alice:square.png')
+        exitcode, out, err = execute('rucio replica list file alice:file1.png')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio replica list file alice:square.png')
+        exitcode, out, err = execute('rucio replica list file alice:file1.png')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio replica list file alice:square.png')
+        exitcode, out, err = execute('rucio replica list file alice:file1.png')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
@@ -337,7 +337,7 @@ class TestREQUEST:
 
 class TestRULE:
     def test_examine_replication_rule(self, vo):
-        rule_id = _get_rule_id('square.png', vo)
+        rule_id = _get_rule_id('file1.png', vo)
 
         original_config = _login('root')
         exitcode, out, err = execute(f'rucio rule show {rule_id} --examine')
@@ -354,7 +354,7 @@ class TestRULE:
         _login(original_config)
 
     def test_get_replication_rule(self, vo):
-        rule_id = _get_rule_id('square.png', vo)
+        rule_id = _get_rule_id('file1.png', vo)
 
         original_config = _login('root')
         exitcode, out, err = execute(f'rucio rule show {rule_id}')
@@ -372,36 +372,36 @@ class TestRULE:
 
     def test_list_associated_replication_rules_for_file(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio rule list --file alice:square.png')
+        exitcode, out, err = execute('rucio rule list --file alice:file1.png')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio rule list --file alice:square.png')
+        exitcode, out, err = execute('rucio rule list --file alice:file1.png')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio rule list --file alice:square.png')
+        exitcode, out, err = execute('rucio rule list --file alice:file1.png')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
 
     def test_list_replication_rule_full_history(self):
-        pytest.skip("Not implemented yet...")
-
-    def test_list_replication_rule_history(self):
         original_config = _login('root')
-        exitcode, out, err = execute('rucio rule history alice:square.png')
+        exitcode, out, err = execute('rucio rule history alice:file1.png')
         assert exitcode == 0
 
         _login('alice')
-        exitcode, out, err = execute('rucio rule history alice:square.png')
+        exitcode, out, err = execute('rucio rule history alice:file1.png')
         assert exitcode == 0
 
         _login('bob')
-        exitcode, out, err = execute('rucio rule history alice:square.png')
+        exitcode, out, err = execute('rucio rule history alice:file1.png')
         assert exitcode == 2  # AccessDenied Error
 
         _login(original_config)
+
+    def test_list_replication_rule_history(self):
+        pytest.skip("Not implemented yet...")
 
     def test_list_replication_rules(self):
         pytest.skip("Not implemented yet...")

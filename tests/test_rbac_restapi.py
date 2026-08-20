@@ -25,7 +25,7 @@ from rucio.common.types import InternalScope
 from rucio.core.rule import list_rules
 
 # HTTP status code the REST API returns when permission.has_permission() denies the action.
-ACCESS_DENIED = 401
+FORBIDDEN = 403
 OK = 200
 
 # Test accounts and their userpass identities, as provisioned by the dev environment bootstrap.
@@ -105,13 +105,13 @@ class TestDID:
 
     def test_bulk_list_files(self):
         """RBAC(USER): POST /dids/bulkfiles is only visible to root and alice for alice's DIDs"""
-        json = {'dids': [{'scope': 'alice', 'name': 'square.png'}, {'scope': 'alice', 'name': 'triangle.png'}]}
+        json = {'dids': [{'scope': 'alice', 'name': 'file1.png'}, {'scope': 'alice', 'name': 'file2.png'}]}
         assert _post('/dids/bulkfiles', 'root', json=json).status_code == OK
         assert _post('/dids/bulkfiles', 'alice', json=json).status_code == OK
-        assert _post('/dids/bulkfiles', 'bob', json=json).status_code == ACCESS_DENIED
+        assert _post('/dids/bulkfiles', 'bob', json=json).status_code == FORBIDDEN
 
         json = {'dids': [{'scope': 'root', 'name': 'file1'}]}
-        assert _post('/dids/bulkfiles', 'alice', json=json).status_code == ACCESS_DENIED
+        assert _post('/dids/bulkfiles', 'alice', json=json).status_code == FORBIDDEN
 
     def test_dataset_by_guid(self):
         pytest.skip("Not implemented yet...")
@@ -121,13 +121,13 @@ class TestDID:
         params = {'dynamic_depth': 'DATASET'}
         assert _get(path, 'root', params=params).status_code == OK
         assert _get(path, 'alice', params=params).status_code == OK
-        assert _get(path, 'bob', params=params).status_code == ACCESS_DENIED
+        assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
     def test_get_metadata(self):
         path = _did_path('alice:alice_ds', 'meta')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_get_metadata_bulk(self):
         pytest.skip("similar to test_get_metadata, but in a for loop for multiple DIDs")
@@ -143,36 +143,36 @@ class TestDID:
         path = _did_path('alice:alice_ds', 'dids')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_content_history(self):
-        path = _did_path('alice:square.png', 'dids', 'history')
+        path = _did_path('alice:file1.png', 'dids', 'history')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_dids(self):
         path = '/dids/alice/dids/search'
         params = {'name': '*'}
         assert _get(path, 'root', params=params).status_code == OK
         assert _get(path, 'alice', params=params).status_code == OK
-        assert _get(path, 'bob', params=params).status_code == ACCESS_DENIED
+        assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
     @pytest.mark.deprecated
     def test_list_files(self):
         path = _did_path('alice:alice_ds', 'files')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_new_dids(self):
         pytest.skip("Not implemented yet...")
 
     def test_list_parent_dids(self):
-        path = _did_path('alice:square.png', 'parents')
+        path = _did_path('alice:file1.png', 'parents')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_scope_list(self):
         pytest.skip("Not implemented yet...")
@@ -181,11 +181,11 @@ class TestDID:
 class TestLOCK:
     def test_get_dataset_locks(self):
         # Indirect Call through the `rule list --traverse` command
-        path = _scope_name_path('locks', 'alice:square.png')
+        path = _scope_name_path('locks', 'alice:file1.png')
         params = {'did_type': 'dataset'}
         assert _get(path, 'root', params=params).status_code == OK
         assert _get(path, 'alice', params=params).status_code == OK
-        assert _get(path, 'bob', params=params).status_code == ACCESS_DENIED
+        assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
 
 class TestOPENDATA:
@@ -213,28 +213,28 @@ class TestREPLICA:
         path = _scope_name_path('replicas', 'alice:alice_ds', 'datasets')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_dataset_replicas_bulk(self):
         json = {'dids': [{'scope': 'alice', 'name': 'alice_ds'}, {'scope': 'alice', 'name': 'alice_ds2'}]}
         assert _post('/replicas/datasets_bulk', 'root', json=json).status_code == OK
         assert _post('/replicas/datasets_bulk', 'alice', json=json).status_code == OK
-        assert _post('/replicas/datasets_bulk', 'bob', json=json).status_code == ACCESS_DENIED
+        assert _post('/replicas/datasets_bulk', 'bob', json=json).status_code == FORBIDDEN
 
     def test_list_dataset_replicas_vp(self):
         path = _scope_name_path('replicas', 'alice:alice_ds', 'datasets_vp')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_datasets_per_rse(self):
         pytest.skip("Not implemented yet...")
 
     def test_list_replicas(self):
-        json = {'dids': [{'scope': 'alice', 'name': 'square.png'}]}
+        json = {'dids': [{'scope': 'alice', 'name': 'file1.png'}]}
         assert _post('/replicas/list', 'root', json=json).status_code == OK
         assert _post('/replicas/list', 'alice', json=json).status_code == OK
-        assert _post('/replicas/list', 'bob', json=json).status_code == ACCESS_DENIED
+        assert _post('/replicas/list', 'bob', json=json).status_code == FORBIDDEN
 
 
 class TestREQUEST:
@@ -253,31 +253,31 @@ class TestREQUEST:
 
 class TestRULE:
     def test_examine_replication_rule(self, vo):
-        path = f'/rules/{_get_rule_id("square.png", vo)}/analysis'
+        path = f'/rules/{_get_rule_id("file1.png", vo)}/analysis'
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_get_replication_rule(self, vo):
-        path = f'/rules/{_get_rule_id("square.png", vo)}'
+        path = f'/rules/{_get_rule_id("file1.png", vo)}'
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_associated_replication_rules_for_file(self):
-        path = _did_path('alice:square.png', 'associated_rules')
+        path = _did_path('alice:file1.png', 'associated_rules')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     def test_list_replication_rule_full_history(self):
-        pytest.skip("Not implemented yet...")
-
-    def test_list_replication_rule_history(self):
-        path = _scope_name_path('rules', 'alice:square.png', 'history')
+        path = _scope_name_path('rules', 'alice:file1.png', 'history')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
-        assert _get(path, 'bob').status_code == ACCESS_DENIED
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+    def test_list_replication_rule_history(self):
+        pytest.skip("Not implemented yet...")
 
     def test_list_replication_rules(self):
         pytest.skip("Not implemented yet...")

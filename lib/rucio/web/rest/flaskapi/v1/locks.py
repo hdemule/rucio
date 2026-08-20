@@ -188,8 +188,8 @@ class LocksByScopeName(ErrorHandlingMethodView):
                       accessed_at:
                         description: "The last time is was accessed."
                         type: string
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the lock."
           500:
             description: "Wrong DID type"
             content:
@@ -215,7 +215,7 @@ class LocksByScopeName(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class DatasetLocksForDids(ErrorHandlingMethodView):
