@@ -127,6 +127,7 @@ def get_dataset_locks_by_rse(
 
 
 def get_replica_locks_for_rule_id(
+    issuer: str,
     rule_id: str,
     vo: str = DEFAULT_VO,
 ) -> 'Iterator[dict[str, Any]]':
@@ -145,4 +146,10 @@ def get_replica_locks_for_rule_id(
             if lock_object['scope'].vo != vo:  # rule is on a different VO, so don't return any locks
                 LOGGER.debug('rule id %s is not present on VO %s' % (rule_id, vo))
                 break
+
+            scope_str = str(lock_object['scope'])
+            auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope_str}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s can not access locks under scope %s. %s' % (issuer, scope_str, auth_result.message))
+
             yield gateway_update_return_dict(lock_object, session=session)

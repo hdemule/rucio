@@ -46,8 +46,9 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_associated_replication_rules_for_file': perm_list_associated_replication_rules_for_file,
         'list_replicas': perm_list_replicas,
         'list_dataset_replicas': perm_list_dataset_replicas,
-        'list_dataset_replicas_bulk': perm_list_dataset_replicas,
+        'list_dataset_replicas_bulk': perm_list_dataset_replicas,  # Bulk dataset replicas retrieval uses the same permission check as single dataset replicas retrieval
         'list_dataset_replicas_vp': perm_list_dataset_replicas_vp,
+        'get_replica_locks_for_rule_id': perm_replica_locks_for_rule_id,
         }
 
     handler = perm.get(action)
@@ -285,6 +286,17 @@ def perm_list_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], sessio
 def perm_list_dataset_replicas_vp(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can list the replicas of a dataset (VP).
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+
+
+def perm_replica_locks_for_rule_id(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can get the replica locks for a rule_id.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
