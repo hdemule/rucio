@@ -14,20 +14,21 @@
 
 # To run a single test, use `pytest tests/test_rbac_restapi.py::TestDID::test_get_did`
 
+import shutil
 from typing import Any
 from urllib.parse import quote_plus
 
 import pytest
 import requests
-import shutil
 
 from rucio.common.config import config_get
 from rucio.common.types import InternalScope
 from rucio.core.rule import list_rules
 
-# HTTP status code the REST API returns when permission.has_permission() denies the action.
-FORBIDDEN = 403
+# HTTP status code the REST API returns
 OK = 200
+FORBIDDEN = 403
+NOT_FOUND = 404
 
 # Test accounts and their userpass identities, as provisioned by the dev environment bootstrap.
 _USERNAMES = {
@@ -147,11 +148,31 @@ class TestDID:
         assert _get(path, 'alice', params=params).status_code == OK
         assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
+        path_non_existent_scope = _did_path('non_existent_scope:alice_ds', 'status')
+        assert _get(path_non_existent_scope, 'root', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice', params=params).status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob', params=params).status_code == FORBIDDEN
+
+        path_non_existent_ds = _did_path('alice:non_existent_ds', 'status')
+        assert _get(path_non_existent_ds, 'root', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob', params=params).status_code == FORBIDDEN
+
     def test_get_metadata(self):
         path = _did_path('alice:alice_ds', 'meta')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_scope = _did_path('non_existent_scope:alice_ds', 'meta')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _did_path('alice:non_existent_ds', 'meta')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_get_metadata_bulk(self):
         pytest.skip("similar to test_get_metadata, but in a for loop for multiple DIDs")
@@ -169,11 +190,29 @@ class TestDID:
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
 
+        path_non_existent_scope = _did_path('non_existent_scope:alice_ds', 'dids')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _did_path('alice:non_existent_ds', 'dids')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
+
     def test_list_content_history(self):
         path = _did_path('alice:file1.png', 'dids', 'history')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+        path_non_existent_scope = _did_path('non_existent_scope:file1.png', 'dids', 'history')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+        path_non_existent_ds = _did_path('alice:non_existent_file.png', 'dids', 'history')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_list_dids(self):
         path = '/dids/alice/dids/search'
@@ -182,12 +221,29 @@ class TestDID:
         assert _get(path, 'alice', params=params).status_code == OK
         assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
+        # scope is part of the URL directly (not a DID query), so an invalid scope
+        # is just another scope for which alice has no permission
+        path_non_existent_scope = '/dids/non_existent_scope/dids/search'
+        assert _get(path_non_existent_scope, 'root', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice', params=params).status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob', params=params).status_code == FORBIDDEN
+
     @pytest.mark.deprecated
     def test_list_files(self):
         path = _did_path('alice:alice_ds', 'files')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_scope = _did_path('non_existent_scope:alice_ds', 'files')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _did_path('alice:non_existent_ds', 'files')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_list_new_dids(self):
         pytest.skip("Not implemented yet...")
@@ -197,6 +253,16 @@ class TestDID:
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_scope = _did_path('non_existent_scope:file1.png', 'parents')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+        
+        path_non_existent_ds = _did_path('alice:non_existent_file.png', 'parents')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_scope_list(self):
         pytest.skip("Not implemented yet...")
@@ -211,6 +277,16 @@ class TestLOCK:
         assert _get(path, 'alice', params=params).status_code == OK
         assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
+        path_non_existent_scope = _scope_name_path('locks', 'non_existent_scope:file1.png')
+        assert _get(path_non_existent_scope, 'root', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice', params=params).status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob', params=params).status_code == FORBIDDEN
+
+        path_non_existent_ds = _scope_name_path('locks', 'alice:non_existent_file.png')
+        assert _get(path_non_existent_ds, 'root', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice', params=params).status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob', params=params).status_code == FORBIDDEN
+
     def test_get_dataset_locks_bulk(self):
         # Indirect Call through the `rule list --traverse` command
         path = '/locks/bulk_locks_for_dids'
@@ -219,12 +295,28 @@ class TestLOCK:
         assert _post(path, 'alice', json=json).status_code == OK
         assert _post(path, 'bob', json=json).status_code == FORBIDDEN
 
+        json_non_existent_scope = {'dids': [{'scope': 'non_existent_scope', 'name': 'file1.png', 'type': 'dataset'}]}
+        assert _post(path, 'root', json=json_non_existent_scope).status_code == NOT_FOUND
+        assert _post(path, 'alice', json=json_non_existent_scope).status_code == FORBIDDEN
+        assert _post(path, 'bob', json=json_non_existent_scope).status_code == FORBIDDEN
+
+        json_non_existent_ds = {'dids': [{'scope': 'alice', 'name': 'non_existent_file.png', 'type': 'dataset'}]}
+        assert _post(path, 'root', json=json_non_existent_ds).status_code == NOT_FOUND
+        assert _post(path, 'alice', json=json_non_existent_ds).status_code == NOT_FOUND
+        assert _post(path, 'bob', json=json_non_existent_ds).status_code == FORBIDDEN
+
     def test_get_dataset_locks_for_rule_id(self, vo):
         # endpoint => /rules/<rule_id>/locks
         path = f'/rules/{_get_rule_id("file1.png", vo)}/locks'
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+        # rule_id is opaque: non-privileged accounts must not be able to distinguish
+        # a non-existent rule_id from one they're not allowed to see -> AccessDenied for both
+        path_non_existent_rule = '/rules/non-existent-rule-id/locks'
+        assert _get(path_non_existent_rule, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_rule, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_rule, 'bob').status_code == FORBIDDEN
 
 
 class TestOPENDATA:
@@ -254,17 +346,47 @@ class TestREPLICA:
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
 
+        path_non_existent_scope = _scope_name_path('replicas', 'non_existent_scope:alice_ds', 'datasets')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _scope_name_path('replicas', 'alice:non_existent_ds', 'datasets')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
+
     def test_list_dataset_replicas_bulk(self):
         json = {'dids': [{'scope': 'alice', 'name': 'alice_ds'}, {'scope': 'alice', 'name': 'alice_ds2'}]}
         assert _post('/replicas/datasets_bulk', 'root', json=json).status_code == OK
         assert _post('/replicas/datasets_bulk', 'alice', json=json).status_code == OK
         assert _post('/replicas/datasets_bulk', 'bob', json=json).status_code == FORBIDDEN
 
+        json_non_existent_scope = {'dids': [{'scope': 'non_existent_scope', 'name': 'alice_ds'}]}
+        assert _post('/replicas/datasets_bulk', 'root', json=json_non_existent_scope).status_code == NOT_FOUND
+        assert _post('/replicas/datasets_bulk', 'alice', json=json_non_existent_scope).status_code == FORBIDDEN
+        assert _post('/replicas/datasets_bulk', 'bob', json=json_non_existent_scope).status_code == FORBIDDEN
+
+        json_non_existent_ds = {'dids': [{'scope': 'alice', 'name': 'non_existent_ds'}]}
+        assert _post('/replicas/datasets_bulk', 'root', json=json_non_existent_ds).status_code == NOT_FOUND
+        assert _post('/replicas/datasets_bulk', 'alice', json=json_non_existent_ds).status_code == NOT_FOUND
+        assert _post('/replicas/datasets_bulk', 'bob', json=json_non_existent_ds).status_code == FORBIDDEN
+
     def test_list_dataset_replicas_vp(self):
         path = _scope_name_path('replicas', 'alice:alice_ds', 'datasets_vp')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_scope = _scope_name_path('replicas', 'non_existent_scope:alice_ds', 'datasets_vp')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _scope_name_path('replicas', 'alice:non_existent_ds', 'datasets_vp')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_list_datasets_per_rse(self):
         pytest.skip("Not implemented yet...")
@@ -274,6 +396,16 @@ class TestREPLICA:
         assert _post('/replicas/list', 'root', json=json).status_code == OK
         assert _post('/replicas/list', 'alice', json=json).status_code == OK
         assert _post('/replicas/list', 'bob', json=json).status_code == FORBIDDEN
+
+        json_non_existent_scope = {'dids': [{'scope': 'non_existent_scope', 'name': 'file1.png'}]}
+        assert _post('/replicas/list', 'root', json=json_non_existent_scope).status_code == NOT_FOUND
+        assert _post('/replicas/list', 'alice', json=json_non_existent_scope).status_code == FORBIDDEN
+        assert _post('/replicas/list', 'bob', json=json_non_existent_scope).status_code == FORBIDDEN
+
+        json_non_existent_ds = {'dids': [{'scope': 'alice', 'name': 'non_existent_file.png'}]}
+        assert _post('/replicas/list', 'root', json=json_non_existent_ds).status_code == NOT_FOUND
+        assert _post('/replicas/list', 'alice', json=json_non_existent_ds).status_code == NOT_FOUND
+        assert _post('/replicas/list', 'bob', json=json_non_existent_ds).status_code == FORBIDDEN
 
 
 class TestREQUEST:
@@ -297,11 +429,23 @@ class TestRULE:
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
 
+        # rule_id is opaque: non-privileged accounts must get AccessDenied, not NotFound,
+        # so they cannot distinguish a non-existent rule_id from one they're forbidden to see
+        path_non_existent_rule = '/rules/non-existent-rule-id/analysis'
+        assert _get(path_non_existent_rule, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_rule, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_rule, 'bob').status_code == FORBIDDEN
+
     def test_get_replication_rule(self, vo):
         path = f'/rules/{_get_rule_id("file1.png", vo)}'
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_rule = '/rules/non-existent-rule-id'
+        assert _get(path_non_existent_rule, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_rule, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_rule, 'bob').status_code == FORBIDDEN
 
     def test_list_associated_replication_rules_for_file(self):
         path = _did_path('alice:file1.png', 'associated_rules')
@@ -309,11 +453,31 @@ class TestRULE:
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
 
+        path_non_existent_scope = _did_path('non_existent_scope:file1.png', 'associated_rules')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _did_path('alice:non_existent_file.png', 'associated_rules')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
+
     def test_list_replication_rule_full_history(self):
         path = _scope_name_path('rules', 'alice:file1.png', 'history')
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_scope = _scope_name_path('rules', 'non_existent_scope:file1.png', 'history')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _scope_name_path('rules', 'alice:non_existent_file.png', 'history')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_list_replication_rule_history(self):
         pytest.skip("Not implemented yet...")
