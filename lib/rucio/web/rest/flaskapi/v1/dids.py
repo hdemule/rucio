@@ -253,6 +253,8 @@ class Search(ErrorHandlingMethodView):
                     type: object
                     description: "The name of a DID or a dictionary of a DID for long option."
           401:
+            description: "Invalid Auth Token"
+          403:
             description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "Invalid key in filter."
@@ -588,6 +590,8 @@ class DIDs(ErrorHandlingMethodView):
                       bytes:
                         description: "The size in bytes."
                         type: number
+          401:
+            description: "Invalid Auth Token"
           403:
             description: "Forbidden, the current authenticated user does not have permission to get the DID."
           404:
@@ -836,6 +840,8 @@ class Attachment(ErrorHandlingMethodView):
                         description: "The md5 checksum of the DID."
                         type: string
           401:
+            description: "Invalid Auth Token"
+          403:
             description: "Forbidden – the current authenticated user does not have permission to list the contents of the DID."
           404:
             description: "Scope not found"
@@ -1060,6 +1066,8 @@ class AttachmentHistory(ErrorHandlingMethodView):
                         description: "The last time the DID was updated."
                         type: string
           401:
+            description: "Invalid Auth Token"
+          403:
             description: "Forbidden – the current authenticated user does not have permission to view the content history of the DID."
           404:
             description: "DID not found"
