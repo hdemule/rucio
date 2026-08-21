@@ -50,6 +50,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_dataset_replicas_bulk': perm_list_dataset_replicas,  # Bulk dataset replicas retrieval uses the same permission check as single dataset replicas retrieval
         'list_dataset_replicas_vp': perm_list_dataset_replicas_vp,
         'get_replica_locks_for_rule_id': perm_replica_locks_for_rule_id,
+        'know_if_rule_exists': perm_default,  # Considered an admin privilege.
         }
 
     handler = perm.get(action)
