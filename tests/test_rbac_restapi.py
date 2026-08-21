@@ -19,6 +19,7 @@ from urllib.parse import quote_plus
 
 import pytest
 import requests
+import shutil
 
 from rucio.common.config import config_get
 from rucio.common.types import InternalScope
@@ -71,7 +72,30 @@ def _request(method: str, path: str, account: str, **kwargs: Any) -> requests.Re
     # some DID endpoints only accept application/x-json-stream, so advertise both
     headers = {'Accept': 'application/json, application/x-json-stream', 'X-Rucio-Auth-Token': _get_token(account)}
     headers.update(kwargs.pop('headers', {}))
-    return requests.request(method, f'{_rucio_host()}{path}', headers=headers, verify=_ca_cert(), **kwargs)
+    url = f'{_rucio_host()}{path}'
+    response = requests.request(method, url, headers=headers, verify=_ca_cert(), **kwargs)
+
+    # TODO: Temporary prints for debugging test
+    # BEGIN TEMP
+    status = "SUCCESS" if response.ok else "FAILED"
+    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    label = f' {method} {url} '
+
+    print(f"\n\033[94m{label:=^{terminal_width}}\033[0m")
+    print(f"Account     : {account}")
+    print(f"Status      : {status}")
+    print(f"Status code : {response.status_code}")
+    if 'json' in kwargs:
+        print(f"Request json: {kwargs['json']}")
+    if 'params' in kwargs:
+        print(f"Request params: {kwargs['params']}")
+    print("\033[34m" + "-" * terminal_width + "\033[0m")
+    print("Response body:")
+    print(response.text or "<empty>")
+    print("\033[94m" + "=" * terminal_width + "\033[0m")
+    # END TEMP
+
+    return response
 
 
 def _get(path: str, account: str, **kwargs: Any) -> requests.Response:
@@ -186,6 +210,14 @@ class TestLOCK:
         assert _get(path, 'root', params=params).status_code == OK
         assert _get(path, 'alice', params=params).status_code == OK
         assert _get(path, 'bob', params=params).status_code == FORBIDDEN
+
+    def test_get_dataset_locks_bulk(self):
+        # Indirect Call through the `rule list --traverse` command
+        path = '/locks/bulk_locks_for_dids'
+        json = {'dids': [{'scope': 'alice', 'name': 'file1.png', 'type': 'dataset'}, {'scope': 'alice', 'name': 'file2.png', 'type': 'dataset'}]}
+        assert _post(path, 'root', json=json).status_code == OK
+        assert _post(path, 'alice', json=json).status_code == OK
+        assert _post(path, 'bob', json=json).status_code == FORBIDDEN
 
     def test_get_dataset_locks_for_rule_id(self, vo):
         # endpoint => /rules/<rule_id>/locks

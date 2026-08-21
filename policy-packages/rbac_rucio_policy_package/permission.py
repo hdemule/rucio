@@ -43,6 +43,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'get_replication_rule': perm_get_replication_rule,
         'examine_replication_rule': perm_examine_replication_rule,
         'get_dataset_locks': perm_get_dataset_locks,
+        'get_dataset_locks_bulk': perm_get_dataset_locks,  # Bulk dataset locks retrieval uses the same permission check as single dataset locks retrieval
         'list_associated_replication_rules_for_file': perm_list_associated_replication_rules_for_file,
         'list_replicas': perm_list_replicas,
         'list_dataset_replicas': perm_list_dataset_replicas,
