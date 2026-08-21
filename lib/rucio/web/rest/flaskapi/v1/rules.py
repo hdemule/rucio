@@ -477,10 +477,15 @@ class ReplicaLocks(ErrorHandlingMethodView):
         """
 
         def generate(vo):
-            for lock in get_replica_locks_for_rule_id(rule_id, vo=vo):
+            for lock in get_replica_locks_for_rule_id(issuer=request.environ['issuer'], rule_id=rule_id, vo=vo):
                 yield render_json(**lock) + '\n'
 
-        return try_stream(generate(vo=request.environ['vo']))
+        try:
+            res = try_stream(generate(vo=request.environ['vo']))
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+
+        return res
 
 
 class ReduceRule(ErrorHandlingMethodView):
