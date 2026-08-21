@@ -475,6 +475,11 @@ class TestRULE:
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
 
+        path_only_root_allowed = f'/rules/{_get_rule_id("file1.png", vo, "root")}/analysis'
+        assert _get(path_only_root_allowed, 'root').status_code == OK
+        assert _get(path_only_root_allowed, 'alice').status_code == FORBIDDEN
+        assert _get(path_only_root_allowed, 'bob').status_code == FORBIDDEN
+
         # rule_id is opaque: non-privileged accounts must get AccessDenied, not NotFound,
         # so they cannot distinguish a non-existent rule_id from one they're forbidden to see
         path_non_existent_rule = '/rules/non-existent-rule-id/analysis'
@@ -487,6 +492,11 @@ class TestRULE:
         assert _get(path, 'root').status_code == OK
         assert _get(path, 'alice').status_code == OK
         assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_only_root_allowed = f'/rules/{_get_rule_id("file1.png", vo, "root")}'
+        assert _get(path_only_root_allowed, 'root').status_code == OK
+        assert _get(path_only_root_allowed, 'alice').status_code == FORBIDDEN
+        assert _get(path_only_root_allowed, 'bob').status_code == FORBIDDEN
 
         path_non_existent_rule = '/rules/non-existent-rule-id'
         assert _get(path_non_existent_rule, 'root').status_code == NOT_FOUND
