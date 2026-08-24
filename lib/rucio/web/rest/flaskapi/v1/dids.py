@@ -1992,6 +1992,8 @@ class Rules(ErrorHandlingMethodView):
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
         except RuleNotFound as error:
             return generate_http_error_flask(404, error)
         except DataIdentifierNotFound as error:
