@@ -143,6 +143,7 @@ class TestDID:
         pytest.skip("Not implemented yet...")
 
     def test_get_did(self):
+        # First API Endpoint that uses "get_did"
         path = _did_path('alice:alice_ds', 'status')
         params = {'dynamic_depth': 'DATASET'}
         assert _get(path, 'root', params=params).status_code == OK
@@ -158,6 +159,22 @@ class TestDID:
         assert _get(path_non_existent_ds, 'root', params=params).status_code == NOT_FOUND
         assert _get(path_non_existent_ds, 'alice', params=params).status_code == NOT_FOUND
         assert _get(path_non_existent_ds, 'bob', params=params).status_code == FORBIDDEN
+
+        # Second API Endpoint that uses "get_did"
+        path = _did_path('alice:alice_ds', 'rules')
+        assert _get(path, 'root').status_code == OK
+        assert _get(path, 'alice').status_code == OK
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_scope = _did_path('non_existent_scope:file1.png', 'rules')
+        assert _get(path_non_existent_scope, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_scope, 'alice').status_code == FORBIDDEN
+        assert _get(path_non_existent_scope, 'bob').status_code == FORBIDDEN
+
+        path_non_existent_ds = _did_path('alice:non_existent_file.png', 'rules')
+        assert _get(path_non_existent_ds, 'root').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'alice').status_code == NOT_FOUND
+        assert _get(path_non_existent_ds, 'bob').status_code == FORBIDDEN
 
     def test_get_metadata(self):
         path = _did_path('alice:alice_ds', 'meta')
