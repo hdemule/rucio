@@ -176,8 +176,20 @@ class TestDID:
         for account, expected_status in zip(accounts, expected_statuses):
             assert _get(path, account).status_code == expected_status
 
-    def test_get_metadata_bulk(self):
-        pytest.skip("Permission Test: request metadata for multiple DIDs as root, the owning account, and an unauthorized account, including a mixed list of authorized and unauthorized scopes.")
+    @pytest.mark.parametrize(
+        ('payload', 'accounts', 'expected_statuses', 'empty_responses'),
+        [
+            ({'dids': [{'scope': 'alice', 'name': 'alice_ds'}, {'scope': 'alice', 'name': 'alice_ds2'}], 'type': 'dataset'}, ['root', 'alice', 'bob'], [OK, OK, FORBIDDEN], [False, False, False]),
+            ({'dids': [{'scope': 'non_existing_scope', 'name': 'alice_ds'}], 'type': 'dataset'}, ['root', 'alice', 'bob'], [OK, FORBIDDEN, FORBIDDEN], [True, False, False]),
+            ({'dids': [{'scope': 'alice', 'name': 'non_existing_ds'}], 'type': 'dataset'}, ['root', 'alice', 'bob'], [OK, OK, FORBIDDEN], [True, True, False]),
+        ],
+        ids=['normal case', 'non-existing scope', 'non-existing dataset'],
+    )
+    def test_get_metadata_bulk(self, payload, accounts, expected_statuses, empty_responses):
+        path = '/dids/bulkmeta'
+        for account, expected_status, empty_response in zip(accounts, expected_statuses, empty_responses):
+            post = _post(path, account, json=payload)
+            assert post.status_code == expected_status and (len(post.text) == 0) == empty_response  # equivalent to NOT_FOUND
 
     def test_get_users_following_did(self):
         pytest.skip("Filtering Test: query followers of a DID owned by alice and verify root/alice access, bob denial, and the response for an unknown scope or DID.")
