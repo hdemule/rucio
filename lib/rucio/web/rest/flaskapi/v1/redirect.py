@@ -19,7 +19,7 @@ from flask import Blueprint, Flask, redirect, request
 from werkzeug.datastructures import Headers
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import DataIdentifierNotFound, ReplicaNotFound, SortingAlgorithmNotSupported
+from rucio.common.exception import AccessDenied, DataIdentifierNotFound, ReplicaNotFound, SortingAlgorithmNotSupported
 from rucio.core.replica_sorter import sort_replicas
 from rucio.gateway.replica import filter_replicas_by_site, list_replicas
 from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, check_accept_header_wrapper_flask, extract_vo, generate_http_error_flask, parse_scope_name, try_stream
@@ -182,6 +182,8 @@ class MetaLinkRedirector(ErrorHandlingMethodView):
             return try_stream(generate(), content_type='application/metalink4+xml')
         except (DataIdentifierNotFound, ReplicaNotFound, SortingAlgorithmNotSupported) as error:
             return generate_http_error_flask(404, error, headers=headers)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error, headers=headers)
 
 
 class HeaderRedirector(ErrorHandlingMethodView):
@@ -345,6 +347,8 @@ class HeaderRedirector(ErrorHandlingMethodView):
             return 'no redirection possible - file does not exist', 404, headers
         except (ReplicaNotFound, SortingAlgorithmNotSupported) as error:
             return generate_http_error_flask(404, error, headers=headers)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error, headers=headers)
 
 
 def blueprint(with_doc=False):
