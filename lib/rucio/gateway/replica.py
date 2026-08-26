@@ -276,7 +276,7 @@ def list_replicas(
         for d in dids:
             auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_replicas', kwargs={'scope': d['scope']}, session=session)
             if not auth_result.allowed:
-                raise exception.AccessDenied('Account %s can not list replicas for scope %s. %s' % (issuer, d['scope'], auth_result.message))
+                raise exception.AccessDenied('Account %s cannot list replicas of data identifier %s:%s in scope %s. The requested DID either does not exist or is outside the account\'s authorized scope.' % (issuer, d['scope'], d['name'], d['scope']))
 
             d['scope'] = InternalScope(d['scope'], vo=vo)
 
@@ -446,7 +446,7 @@ def list_dataset_replicas(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise exception.AccessDenied('Account %s can not list dataset replicas for scope %s. %s' % (issuer, scope, auth_result.message))
+            raise exception.AccessDenied('Account %s cannot list dataset replicas of data identifier %s:%s in scope %s. The requested DID either does not exist or is outside the account\'s authorized scope.' % (issuer, scope, name, scope))
 
         replicas = replica.list_dataset_replicas(scope=internal_scope, name=name, deep=deep, session=session)
 
@@ -484,7 +484,7 @@ def list_dataset_replicas_bulk(
         for scope in names_by_intscope:
             auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas_bulk', kwargs={'scope': scope.external}, session=session)
             if not auth_result.allowed:
-                raise exception.AccessDenied('Account %s can not list dataset replicas for scope %s. %s' % (issuer, scope.external, auth_result.message))
+                raise exception.AccessDenied('Account %s cannot list dataset replicas in scope %s. The requested scope either does not exist or is outside the account\'s authorized scope.' % (issuer, scope.external))
 
         replicas = replica.list_dataset_replicas_bulk(names_by_intscope, session=session)
 
@@ -515,7 +515,11 @@ def list_dataset_replicas_vp(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas_vp', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise exception.AccessDenied('Account %s can not list dataset replicas (VP) for scope %s. %s' % (issuer, scope, auth_result.message))
+            raise exception.AccessDenied(
+                'Account %s cannot list virtual placement dataset replicas of data identifier %s:%s in scope %s. '
+                'The requested DID either does not exist or is outside the account\'s authorized scope.'
+                % (issuer, scope, name, scope)
+            )
         for r in replica.list_dataset_replicas_vp(scope=internal_scope, name=name, deep=deep, session=session):
             yield gateway_update_return_dict(r, session=session)
 
