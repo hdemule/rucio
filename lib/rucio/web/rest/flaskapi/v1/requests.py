@@ -192,6 +192,8 @@ class RequestGet(ErrorHandlingMethodView):
             return Response(json.dumps(request_data, cls=APIEncoder), content_type='application/json')
         except RequestNotFound as error:
             return generate_http_error_flask(404, error.__class__.__name__, f'No request found for DID {scope}:{name} at RSE {rse}')
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class RequestHistoryGet(ErrorHandlingMethodView):

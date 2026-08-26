@@ -436,11 +436,38 @@ class TestREPLICA:
 
 
 class TestREQUEST:
-    def test_get_request_by_did(self):
-        pytest.skip("Permission Test: retrieve a transfer request for a DID as root, the owning account, and an unauthorized account.")
 
-    def test_get_request_history_by_did(self):
-        pytest.skip("Permission Test: retrieve request history for a DID at an RSE as root, the owning account, and an unauthorized account.")
+    @pytest.mark.parametrize(
+        ('did', 'rse', 'accounts', 'expected_statuses'),
+        [
+            ('alice:file1.png', 'MOCK-POSIX', ['root', 'alice', 'bob'], [OK, OK, FORBIDDEN]),
+            ('non_existing_scope:file1.png', 'MOCK-POSIX', ['root', 'alice', 'bob'], [NOT_FOUND, FORBIDDEN, FORBIDDEN]),
+            ('alice:non_existing_file.png', 'MOCK-POSIX', ['root', 'alice', 'bob'], [NOT_FOUND, NOT_FOUND, FORBIDDEN]),
+            ('alice:file1.png', 'NON_EXISTING_RSE', ['root', 'alice', 'bob'], [NOT_FOUND, NOT_FOUND, FORBIDDEN]),
+        ],
+        ids=['status normal case', 'status non-existing scope', 'status non-existing DID', 'status non-existing RSE'],
+    )
+    def test_get_request_by_did(self, did, rse, accounts, expected_statuses):
+        scope, name = did.split(':')
+        path = f'/requests/{scope}/{name}/{rse}'
+        for account, expected_status in zip(accounts, expected_statuses):
+            assert _get(path, account).status_code == expected_status
+
+    @pytest.mark.parametrize(
+        ('did', 'rse', 'accounts', 'expected_statuses'),
+        [
+            ('alice:file1.png', 'MOCK-POSIX', ['root', 'alice', 'bob'], [OK, OK, FORBIDDEN]),
+            ('non_existing_scope:file1.png', 'MOCK-POSIX', ['root', 'alice', 'bob'], [NOT_FOUND, FORBIDDEN, FORBIDDEN]),
+            ('alice:non_existing_file.png', 'MOCK-POSIX', ['root', 'alice', 'bob'], [NOT_FOUND, NOT_FOUND, FORBIDDEN]),
+            ('alice:file1.png', 'NON_EXISTING_RSE', ['root', 'alice', 'bob'], [NOT_FOUND, NOT_FOUND, FORBIDDEN]),
+        ],
+        ids=['status normal case', 'status non-existing scope', 'status non-existing DID', 'status non-existing RSE'],
+    )
+    def test_get_request_history_by_did(self, did, rse, accounts, expected_statuses):
+        scope, name = did.split(':')
+        path = f'/requests/history/{scope}/{name}/{rse}'
+        for account, expected_status in zip(accounts, expected_statuses):
+            assert _get(path, account).status_code == expected_status
 
     def test_list_requests(self):
         pytest.skip("Ambiguous: list transfer requests and determine whether records for unreadable DID scopes are filtered or access is denied.")
