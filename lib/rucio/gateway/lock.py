@@ -54,7 +54,7 @@ def get_dataset_locks(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s can not access locks under scope %s. %s' % (issuer, internal_scope, auth_result.message))
+            raise AccessDenied('Account %s cannot retrieve dataset locks of data identifier %s:%s in scope %s. The requested DID either does not exist or is outside the account\'s authorized scope.' % (issuer, scope, name, scope))
 
         locks = lock.get_dataset_locks(scope=internal_scope, name=name, session=session)
 
@@ -102,7 +102,7 @@ def get_dataset_locks_bulk(
         for did in dids_converted:
             auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks_bulk', kwargs={'scope': str(did["scope"])}, session=session)
             if not auth_result.allowed:
-                raise AccessDenied('Account %s can not access locks under scope %s. %s' % (issuer, str(did["scope"]), auth_result.message))
+                raise AccessDenied('Account %s cannot retrieve dataset locks of data identifier %s:%s in scope %s. The requested DID either does not exist or is outside the account\'s authorized scope.' % (issuer, str(did['scope']), did['name'], str(did['scope'])))
 
         for lock_info in lock.get_dataset_locks_bulk(dids_converted, session=session):
             # filter duplicates - same scope, name, rse_id, rule_id
@@ -147,7 +147,7 @@ def get_replica_locks_for_rule_id(
     :return:            List of dicts.
     """
     def access_denied_message() -> str:
-        return 'Rule ID \'%s\' either does not exist or account %s can not access it' % (rule_id, issuer)
+        return 'Account %s cannot retrieve replica locks for replication rule with id %s. The requested rule id either does not exist or is outside the account\'s authorized scope.' % (issuer, rule_id)
 
     with db_session(DatabaseOperationType.READ) as session:
         try:
