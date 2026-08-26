@@ -40,7 +40,7 @@ def is_multi_vo(session: "Session") -> bool:
 
 
 def access_denied_message(rule_id: str, issuer: str) -> str:
-    return 'Account %s cannot retrieve replication rule with id %s. The requested rule id either does not exist or is outside the account\'s authorized scope.' % (issuer, rule_id)
+    return 'Account %s cannot retrieve replication rule with id %s. The requested rule id either does not exist or is outside the account\'s authorized scopes.' % (issuer, rule_id)
 
 
 def add_replication_rule(
@@ -246,7 +246,7 @@ def list_replication_rule_full_history(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_full_history', kwargs={'scope': scope_internal.external, 'name': name}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s cannot retrieve replication rule history of data identifier %s:%s in scope %s. The requested DID either does not exist or is outside the account\'s authorized scope.' % (issuer, scope, name, scope))
+            raise AccessDenied('Account %s cannot retrieve replication rule history of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
         rules = rule.list_rule_full_history(scope_internal, name, session=session)
         for r in rules:
@@ -270,7 +270,7 @@ def list_associated_replication_rules_for_file(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope_internal.external}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s cannot retrieve associated replication rules of data identifier %s:%s in scope %s. The requested DID either does not exist or is outside the account\'s authorized scope.' % (issuer, scope, name, scope))
+            raise AccessDenied('Account %s cannot retrieve associated replication rules of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
         rules = rule.list_associated_rules_for_file(scope=scope_internal, name=name, session=session)
         for r in rules:
