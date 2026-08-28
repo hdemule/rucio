@@ -141,7 +141,7 @@ class TestDID:
         for account, expected_status in zip(accounts, expected_statuses):
             assert _post('/dids/bulkfiles', account, json=payload).status_code == expected_status
 
-    def test_dataset_by_guid(self):
+    def test_get_dataset_by_guid(self):
         pytest.skip("Ambiguous Test: Either Deny if scope associated to dataset is wrong, but if it's ok, maybe verify results are filtered according to the caller's readable scopes; also cover an unknown GUID.")
 
     @pytest.mark.parametrize(
