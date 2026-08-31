@@ -1,14 +1,16 @@
 import logging
 from typing import TYPE_CHECKING, Any
 
-from rucio.core.account import has_account_attribute, list_account_attributes
+from rucio.core.account import has_account_attribute
+from rucio.core.roles import list_account_scopes
+from rucio.db.sqla.constants import PermissionAction
 
 if TYPE_CHECKING:
     from typing import Optional
 
     from sqlalchemy.orm import Session
 
-    from rucio.common.types import InternalAccount
+    from rucio.common.types import InternalAccount, InternalScope
 
 
 def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any], session: "Session") -> "Optional[bool]":
@@ -58,47 +60,33 @@ def _is_root(issuer) -> bool:
     return issuer.external == 'root'
 
 
-def _read_scopes(issuer: "InternalAccount", session: "Session") -> list[str]:
+def _is_admin(issuer: "InternalAccount", session: "Session") -> bool:
     """
-    Returns the list of scopes that the account is allowed to read.
-    This function doesn't check whether the account is an admin or root, it just extracts the 'read_scopes' account attribute.
+    Checks if an account is an admin.
 
     :param issuer: Account identifier which issues the command.
     :param session: The DB session to use
-    :returns: List of scopes that the account is allowed to read.
+    :returns: True if account is admin, otherwise False
     """
-    account_attributes = list_account_attributes(account=issuer, session=session)
-
-    read_scopes_pattern = ""
-
-    for kv in account_attributes:
-        if kv["key"] == "read_scopes":
-            read_scopes_pattern = kv["value"]
-            if type(read_scopes_pattern) is not str:
-                raise ValueError(f"Account attribute are misconfigured, 'read_scopes' must be a string, got {type(read_scopes_pattern)}")
-            break
-
-    # "scope1,scope2,scope3" => ["scope1", "scope2", "scope3"]
-    read_scopes = [s.strip() for s in read_scopes_pattern.split(",") if s.strip()]
-
-    return read_scopes
+    return has_account_attribute(account=issuer, key='admin', session=session)
 
 
-def _can_read_scope(issuer: "InternalAccount", scope: str, session: "Session") -> bool:
+def _can_read_scope(issuer: "InternalAccount", scope_str: str, session: "Session") -> bool:
     """
     Checks if an account can read a scope. Admins and root can read all scopes by default, other accounts can read scopes that are listed in the 'read_scopes' account attribute.
 
+
     :param issuer: Account identifier which issues the command.
-    :param scope: The scope to check.
+    :param scope_str: The scope to check.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer, session):
         return True
 
-    read_scopes = _read_scopes(issuer=issuer, session=session)
+    read_scopes: list[InternalScope] = list_account_scopes(account=issuer, session=session, permission_type=PermissionAction.READ)
 
-    return scope in read_scopes
+    return scope_str in [scope.external for scope in read_scopes if scope.external is not None]
 
 
 def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -122,7 +110,7 @@ def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_parent_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -134,7 +122,7 @@ def perm_list_parent_dids(issuer: "InternalAccount", kwargs: dict[str, Any], ses
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_get_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -146,7 +134,7 @@ def perm_get_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_get_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -158,7 +146,7 @@ def perm_get_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_content(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -171,7 +159,7 @@ def perm_list_content(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_content_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -184,7 +172,7 @@ def perm_list_content_history(issuer: "InternalAccount", kwargs: dict[str, Any],
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -197,7 +185,7 @@ def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_replication_rule_full_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -208,7 +196,7 @@ def perm_list_replication_rule_full_history(issuer: "InternalAccount", kwargs: d
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_get_replication_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -219,7 +207,7 @@ def perm_get_replication_rule(issuer: "InternalAccount", kwargs: dict[str, Any],
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_examine_replication_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -230,7 +218,7 @@ def perm_examine_replication_rule(issuer: "InternalAccount", kwargs: dict[str, A
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_get_dataset_locks(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -241,7 +229,7 @@ def perm_get_dataset_locks(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_associated_replication_rules_for_file(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -252,7 +240,7 @@ def perm_list_associated_replication_rules_for_file(issuer: "InternalAccount", k
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_dataset_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -263,7 +251,7 @@ def perm_list_dataset_replicas(issuer: "InternalAccount", kwargs: dict[str, Any]
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -274,7 +262,7 @@ def perm_list_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], sessio
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_list_dataset_replicas_vp(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -285,7 +273,7 @@ def perm_list_dataset_replicas_vp(issuer: "InternalAccount", kwargs: dict[str, A
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
 
 
 def perm_replica_locks_for_rule_id(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -296,4 +284,4 @@ def perm_replica_locks_for_rule_id(issuer: "InternalAccount", kwargs: dict[str, 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _can_read_scope(issuer=issuer, scope=str(kwargs.get('scope')), session=session)
+    return _can_read_scope(issuer=issuer, scope_str=str(kwargs.get('scope')), session=session)
