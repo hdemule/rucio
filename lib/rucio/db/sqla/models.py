@@ -44,6 +44,7 @@ from rucio.db.sqla.constants import (
     LifetimeExceptionsState,
     LockState,
     OpenDataDIDState,
+    PermissionAction,
     ReplicaState,
     RequestState,
     RequestType,
@@ -404,7 +405,8 @@ class Roles(BASE, ModelBase):
     """Represents a role for Rule-Based Access Control (RBAC)"""
     __tablename__ = 'roles'
     role: Mapped[str] = mapped_column(String(255))
-    _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),)
+    _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'))
 
 
 class AccountRoleAssociation(BASE, ModelBase):
@@ -414,27 +416,25 @@ class AccountRoleAssociation(BASE, ModelBase):
     role: Mapped[str] = mapped_column(String(255))
     _table_args = (PrimaryKeyConstraint('account', 'role', name='ACCOUNT_ROLE_MAP_PK'),
                    ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_ROLE_MAP_ACCOUNT_FK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ACCOUNT_ROLE_MAP_ROLE_FK'))
-
-
-class Permissions(BASE, ModelBase):
-    """Represents a permission for Rule-Based Access Control (RBAC)"""
-    __tablename__ = 'permissions'
-    permission: Mapped[str] = mapped_column(String(255))
-    action: Mapped[str] = mapped_column(String(255))
-    scope: Mapped[InternalScope] = mapped_column(InternalScopeString(common_schema.get_schema_value('SCOPE_LENGTH')))
-    _table_args = (PrimaryKeyConstraint('permission', name='PERMISSIONS_PK'),
-                   ForeignKeyConstraint(['scope'], ['scopes.scope'], name='PERMISSIONS_SCOPE_FK'))
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ACCOUNT_ROLE_MAP_ROLE_FK'),
+                   CheckConstraint('ACCOUNT IS NOT NULL', name='ACCOUNT_ROLE_MAP_ACCOUNT_NN'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ACCOUNT_ROLE_MAP_ROLE_NN'))
 
 
 class RolePermissionAssociation(BASE, ModelBase):
-    """Represents a map role-permission for Rule-Based Access Control (RBAC)"""
+    """Represents a role's permission (scope + action) for Rule-Based Access Control (RBAC)"""
     __tablename__ = 'role_permission_map'
     role: Mapped[str] = mapped_column(String(255))
-    permission: Mapped[str] = mapped_column(String(255))
-    _table_args = (PrimaryKeyConstraint('role', 'permission', name='ROLE_PERMISSION_MAP_PK'),
+    scope: Mapped[InternalScope] = mapped_column(InternalScopeString(common_schema.get_schema_value('SCOPE_LENGTH')))
+    action: Mapped[PermissionAction] = mapped_column(Enum(PermissionAction, name='ROLE_PERMISSION_MAP_ACTION_CHK',
+                                                          create_constraint=True,
+                                                          values_callable=lambda obj: [e.value for e in obj]))
+    _table_args = (PrimaryKeyConstraint('role', 'scope', 'action', name='ROLE_PERMISSION_MAP_PK'),
                    ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK'),
-                   ForeignKeyConstraint(['permission'], ['permissions.permission'], name='ROLE_PERMISSION_MAP_PERMISSION_FK'))
+                   ForeignKeyConstraint(['scope'], ['scopes.scope'], name='ROLE_PERMISSION_MAP_SCOPE_FK'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('SCOPE IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_NN'),
+                   CheckConstraint('ACTION IS NOT NULL', name='ROLE_PERMISSION_MAP_ACTION_NN'))
 
 
 class DataIdentifier(BASE, ModelBase):

@@ -114,6 +114,11 @@ class LifetimeExceptionsState(Enum):
     WAITING = 'W'
 
 
+class PermissionAction(Enum):
+    READ = 'READ'
+    WRITE = 'WRITE'
+
+
 class LockState(Enum):
     REPLICATING = 'R'
     OK = 'O'
