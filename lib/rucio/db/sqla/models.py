@@ -36,6 +36,7 @@ from rucio.db.sqla.constants import (
     AccountType,
     BadFilesStatus,
     BadPFNStatus,
+    DatabaseOperationType,
     DIDAvailability,
     DIDReEvaluation,
     DIDType,
@@ -44,7 +45,6 @@ from rucio.db.sqla.constants import (
     LifetimeExceptionsState,
     LockState,
     OpenDataDIDState,
-    PermissionAction,
     ReplicaState,
     RequestState,
     RequestType,
@@ -422,19 +422,19 @@ class AccountRoleAssociation(BASE, ModelBase):
 
 
 class RolePermissionAssociation(BASE, ModelBase):
-    """Represents a role's permission (scope + action) for Rule-Based Access Control (RBAC)"""
+    """Represents a role's permission (scope + operation) for Rule-Based Access Control (RBAC)"""
     __tablename__ = 'role_permission_map'
     role: Mapped[str] = mapped_column(String(255))
     scope: Mapped[InternalScope] = mapped_column(InternalScopeString(common_schema.get_schema_value('SCOPE_LENGTH')))
-    action: Mapped[PermissionAction] = mapped_column(Enum(PermissionAction, name='ROLE_PERMISSION_MAP_ACTION_CHK',
-                                                          create_constraint=True,
-                                                          values_callable=lambda obj: [e.value for e in obj]))
-    _table_args = (PrimaryKeyConstraint('role', 'scope', 'action', name='ROLE_PERMISSION_MAP_PK'),
+    operation: Mapped[DatabaseOperationType] = mapped_column(Enum(DatabaseOperationType, name='ROLE_PERMISSION_MAP_OPERATION_CHK',
+                                                                  create_constraint=True,
+                                                                  values_callable=lambda obj: [e.value for e in obj]))
+    _table_args = (PrimaryKeyConstraint('role', 'scope', 'operation', name='ROLE_PERMISSION_MAP_PK'),
                    ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK'),
                    ForeignKeyConstraint(['scope'], ['scopes.scope'], name='ROLE_PERMISSION_MAP_SCOPE_FK'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
                    CheckConstraint('SCOPE IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_NN'),
-                   CheckConstraint('ACTION IS NOT NULL', name='ROLE_PERMISSION_MAP_ACTION_NN'))
+                   CheckConstraint('OPERATION IS NOT NULL', name='ROLE_PERMISSION_MAP_OPERATION_NN'))
 
 
 class DataIdentifier(BASE, ModelBase):
