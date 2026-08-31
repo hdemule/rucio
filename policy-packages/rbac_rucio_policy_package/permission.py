@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any
 
 from rucio.core.account import has_account_attribute
 from rucio.core.roles import list_account_scopes
-from rucio.db.sqla.constants import PermissionAction
+from rucio.db.sqla.constants import DatabaseOperationType
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -84,7 +84,7 @@ def _can_read_scope(issuer: "InternalAccount", scope_str: str, session: "Session
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
 
-    read_scopes: list[InternalScope] = list_account_scopes(account=issuer, session=session, permission_type=PermissionAction.READ)
+    read_scopes: list[InternalScope] = list_account_scopes(account=issuer, session=session, permission_type=DatabaseOperationType.READ)
 
     return scope_str in [scope.external for scope in read_scopes if scope.external is not None]
 
