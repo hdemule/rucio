@@ -53,15 +53,15 @@ def main() -> None:
         permissions = (
             session.query(models.RolePermissionAssociation)
             .filter(models.RolePermissionAssociation.role.in_(roles))
-            .order_by(models.RolePermissionAssociation.role, models.RolePermissionAssociation.scope, models.RolePermissionAssociation.action)
+            .order_by(models.RolePermissionAssociation.role, models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
             .all()
         )
 
         print()
         print(f'Permissions granted via those roles for account {args.account}:')
         print_table(
-            [(rp.role, rp.action, str(rp.scope)) for rp in permissions],
-            headers=['ROLE', 'ACTION', 'SCOPE'],
+            [(rp.role, rp.operation, str(rp.scope)) for rp in permissions],
+            headers=['ROLE', 'OPERATION', 'SCOPE'],
         )
 
 
