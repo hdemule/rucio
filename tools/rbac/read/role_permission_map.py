@@ -28,10 +28,10 @@ def main() -> None:
     with read_session() as session:
         mappings = (
             session.query(models.RolePermissionAssociation)
-            .order_by(models.RolePermissionAssociation.role, models.RolePermissionAssociation.scope, models.RolePermissionAssociation.action)
+            .order_by(models.RolePermissionAssociation.role, models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
             .all()
         )
-        print_table([(m.role, m.action, str(m.scope)) for m in mappings], headers=['ROLE', 'ACTION', 'SCOPE'])
+        print_table([(m.role, m.operation, str(m.scope)) for m in mappings], headers=['ROLE', 'OPERATION', 'SCOPE'])
 
 
 if __name__ == '__main__':
