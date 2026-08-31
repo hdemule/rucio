@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from rucio.common.constants import SUPPORTED_PROTOCOLS_LITERAL
-    from rucio.db.sqla.constants import AccountType, DIDType, IdentityType, PermissionAction, ReplicaState, RequestState, RequestType, RSEType
+    from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RSEType
 
 
 class InternalType:
@@ -339,7 +339,7 @@ class IdentityDict(TypedDict):
 
 class PermissionDict(TypedDict):
     scope: InternalScope
-    action: "PermissionAction"
+    operation: "DatabaseOperationType"
 
 
 class UsageDict(TypedDict):
