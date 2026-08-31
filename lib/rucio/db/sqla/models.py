@@ -400,6 +400,43 @@ class Scope(BASE, ModelBase):
                    CheckConstraint('ACCOUNT IS NOT NULL', name='SCOPES_ACCOUNT_NN'))
 
 
+class Roles(BASE, ModelBase):
+    """Represents a role for Rule-Based Access Control (RBAC)"""
+    __tablename__ = 'roles'
+    role: Mapped[str] = mapped_column(String(255))
+    _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),)
+
+
+class AccountRoleAssociation(BASE, ModelBase):
+    """Represents a map account-role for Rule-Based Access Control (RBAC)"""
+    __tablename__ = 'account_role_map'
+    account: Mapped[InternalAccount] = mapped_column(InternalAccountString(common_schema.get_schema_value('ACCOUNT_LENGTH')))
+    role: Mapped[str] = mapped_column(String(255))
+    _table_args = (PrimaryKeyConstraint('account', 'role', name='ACCOUNT_ROLE_MAP_PK'),
+                   ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_ROLE_MAP_ACCOUNT_FK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ACCOUNT_ROLE_MAP_ROLE_FK'))
+
+
+class Permissions(BASE, ModelBase):
+    """Represents a permission for Rule-Based Access Control (RBAC)"""
+    __tablename__ = 'permissions'
+    permission: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(255))
+    scope: Mapped[InternalScope] = mapped_column(InternalScopeString(common_schema.get_schema_value('SCOPE_LENGTH')))
+    _table_args = (PrimaryKeyConstraint('permission', name='PERMISSIONS_PK'),
+                   ForeignKeyConstraint(['scope'], ['scopes.scope'], name='PERMISSIONS_SCOPE_FK'))
+
+
+class RolePermissionAssociation(BASE, ModelBase):
+    """Represents a map role-permission for Rule-Based Access Control (RBAC)"""
+    __tablename__ = 'role_permission_map'
+    role: Mapped[str] = mapped_column(String(255))
+    permission: Mapped[str] = mapped_column(String(255))
+    _table_args = (PrimaryKeyConstraint('role', 'permission', name='ROLE_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK'),
+                   ForeignKeyConstraint(['permission'], ['permissions.permission'], name='ROLE_PERMISSION_MAP_PERMISSION_FK'))
+
+
 class DataIdentifier(BASE, ModelBase):
     """Represents a dataset"""
     __tablename__ = 'dids'
