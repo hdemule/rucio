@@ -16,8 +16,8 @@
 """Add or delete a row in the `role_permission_map` table.
 
 Usage:
-    python role_permission_map.py --add scientist READ some_scope
-    python role_permission_map.py --delete scientist READ some_scope
+    python role_permission_map.py --add scientist read some_scope
+    python role_permission_map.py --delete scientist read some_scope
 """
 
 import argparse
@@ -35,26 +35,26 @@ from rucio.db.sqla import models  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--add', nargs=3, metavar=('ROLE', 'ACTION', 'SCOPE'), help='Role, action and scope to associate')
-    group.add_argument('--delete', nargs=3, metavar=('ROLE', 'ACTION', 'SCOPE'), help='Role/action/scope association to remove')
+    group.add_argument('--add', nargs=3, metavar=('ROLE', 'OPERATION', 'SCOPE'), help='Role, operation and scope to associate')
+    group.add_argument('--delete', nargs=3, metavar=('ROLE', 'OPERATION', 'SCOPE'), help='Role/operation/scope association to remove')
     parser.add_argument('--vo', default=DEFAULT_VO, help=f'VO of the scope (default: {DEFAULT_VO})')
     args = parser.parse_args()
 
     with write_session() as session:
         if args.add:
-            role, action, scope_name = args.add
+            role, operation, scope_name = args.add
             scope = InternalScope(scope_name, vo=args.vo)
-            models.RolePermissionAssociation(role=role, action=action, scope=scope).save(flush=True, session=session)
-            print(f'Linked role {role} -> {action} on {scope_name}')
+            models.RolePermissionAssociation(role=role, operation=operation, scope=scope).save(flush=True, session=session)
+            print(f'Linked role {role} -> {operation} on {scope_name}')
         else:
-            role, action, scope_name = args.delete
+            role, operation, scope_name = args.delete
             scope = InternalScope(scope_name, vo=args.vo)
-            mapping = session.get(models.RolePermissionAssociation, (role, scope, action))
+            mapping = session.get(models.RolePermissionAssociation, (role, scope, operation))
             if mapping is None:
-                print(f'No mapping found for role {role} -> {action} on {scope_name}')
+                print(f'No mapping found for role {role} -> {operation} on {scope_name}')
                 return
             mapping.delete(session=session)
-            print(f'Removed role {role} -> {action} on {scope_name}')
+            print(f'Removed role {role} -> {operation} on {scope_name}')
 
 
 if __name__ == '__main__':
