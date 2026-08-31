@@ -22,16 +22,16 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from rucio.common.types import InternalAccount, InternalScope, PermissionDict
-    from rucio.db.sqla.constants import PermissionAction
+    from rucio.db.sqla.constants import DatabaseOperationType
 
 
 def list_roles(account: "InternalAccount", session: "Session"):
     pass
 
 
-def list_account_permissions(account: "InternalAccount", session: "Session", permission_type: Optional["PermissionAction"] = None) -> list["PermissionDict"]:
+def list_account_permissions(account: "InternalAccount", session: "Session", permission_type: Optional["DatabaseOperationType"] = None) -> list["PermissionDict"]:
     """
-    List all permissions (scope + action) granted to an account via its roles.
+    List all permissions (scope + operation) granted to an account via its roles.
 
     :param account: The account to list permissions for.
     :param session: The database session in which to perform the query.
@@ -39,9 +39,9 @@ def list_account_permissions(account: "InternalAccount", session: "Session", per
     :return: A list of permissions granted to the account.
     """
     # Join instead of an IN-subquery so the planner can use the PKs on both mapping tables directly,
-    # and dedupe since two different roles can grant the same (scope, action) pair.
+    # and dedupe since two different roles can grant the same (scope, operation) pair.
     permissions_query = (
-        select(models.RolePermissionAssociation.scope, models.RolePermissionAssociation.action)
+        select(models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
         .join(models.AccountRoleAssociation, models.AccountRoleAssociation.role == models.RolePermissionAssociation.role)
         .where(models.AccountRoleAssociation.account == account)
         .distinct()
@@ -49,13 +49,13 @@ def list_account_permissions(account: "InternalAccount", session: "Session", per
 
     # If a specific permission type is provided, filter the permissions query
     if permission_type:
-        permissions_query = permissions_query.where(models.RolePermissionAssociation.action == permission_type)
+        permissions_query = permissions_query.where(models.RolePermissionAssociation.operation == permission_type)
 
     # Execute the query and return the results
     return [cast("PermissionDict", row._asdict()) for row in session.execute(permissions_query).all()]
 
 
-def list_account_scopes(account: "InternalAccount", session: "Session", permission_type: "PermissionAction") -> list["InternalScope"]:
+def list_account_scopes(account: "InternalAccount", session: "Session", permission_type: "DatabaseOperationType") -> list["InternalScope"]:
     """
     List all scopes that the account is allowed to access based on its roles and the specified permission type.
 
@@ -70,7 +70,7 @@ def list_account_scopes(account: "InternalAccount", session: "Session", permissi
         .where(
             and_(
                 models.AccountRoleAssociation.account == account,
-                models.RolePermissionAssociation.action == permission_type,
+                models.RolePermissionAssociation.operation == permission_type,
             )
         )
         .distinct()
