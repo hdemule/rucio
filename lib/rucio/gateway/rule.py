@@ -268,7 +268,7 @@ def list_associated_replication_rules_for_file(
     """
     scope_internal = InternalScope(scope, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
-        auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope_internal.external}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot retrieve associated replication rules of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
