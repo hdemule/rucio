@@ -114,12 +114,6 @@ class LifetimeExceptionsState(Enum):
     WAITING = 'W'
 
 
-# Should we use DatabaseOperationType instead?
-class PermissionAction(Enum):
-    READ = 'READ'
-    WRITE = 'WRITE'
-
-
 class LockState(Enum):
     REPLICATING = 'R'
     OK = 'O'
