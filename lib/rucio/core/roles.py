@@ -29,7 +29,7 @@ def list_roles(account: "InternalAccount", session: "Session"):
     pass
 
 
-def list_account_permissions(account: "InternalAccount", session: "Session", permission_type: Optional["DatabaseOperationType"] = None) -> list["PermissionDict"]:
+def list_role_permissions(account: "InternalAccount", session: "Session", permission_type: Optional["DatabaseOperationType"] = None) -> list["PermissionDict"]:
     """
     List all permissions (scope + operation) granted to an account via its roles.
 
@@ -55,7 +55,7 @@ def list_account_permissions(account: "InternalAccount", session: "Session", per
     return [cast("PermissionDict", row._asdict()) for row in session.execute(permissions_query).all()]
 
 
-def list_account_scopes(account: "InternalAccount", session: "Session", permission_type: "DatabaseOperationType") -> list["InternalScope"]:
+def list_role_scopes(account: "InternalAccount", session: "Session", permission_type: "DatabaseOperationType") -> list["InternalScope"]:
     """
     List all scopes that the account is allowed to access based on its roles and the specified permission type.
 
@@ -76,8 +76,5 @@ def list_account_scopes(account: "InternalAccount", session: "Session", permissi
         .distinct()
     )
     res = session.execute(query).fetchall()
-
-    import logging
-    logging.log(logging.ERROR, "[HUGO] list_account_scopes, account: %s, permission_type: %s. RESULT %s", account, permission_type, [row.scope for row in res])
 
     return [row.scope for row in res]
