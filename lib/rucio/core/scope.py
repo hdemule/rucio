@@ -21,9 +21,10 @@ from sqlalchemy.exc import IntegrityError
 
 import rucio.core.account as account_core
 from rucio.common.exception import AccountNotFound, Duplicate, RucioException, ScopeNotFound, VONotFound
+from rucio.core import roles
 from rucio.core.vo import vo_exists
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import AccountStatus, ScopeStatus
+from rucio.db.sqla.constants import AccountStatus, DatabaseOperationType, ScopeStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -124,7 +125,7 @@ def list_scopes(session: "Session", filter_: Optional[dict[str, Any]] = None) ->
     return list(session.execute(stmt).scalars().all())
 
 
-def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, *, session: "Session") -> "Iterable[dict[str, Any]]":
+def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[str, Any]] = None, *, session: "Session") -> "Iterable[dict[str, Any]]":
     """
     Lists all scopes.
     :param filter_: Dictionary of attributes by which the input data should be filtered
@@ -150,6 +151,16 @@ def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, *, sessio
                 stmt = stmt.where(
                     models.Scope.scope == filter_['scope']
                 )
+
+    # RBAC Filtering
+    stmt = roles.filter_query_with_ownership(
+        stmt,
+        account=account,
+        operation=DatabaseOperationType.READ,
+        scope_column=models.Scope.scope,
+        owner_column=models.Scope.account,
+    )
+
     scopes = []
     for scope, account in session.execute(stmt):
         scopes.append({
