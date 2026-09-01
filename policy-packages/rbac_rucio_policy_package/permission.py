@@ -52,7 +52,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
     if handler is None:
         return None
 
-    logging.log(logging.ERROR, "[HUGO] HAS_PERMISSION, issuer: %s, action: %s, kwargs: %s, handler: %s", issuer, action, kwargs, handler.__name__)
+    logging.log(logging.ERROR, "[POLICY PACKAGE] HAS_PERMISSION, issuer: %s, action: %s, kwargs: %s, handler: %s", issuer, action, kwargs, handler.__name__)
 
     return handler(issuer=issuer, kwargs=kwargs, session=session)
 
@@ -102,7 +102,7 @@ def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer, session)
 
 
 def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
