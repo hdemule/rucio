@@ -1,8 +1,8 @@
 import logging
 from typing import TYPE_CHECKING, Any
 
+from rucio.core import roles
 from rucio.core.account import has_account_attribute
-from rucio.core.roles import list_role_scopes
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla.constants import DatabaseOperationType
 
@@ -88,9 +88,12 @@ def _can_read_scope(issuer: "InternalAccount", scope: "InternalScope", session: 
     if is_scope_owner(scope=scope, account=issuer, session=session):
         return True
 
-    read_scopes: list[InternalScope] = list_role_scopes(account=issuer, session=session, permission_type=DatabaseOperationType.READ)
-
-    return scope in read_scopes
+    return roles.has_scope_permission(
+        account=issuer,
+        scope=scope,
+        operation=DatabaseOperationType.READ,
+        session=session,
+    )
 
 
 def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
