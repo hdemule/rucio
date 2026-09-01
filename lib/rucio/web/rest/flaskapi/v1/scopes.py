@@ -210,7 +210,7 @@ class ScopeOwnershipList(ErrorHandlingMethodView):
           406:
             description: "Not acceptable"
         """
-        scopes = list_scopes_with_account(vo=request.environ['vo'])
+        scopes = list_scopes_with_account(account=request.environ['issuer'], vo=request.environ['vo'])
         res = []
         for dictionary in scopes:
             res.append(dictionary)
