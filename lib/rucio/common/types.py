@@ -337,11 +337,6 @@ class IdentityDict(TypedDict):
     email: str
 
 
-class PermissionDict(TypedDict):
-    scope: InternalScope
-    operation: "DatabaseOperationType"
-
-
 class UsageDict(TypedDict):
     bytes: int
     files: int
