@@ -26,6 +26,12 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
     :returns: True/False if this package handles the action, None to defer to the generic policy
     """
 
+    # Add a flag check to whether to use RBAC-based permissions
+    # Something like:
+    # if not config.rbac_enabled:
+    #     return None  # generic way of working
+    # Or if this file will be merged with the generic policy package, just return True for read operations if RBAC is not enabled
+
     perm = {
         'list_dids': perm_list_dids,
         'list_parent_dids': perm_list_parent_dids,
