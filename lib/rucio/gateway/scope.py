@@ -49,7 +49,7 @@ def list_scopes(filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) 
         return [scope.external for scope in core_scope.list_scopes(filter_=filter_, session=session)]
 
 
-def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> 'Generator[dict[str, Any]]':
+def list_scopes_with_account(account: str, filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> 'Generator[dict[str, Any]]':
     """
     Lists all scopes.
 
@@ -66,7 +66,8 @@ def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, vo: str =
         filter_['scope'] = InternalScope(scope='*', vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        scopes = core_scope.list_scopes_with_account(filter_=filter_, session=session)
+        internal_account = InternalAccount(account, vo=vo)
+        scopes = core_scope.list_scopes_with_account(account=internal_account, filter_=filter_, session=session)
         for scope in scopes:
             yield gateway_update_return_dict(scope, session=session)
 
