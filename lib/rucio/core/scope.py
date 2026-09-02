@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 
 import rucio.core.account as account_core
 from rucio.common.exception import AccountNotFound, Duplicate, RucioException, ScopeNotFound, VONotFound
-from rucio.core import roles
+from rucio.core import role
 from rucio.core.vo import vo_exists
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import AccountStatus, DatabaseOperationType, ScopeStatus
@@ -153,7 +153,7 @@ def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[
                 )
 
     # RBAC Filtering
-    stmt = roles.filter_query_with_ownership(
+    stmt = role.filter_query_with_ownership(
         stmt,
         account=account,
         operation=DatabaseOperationType.READ,
