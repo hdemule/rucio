@@ -1,9 +1,9 @@
 import logging
 from typing import TYPE_CHECKING, Any
 
-from rucio.core import roles
+from rucio.core import role as role_core
+from rucio.core import scope as scope_core
 from rucio.core.account import has_account_attribute
-from rucio.core.scope import is_scope_owner
 from rucio.db.sqla.constants import DatabaseOperationType
 
 if TYPE_CHECKING:
@@ -92,10 +92,10 @@ def _can_read_scope(issuer: "InternalAccount", scope: "InternalScope", session: 
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
 
-    if is_scope_owner(scope=scope, account=issuer, session=session):
+    if scope_core.is_scope_owner(scope=scope, account=issuer, session=session):
         return True
 
-    return roles.has_scope_permission(
+    return role_core.has_scope_permission(
         account=issuer,
         scope=scope,
         operation=DatabaseOperationType.READ,
