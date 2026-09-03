@@ -92,8 +92,8 @@ def filter_query_by_scope_access(
     *,
     account: "InternalAccount",
     session: "Session",
-    operation: "DatabaseOperationType",
     scope_column: Any,
+    operation: "DatabaseOperationType" = DatabaseOperationType.READ,
 ) -> "Select":
     """
     Add an RBAC + ownership predicate to a SQLAlchemy SELECT statement.
@@ -107,8 +107,8 @@ def filter_query_by_scope_access(
 
     :param query: The original SQLAlchemy SELECT statement.
     :param account: The account performing the operation.
-    :param operation: The operation (READ, WRITE, etc.).
     :param scope_column: The column in the query that represents the scope.
+    :param operation: The operation (READ, WRITE, etc.).
     :return: A new SELECT statement with the RBAC+ownership condition added.
     """
 
