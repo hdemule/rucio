@@ -1476,7 +1476,7 @@ def list_content(
     # RBAC Filtering
     if account is not None:
         stmt = role.filter_query_by_scope_access(
-            stmt=stmt,
+            query=stmt,
             account=account,
             session=session,
             operation=DatabaseOperationType.READ,

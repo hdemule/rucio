@@ -154,7 +154,7 @@ def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[
 
     # RBAC Filtering
     stmt = role.filter_query_by_scope_access(
-        stmt,
+        query=stmt,
         account=account,
         session=session,
         operation=DatabaseOperationType.READ,

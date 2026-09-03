@@ -88,7 +88,7 @@ def _ownership_scope_access_condition(
 
 
 def filter_query_by_scope_access(
-    stmt: "Select",
+    query: "Select",
     *,
     account: "InternalAccount",
     session: "Session",
@@ -105,7 +105,7 @@ def filter_query_by_scope_access(
     Scope ownership is resolved from the `scopes` table, allowing this to be
     used with tables that contain a scope but no direct owner column.
 
-    :param stmt: The original SQLAlchemy SELECT statement.
+    :param query: The original SQLAlchemy SELECT statement.
     :param account: The account performing the operation.
     :param operation: The operation (READ, WRITE, etc.).
     :param scope_column: The column in the query that represents the scope.
@@ -113,7 +113,7 @@ def filter_query_by_scope_access(
     """
 
     if account.external == 'root' or has_account_attribute(account=account, key='admin', session=session):
-        return stmt
+        return query
 
     ownership_condition = _ownership_scope_access_condition(
         account=account,
@@ -126,7 +126,7 @@ def filter_query_by_scope_access(
         scope_column=scope_column,
     )
 
-    return stmt.where(
+    return query.where(
         or_(ownership_condition, rbac_condition)
     )
 
