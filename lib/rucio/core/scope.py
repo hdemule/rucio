@@ -157,7 +157,6 @@ def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[
         query=stmt,
         account=account,
         session=session,
-        operation=DatabaseOperationType.READ,
         scope_column=models.Scope.scope,
     )
 
