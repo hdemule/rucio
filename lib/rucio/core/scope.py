@@ -156,9 +156,9 @@ def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[
     stmt = role.filter_query_by_scope_access(
         stmt,
         account=account,
+        session=session,
         operation=DatabaseOperationType.READ,
         scope_column=models.Scope.scope,
-        owner_column=models.Scope.account,
     )
 
     scopes = []
