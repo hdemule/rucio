@@ -1479,7 +1479,6 @@ def list_content(
             query=stmt,
             account=account,
             session=session,
-            operation=DatabaseOperationType.READ,
             scope_column=models.DataIdentifierAssociation.child_scope,
         )
 
