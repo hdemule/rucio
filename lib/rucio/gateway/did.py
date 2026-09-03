@@ -68,7 +68,7 @@ def list_dids(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_dids', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scope.' % (issuer, scope))
+            raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope))
 
         result = did.list_dids(scope=internal_scope, filters=filters, did_type=did_type, ignore_case=ignore_case,
                                limit=limit, offset=offset, long=long, recursive=recursive, session=session)
