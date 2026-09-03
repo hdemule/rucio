@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from rucio.db.sqla.constants import DatabaseOperationType
 
 
-def scope_permission_condition(
+def _scope_access_condition(
     account: "InternalAccount",
     operation: "DatabaseOperationType",
     scope_column: Any,
@@ -60,39 +60,7 @@ def scope_permission_condition(
     )
 
 
-def filter_query(
-    stmt: "Select",
-    *,
-    account: "InternalAccount",
-    operation: "DatabaseOperationType",
-    scope_column: Any,
-) -> "Select":
-    """
-    Add an RBAC scope predicate to a SQLAlchemy SELECT statement.
-
-    The returned statement will only return rows whose scope the account
-    is allowed to access for the given operation (via RBAC).
-
-    This does NOT consider ownership. If you need "RBAC OR ownership",
-    use filter_query_with_ownership() or build your own condition using
-    scope_permission_condition() and or_().
-
-    :param stmt: The original SQLAlchemy SELECT statement.
-    :param account: The account performing the operation.
-    :param operation: The operation (READ, WRITE, etc.).
-    :param scope_column: The column in the query that represents the scope.
-    :return: A new SELECT statement with the RBAC condition added.
-    """
-    return stmt.where(
-        scope_permission_condition(
-            account=account,
-            operation=operation,
-            scope_column=scope_column,
-        )
-    )
-
-
-def filter_query_with_ownership(
+def filter_query_by_scope_access(
     stmt: "Select",
     *,
     account: "InternalAccount",
@@ -123,7 +91,7 @@ def filter_query_with_ownership(
 
     ownership_condition = owner_column == account
 
-    rbac_condition = scope_permission_condition(
+    rbac_condition = _scope_access_condition(
         account=account,
         operation=operation,
         scope_column=scope_column,
