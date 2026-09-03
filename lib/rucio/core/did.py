@@ -30,12 +30,12 @@ from rucio.common import exception
 from rucio.common.config import config_get_bool, config_get_int
 from rucio.common.constants import DEFAULT_VO
 from rucio.common.utils import chunks, is_archive
-from rucio.core import did_meta_plugins
+from rucio.core import did_meta_plugins, role
 from rucio.core.message import add_message, add_messages
 from rucio.core.monitor import MetricManager
 from rucio.core.naming_convention import validate_name
 from rucio.db.sqla import filter_thread_work, models
-from rucio.db.sqla.constants import BadFilesStatus, DIDAvailability, DIDReEvaluation, DIDType, RuleState
+from rucio.db.sqla.constants import BadFilesStatus, DatabaseOperationType, DIDAvailability, DIDReEvaluation, DIDType, RuleState
 from rucio.db.sqla.session import read_session, stream_session, transactional_session
 from rucio.db.sqla.util import temp_table_mngr
 
@@ -1451,11 +1451,13 @@ def list_content(
     scope: "InternalScope",
     name: str,
     *,
-    session: "Session"
+    account: "InternalAccount | None" = None,
+    session: "Session",
 ) -> "Iterator[dict[str, Any]]":
     """
     List data identifier contents.
 
+    :param account: The issuer's account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param session: The database session in use.
@@ -1470,6 +1472,17 @@ def list_content(
         and_(models.DataIdentifierAssociation.scope == scope,
              models.DataIdentifierAssociation.name == name)
     )
+
+    # RBAC Filtering
+    if account is not None:
+        stmt = role.filter_query_by_scope_access(
+            stmt=stmt,
+            account=account,
+            session=session,
+            operation=DatabaseOperationType.READ,
+            scope_column=models.DataIdentifierAssociation.child_scope,
+        )
+
     children_found = False
     for tmp_did in session.execute(stmt).yield_per(5).scalars():
         children_found = True
