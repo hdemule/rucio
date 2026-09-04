@@ -21,7 +21,6 @@ from sqlalchemy.exc import IntegrityError
 
 import rucio.core.account as account_core
 from rucio.common.exception import AccountNotFound, Duplicate, RucioException, ScopeNotFound, VONotFound
-from rucio.core import role
 from rucio.core.vo import vo_exists
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import AccountStatus, DatabaseOperationType, ScopeStatus
@@ -151,14 +150,6 @@ def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[
                 stmt = stmt.where(
                     models.Scope.scope == filter_['scope']
                 )
-
-    # RBAC Filtering
-    stmt = role.filter_query_by_scope_access(
-        query=stmt,
-        account=account,
-        session=session,
-        scope_column=models.Scope.scope,
-    )
 
     scopes = []
     for scope, account in session.execute(stmt):
