@@ -21,7 +21,7 @@ from rucio.common.exception import AccessDenied, InvalidObject, RucioException
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import gateway_update_return_dict
-from rucio.core import did, naming_convention
+from rucio.core import did, naming_convention, role
 from rucio.core import meta_conventions as meta_convention_core
 from rucio.core.rse import get_rse_id
 from rucio.db.sqla.constants import DatabaseOperationType, DIDType
@@ -379,7 +379,7 @@ def list_content(
             raise AccessDenied('Account %s cannot list content of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
         dids = did.list_content(account=internal_issuer, scope=internal_scope, name=name, session=session)
-        for d in dids:
+        for d in role.filter_iterable_by_scope_access(dids, account=internal_issuer, session=session):
             yield gateway_update_return_dict(d, session=session)
 
 
