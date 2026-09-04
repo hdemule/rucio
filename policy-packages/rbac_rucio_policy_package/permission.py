@@ -95,7 +95,7 @@ def _can_read_scope(issuer: "InternalAccount", scope: "InternalScope", session: 
     if scope_core.is_scope_owner(scope=scope, account=issuer, session=session):
         return True
 
-    return role_core.has_scope_permission(
+    return role_core.has_scope_access(
         account=issuer,
         scope=scope,
         operation=DatabaseOperationType.READ,

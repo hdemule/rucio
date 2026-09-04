@@ -20,6 +20,7 @@ from rucio.common.exception import AccessDenied
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import gateway_update_return_dict
+from rucio.core import role
 from rucio.core import scope as core_scope
 from rucio.db.sqla.constants import DatabaseOperationType
 from rucio.db.sqla.session import db_session
@@ -68,7 +69,7 @@ def list_scopes_with_account(account: str, filter_: Optional[dict[str, Any]] = N
     with db_session(DatabaseOperationType.READ) as session:
         internal_account = InternalAccount(account, vo=vo)
         scopes = core_scope.list_scopes_with_account(account=internal_account, filter_=filter_, session=session)
-        for scope in scopes:
+        for scope in role.filter_iterable_by_scope_access(items=scopes, account=internal_account, session=session):
             yield gateway_update_return_dict(scope, session=session)
 
 
