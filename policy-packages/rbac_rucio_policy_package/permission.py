@@ -52,7 +52,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_dataset_replicas_bulk': perm_list_dataset_replicas,  # Bulk dataset replicas retrieval uses the same permission check as single dataset replicas retrieval
         'list_dataset_replicas_vp': perm_list_dataset_replicas_vp,
         'get_replica_locks_for_rule_id': perm_replica_locks_for_rule_id,
-        'know_if_rule_exists': perm_default,  # Considered an admin privilege.
+        'know_if_rule_exists': perm_know_if_rule_exists,  # Considered an admin privilege.
         }
 
     handler = perm.get(action)
@@ -293,6 +293,17 @@ def perm_list_dataset_replicas_vp(issuer: "InternalAccount", kwargs: dict[str, A
 def perm_replica_locks_for_rule_id(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can get the replica locks for a rule_id.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_scope(issuer=issuer, scope=kwargs['scope'], session=session)
+
+
+def perm_know_if_rule_exists(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can know if a rule exists.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
