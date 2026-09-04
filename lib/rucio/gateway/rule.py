@@ -164,7 +164,7 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
         except (RuleNotFound, RucioException):  # TODO: RucioException comes from badly formatted rule_id, so we should probably handle that differently.
             session.rollback()
             # If user is admin/root, give a more specific error message, otherwise give a generic access denied message
-            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
+            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs=kwargs, session=session).allowed:
                 raise RuleNotFound('Rule %s not found' % rule_id)
             else:
                 raise AccessDenied(access_denied_message(rule_id, issuer))
