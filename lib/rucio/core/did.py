@@ -1473,15 +1473,6 @@ def list_content(
              models.DataIdentifierAssociation.name == name)
     )
 
-    # RBAC Filtering
-    if account is not None:
-        stmt = role.filter_query_by_scope_access(
-            query=stmt,
-            account=account,
-            session=session,
-            scope_column=models.DataIdentifierAssociation.child_scope,
-        )
-
     children_found = False
     for tmp_did in session.execute(stmt).yield_per(5).scalars():
         children_found = True
