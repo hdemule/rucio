@@ -68,7 +68,7 @@ def list_dids(
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_dids', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scope.' % (issuer, scope))
+            raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope))
 
         result = did.list_dids(scope=internal_scope, filters=filters, did_type=did_type, ignore_case=ignore_case,
                                limit=limit, offset=offset, long=long, recursive=recursive, session=session)
@@ -371,13 +371,14 @@ def list_content(
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_content', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot list content of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
-        dids = did.list_content(scope=internal_scope, name=name, session=session)
+        dids = did.list_content(account=internal_issuer, scope=internal_scope, name=name, session=session)
         for d in dids:
             yield gateway_update_return_dict(d, session=session)
 

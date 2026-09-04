@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import exists, or_, select
 
+from rucio.core.account import has_account_attribute
 from rucio.db.sqla import models
 
 if TYPE_CHECKING:
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from rucio.db.sqla.constants import DatabaseOperationType
 
 
-def scope_permission_condition(
+def _rbac_scope_access_condition(
     account: "InternalAccount",
     operation: "DatabaseOperationType",
     scope_column: Any,
@@ -60,76 +61,72 @@ def scope_permission_condition(
     )
 
 
-def filter_query(
-    stmt: "Select",
-    *,
+def _ownership_scope_access_condition(
     account: "InternalAccount",
-    operation: "DatabaseOperationType",
     scope_column: Any,
-) -> "Select":
+) -> "ColumnElement":
     """
-    Add an RBAC scope predicate to a SQLAlchemy SELECT statement.
+    Return a SQLAlchemy boolean expression that is true iff `account`
+    owns the scope represented by `scope_column`.
 
-    The returned statement will only return rows whose scope the account
-    is allowed to access for the given operation (via RBAC).
-
-    This does NOT consider ownership. If you need "RBAC OR ownership",
-    use filter_query_with_ownership() or build your own condition using
-    scope_permission_condition() and or_().
-
-    :param stmt: The original SQLAlchemy SELECT statement.
     :param account: The account performing the operation.
-    :param operation: The operation (READ, WRITE, etc.).
-    :param scope_column: The column in the query that represents the scope.
-    :return: A new SELECT statement with the RBAC condition added.
+    :param scope_column: The column in the query that represents the scope
+                         (e.g. models.DataIdentifierAssociation.scope).
     """
-    return stmt.where(
-        scope_permission_condition(
-            account=account,
-            operation=operation,
-            scope_column=scope_column,
+
+    # Use of an alias here is necessary to avoid a table name collision if models.Scope is already present in the query.
+    scope_owner = models.Scope.__table__.alias("scope_owner")
+
+    return exists(
+        select(1)
+        .select_from(scope_owner)
+        .where(
+            scope_owner.c.scope == scope_column,
+            scope_owner.c.account == account,
         )
     )
 
 
-def filter_query_with_ownership(
-    stmt: "Select",
+def filter_query_by_scope_access(
+    query: "Select",
     *,
     account: "InternalAccount",
-    operation: "DatabaseOperationType",
+    session: "Session",
     scope_column: Any,
-    owner_column: Any,
+    operation: "DatabaseOperationType" = DatabaseOperationType.READ,
 ) -> "Select":
     """
     Add an RBAC + ownership predicate to a SQLAlchemy SELECT statement.
 
-    The returned statement will only return rows where the account either:
-      - owns the row (owner_column == account), OR
+        The returned statement will only return rows where the account either:
+            - owns the row's scope according to the scopes table, OR
       - has the specified operation permission on the row's scope via RBAC.
 
-    This is intended for tables like `scopes` where there is an explicit
-    owner column (e.g. Scope.account).
+    Scope ownership is resolved from the `scopes` table, allowing this to be
+    used with tables that contain a scope but no direct owner column.
 
-    :param stmt: The original SQLAlchemy SELECT statement.
+    :param query: The original SQLAlchemy SELECT statement.
     :param account: The account performing the operation.
-    :param operation: The operation (READ, WRITE, etc.).
     :param scope_column: The column in the query that represents the scope.
-    :param owner_column: The column in the query that represents the owner account.
+    :param operation: The operation (READ, WRITE, etc.).
     :return: A new SELECT statement with the RBAC+ownership condition added.
     """
 
-    if account.external == 'root':
-        return stmt
+    if account.external == 'root' or has_account_attribute(account=account, key='admin', session=session):
+        return query
 
-    ownership_condition = owner_column == account
+    ownership_condition = _ownership_scope_access_condition(
+        account=account,
+        scope_column=scope_column,
+    )
 
-    rbac_condition = scope_permission_condition(
+    rbac_condition = _rbac_scope_access_condition(
         account=account,
         operation=operation,
         scope_column=scope_column,
     )
 
-    return stmt.where(
+    return query.where(
         or_(ownership_condition, rbac_condition)
     )
 
