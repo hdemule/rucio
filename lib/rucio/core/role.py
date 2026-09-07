@@ -14,9 +14,9 @@
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, select
 
-from rucio.core.account import has_account_attribute
+from rucio.core import permission
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import DatabaseOperationType
@@ -70,19 +70,19 @@ def has_scope_access(
     on the given scope, either through ownership, RBAC or admin/root privileges.
     """
 
-    if account.external == 'root' or has_account_attribute(account=account, key='admin', session=session):
+    # Check for admin priviledges
+    if permission.has_permission(issuer=account, action='can_read_all_scopes', kwargs={}, session=session):
         return True
 
-    is_owner = is_scope_owner(scope=scope, account=account, session=session)
+    if is_scope_owner(scope=scope, account=account, session=session):
+        return True
 
-    has_role_access = has_role_scope_access(
+    return has_role_scope_access(
         account=account,
         scope=scope,
         operation=operation,
         session=session,
     )
-
-    return is_owner or has_role_access
 
 
 def filter_iterable_by_scope_access(
