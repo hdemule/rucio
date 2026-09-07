@@ -34,7 +34,7 @@ from rucio.common.utils import setup_logger
 # Taken directly from https://click.palletsprojects.com/en/stable/complex/#defining-the-lazy-group
 class LazyGroup(click.Group):
 
-    DEFAULT_COMMANDS: Final = {"account", "config", "did", "download", "replica", "rse", "rule", "scope", "subscription", "upload", "opendata"}
+    DEFAULT_COMMANDS: Final = {"account", "config", "did", "download", "replica", "rse", "rule", "scope", "subscription", "upload", "opendata", "role"}
     COMMAND_MAP: Final = {
         "account": "rucio.cli.account.account",
         "config": "rucio.cli.config.config",
@@ -48,6 +48,7 @@ class LazyGroup(click.Group):
         "subscription": "rucio.cli.subscription.subscription",
         "upload": "rucio.cli.upload.upload_command",
         "opendata": "rucio.cli.opendata.opendata",
+        "role": "rucio.cli.role.role"
     }
 
     def __init__(self, *args, **kwargs) -> None:

@@ -137,6 +137,28 @@ class AccountClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=res.headers, status_code=res.status_code, data=res.content)
         raise exc_cls(exc_msg)
 
+    def list_account_roles(self, account: str, detail: bool = False) -> dict[str, Any]:
+        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles']))
+        response = self._send_request(url, method=HTTPMethod.GET, params={'detail': str(detail).lower()})
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def add_account_role(self, account: str, role: str) -> None:
+        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
+        response = self._send_request(url, method=HTTPMethod.POST)
+        if response.status_code != codes.created:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
+    def delete_account_role(self, account: str, role: str) -> None:
+        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
+        response = self._send_request(url, method=HTTPMethod.DELETE)
+        if response.status_code != codes.ok:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
     def get_account(self, account: str) -> Optional[dict[str, Any]]:
         """
         Send the request to get information about a given account.
