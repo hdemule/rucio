@@ -45,6 +45,7 @@ DEFAULT_ENDPOINTS = {
     'redirect',
     'replicas',
     'requests',
+    'roles',
     'rses',
     'rules',
     'scopes',

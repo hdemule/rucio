@@ -108,6 +108,42 @@ def remove(ctx: click.Context, account_name: str):
     ctx.obj.client.delete_account(account_name)
     print('Deleted account: %s' % account_name)
 
+@account.group()
+def role() -> None:
+    """Manage roles assigned to an account."""
+
+@role.command("list")
+@click.argument("account_name")
+@click.option("--detail", is_flag=True, help="Also list permissions granted by each role.")
+@click.pass_context
+def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
+    """List roles assigned to ACCOUNT_NAME."""
+    rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
+    click.echo(f"Roles for account {account_name}:")
+    click.echo(tabulate([[role_name] for role_name in rbac['roles']], headers=["ROLE"], tablefmt=ctx.obj.tablefmt))
+    if detail:
+        click.echo()
+        click.echo(f"Permissions granted via roles for account {account_name}:")
+        click.echo(tabulate([[permission['role'], permission['operation'], permission['scope']] for permission in rbac['permissions']], headers=["ROLE", "OPERATION", "SCOPE"], tablefmt=ctx.obj.tablefmt))
+
+@role.command("add")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.pass_context
+def role_add(ctx: click.Context, role_name: str, account_name: str) -> None:
+    """Assign ROLE_NAME to ACCOUNT_NAME."""
+    ctx.obj.client.add_account_role(account_name, role_name)
+    click.echo(f"Added role '{role_name}' to account '{account_name}'.")
+
+@role.command("remove")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.pass_context
+def role_remove(ctx: click.Context, role_name: str, account_name: str) -> None:
+    """Remove ROLE_NAME from ACCOUNT_NAME."""
+    ctx.obj.client.delete_account_role(account_name, role_name)
+    click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
+
 
 @account.command("update")
 @click.argument("account-name")
