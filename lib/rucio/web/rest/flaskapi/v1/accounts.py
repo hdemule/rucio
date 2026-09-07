@@ -24,6 +24,7 @@ from rucio.common.utils import APIEncoder, render_json
 from rucio.gateway.account import add_account, add_account_attribute, del_account, del_account_attribute, get_account_info, get_usage_history, list_account_attributes, list_accounts, list_identities, update_account
 from rucio.gateway.account_limit import delete_global_account_limit, delete_local_account_limit, get_global_account_limit, get_global_account_usage, get_local_account_limit, get_local_account_usage, set_global_account_limit, set_local_account_limit
 from rucio.gateway.identity import add_account_identity, del_account_identity
+from rucio.gateway import role as role_gateway
 from rucio.gateway.rule import list_replication_rules
 from rucio.gateway.scope import add_scope, get_scopes
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
@@ -276,6 +277,20 @@ class Scopes(ErrorHandlingMethodView):
             return generate_http_error_flask(404, error)
 
         return 'Created', 201
+
+
+class Roles(ErrorHandlingMethodView):
+    def get(self, account: str) -> 'ResponseReturnValue':
+        detail = param_get_bool(request.args, 'detail', default=False)
+        return jsonify(role_gateway.list_account_roles(account=account, detail=detail, vo=request.environ['vo']))
+
+    def post(self, account: str, role: str) -> 'ResponseReturnValue':
+        role_gateway.add_account_role(account=account, role=role, vo=request.environ['vo'])
+        return '', 201
+
+    def delete(self, account: str, role: str) -> 'ResponseReturnValue':
+        role_gateway.delete_account_role(account=account, role=role, vo=request.environ['vo'])
+        return '', 200
 
 
 class AccountParameter(ErrorHandlingMethodView):
@@ -1243,6 +1258,9 @@ def blueprint(with_doc: bool = False) -> AuthenticatedBlueprint:
     scopes_view = Scopes.as_view('scopes')
     bp.add_url_rule('/<account>/scopes/', view_func=scopes_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/scopes/<scope>', view_func=scopes_view, methods=[HTTPMethod.POST.value])
+    roles_view = Roles.as_view('roles')
+    bp.add_url_rule('/<account>/roles', view_func=roles_view, methods=[HTTPMethod.GET.value])
+    bp.add_url_rule('/<account>/roles/<role>', view_func=roles_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
     local_account_limits_view = LocalAccountLimits.as_view('local_account_limit')
     bp.add_url_rule('/<account>/limits/local', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/limits', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])

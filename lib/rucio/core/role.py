@@ -29,6 +29,80 @@ if TYPE_CHECKING:
     from rucio.common.types import InternalAccount, InternalScope
 
 
+def list_roles(session: "Session") -> list[str]:
+    """
+    List all roles defined in the system.
+    """
+    stmt = select(models.Roles.role).order_by(models.Roles.role)
+    result = session.execute(stmt).scalars().all()
+    return list(result)
+
+
+def add_role(role: str, session: "Session") -> None:
+    """
+    Add a new role to the system.
+    """
+    new_role = models.Roles(role=role)
+    session.add(new_role)
+    session.commit()
+
+
+def delete_role(role: str, session: "Session") -> None:
+    """
+    Delete an existing role from the system.
+    """
+    stmt = select(models.Roles).where(models.Roles.role == role)
+    role_obj = session.execute(stmt).scalar_one_or_none()
+    if role_obj:
+        session.delete(role_obj)
+        session.commit()
+
+
+def list_account_roles(account: "InternalAccount", session: "Session") -> list[str]:
+    stmt = (
+        select(models.AccountRoleAssociation.role)
+        .where(models.AccountRoleAssociation.account == account)
+        .order_by(models.AccountRoleAssociation.role)
+    )
+    return list(session.execute(stmt).scalars())
+
+
+def add_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
+    session.add(models.AccountRoleAssociation(account=account, role=role))
+    session.commit()
+
+
+def delete_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
+    mapping = session.get(models.AccountRoleAssociation, (account, role))
+    if mapping:
+        session.delete(mapping)
+        session.commit()
+
+
+def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
+    stmt = (
+        select(models.RolePermissionAssociation)
+        .where(models.RolePermissionAssociation.role == role)
+        .order_by(models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
+    )
+    return [
+        {'operation': permission.operation.value, 'scope': str(permission.scope.external)}
+        for permission in session.execute(stmt).scalars()
+    ]
+
+
+def add_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
+    session.add(models.RolePermissionAssociation(role=role, scope=scope, operation=operation))
+    session.commit()
+
+
+def delete_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
+    mapping = session.get(models.RolePermissionAssociation, (role, scope, operation))
+    if mapping:
+        session.delete(mapping)
+        session.commit()
+
+
 def has_role_scope_access(
     account: "InternalAccount",
     scope: "InternalScope",
