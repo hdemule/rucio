@@ -39,7 +39,7 @@ def is_multi_vo(session: "Session") -> bool:
     return config_get_bool('common', 'multi_vo', raise_exception=False, default=False, session=session)
 
 
-def access_denied_message(rule_id: str, issuer: str) -> str:
+def _access_denied_message(rule_id: str, issuer: str) -> str:
     return 'Account %s cannot retrieve replication rule with id %s. The requested rule id either does not exist or is outside the account\'s authorized scopes.' % (issuer, rule_id)
 
 
@@ -164,15 +164,15 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
         except (RuleNotFound, RucioException):  # TODO: RucioException comes from badly formatted rule_id, so we should probably handle that differently.
             session.rollback()
             # If user is admin/root, give a more specific error message, otherwise give a generic access denied message
-            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs=kwargs, session=session).allowed:
+            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
                 raise RuleNotFound('Rule %s not found' % rule_id)
             else:
-                raise AccessDenied(access_denied_message(rule_id, issuer))
+                raise AccessDenied(_access_denied_message(rule_id, issuer))
 
         scope = str(result['scope'])
-        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replication_rule', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied(access_denied_message(rule_id, issuer))
+            raise AccessDenied(_access_denied_message(rule_id, issuer))
 
         return gateway_update_return_dict(result, session=session)
 
@@ -400,12 +400,12 @@ def examine_replication_rule(
             if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
                 raise RuleNotFound('Rule %s not found' % rule_id)
             else:
-                raise AccessDenied(access_denied_message(rule_id, issuer))
+                raise AccessDenied(_access_denied_message(rule_id, issuer))
 
         scope = str(result['scope'])
-        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='examine_replication_rule', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied(access_denied_message(rule_id, issuer))
+            raise AccessDenied(_access_denied_message(rule_id, issuer))
 
         result = gateway_update_return_dict(result, session=session)
         if 'transfers' in result:
