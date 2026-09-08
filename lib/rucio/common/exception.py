@@ -1303,3 +1303,43 @@ class OpenDataDuplicateRecordID(OpenDataError):
         super(OpenDataDuplicateRecordID, self).__init__(*args)
         self._message = f"Data identifier with the same Record ID ({record_id}) already exists in the open data catalog."
         self.error_code = 123
+
+
+class RoleNotFound(RucioException):
+    """
+    RoleNotFound
+    """
+    def __init__(self, *args):
+        super(RoleNotFound, self).__init__(*args)
+        self._message = "Role does not exist."
+        self.error_code = 124
+
+
+class RoleInUse(RucioException):
+    """
+    RoleInUse
+    """
+    def __init__(self, *args):
+        super(RoleInUse, self).__init__(*args)
+        self._message = "Role is still assigned to one or more accounts or has permissions defined and cannot be deleted."
+        self.error_code = 125
+
+
+class RoleAssignmentNotFound(RucioException):
+    """
+    RoleAssignmentNotFound
+    """
+    def __init__(self, *args):
+        super(RoleAssignmentNotFound, self).__init__(*args)
+        self._message = "The account does not have the specified role assigned."
+        self.error_code = 126
+
+
+class RolePermissionNotFound(RucioException):
+    """
+    RolePermissionNotFound
+    """
+    def __init__(self, *args):
+        super(RolePermissionNotFound, self).__init__(*args)
+        self._message = "The role does not have the specified permission on this scope."
+        self.error_code = 127
