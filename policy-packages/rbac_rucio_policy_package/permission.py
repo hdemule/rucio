@@ -1,6 +1,7 @@
 import logging
 from typing import TYPE_CHECKING, Any
 
+from rucio.common.types import InternalAccount
 from rucio.core import role as role_core
 from rucio.core import scope as scope_core
 from rucio.core.account import has_account_attribute
@@ -11,7 +12,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.orm import Session
 
-    from rucio.common.types import InternalAccount, InternalScope
+    from rucio.common.types import InternalScope
 
 
 def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any], session: "Session") -> "Optional[bool]":
@@ -54,6 +55,16 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'get_replica_locks_for_rule_id': perm_replica_locks_for_rule_id,
         'know_if_rule_exists': perm_know_if_rule_exists,  # Considered an admin privilege.
         'can_read_all_scopes': perm_can_read_all_scopes,
+        # Roles
+        'list_roles': perm_list_roles,
+        'add_role': perm_add_role,
+        'delete_role': perm_delete_role,
+        'list_account_roles': perm_list_account_roles,
+        'add_account_role': perm_add_account_role,
+        'delete_account_role': perm_delete_account_role,
+        'list_role_permissions': perm_list_role_permissions,
+        'add_role_permission': perm_add_role_permission,
+        'delete_role_permission': perm_delete_role_permission,
         }
 
     handler = perm.get(action)
@@ -333,6 +344,120 @@ def perm_know_if_rule_exists(issuer: "InternalAccount", kwargs: dict[str, Any], 
 def perm_can_read_all_scopes(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can read all scopes.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_list_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list all roles.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_add_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can add a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_delete_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can delete a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_list_account_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list all roles assigned to an account.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    if _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session):
+        return True
+
+    account = kwargs.get('account')
+    if account is None or not isinstance(account, InternalAccount):
+        return False
+
+    return account == issuer
+
+
+def perm_add_account_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can add a role to an account.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_delete_account_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can delete a role from an account.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_list_role_permissions(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list all permissions assigned to a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    if _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session):
+        return True
+
+    role = kwargs.get('role')
+
+    if role is None or not isinstance(role, str):
+        return False
+
+    return role_core.has_account_role(account=issuer, role=role, session=session)
+
+
+def perm_add_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can add a permission to a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_delete_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can delete a permission from a role.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
