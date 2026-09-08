@@ -15,7 +15,9 @@
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import exists, select
+from sqlalchemy.exc import IntegrityError
 
+from rucio.common.exception import AccountNotFound, Duplicate, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
 from rucio.core import permission
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
@@ -27,6 +29,11 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from rucio.common.types import InternalAccount, InternalScope
+
+
+def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
+    """Best-effort match of a named DB constraint against the raised IntegrityError text."""
+    return constraint_name.lower() in str(error.orig or error).lower()
 
 
 def list_roles(session: "Session") -> list[str]:
@@ -44,7 +51,11 @@ def add_role(role: str, session: "Session") -> None:
     """
     new_role = models.Roles(role=role)
     session.add(new_role)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise Duplicate("Role '%s' already exists." % role)
 
 
 def delete_role(role: str, session: "Session") -> None:
@@ -53,9 +64,15 @@ def delete_role(role: str, session: "Session") -> None:
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
-    if role_obj:
-        session.delete(role_obj)
+    if role_obj is None:
+        raise RoleNotFound("Role '%s' does not exist." % role)
+
+    session.delete(role_obj)
+    try:
         session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise RoleInUse("Role '%s' is still assigned to accounts or has permissions defined and cannot be deleted." % role)
 
 
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[str]:
@@ -69,14 +86,26 @@ def list_account_roles(account: "InternalAccount", session: "Session") -> list[s
 
 def add_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
     session.add(models.AccountRoleAssociation(account=account, role=role))
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        if _violates_constraint(error, 'ACCOUNT_ROLE_MAP_ACCOUNT_FK'):
+            raise AccountNotFound("Account '%s' does not exist." % account)
+        if _violates_constraint(error, 'ACCOUNT_ROLE_MAP_ROLE_FK'):
+            raise RoleNotFound("Role '%s' does not exist." % role)
+        if _violates_constraint(error, 'ACCOUNT_ROLE_MAP_PK'):
+            raise Duplicate("Account '%s' already has role '%s'." % (account, role))
+        raise Duplicate("Either account '%s' or role '%s' does not exist, or account '%s' already has role '%s'." % (account, role, account, role))
 
 
 def delete_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
     mapping = session.get(models.AccountRoleAssociation, (account, role))
-    if mapping:
-        session.delete(mapping)
-        session.commit()
+    if mapping is None:
+        raise RoleAssignmentNotFound("Either account '%s' or role '%s' does not exist, or the account does not have that role assigned." % (account, role))
+
+    session.delete(mapping)
+    session.commit()
 
 
 def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
@@ -93,14 +122,34 @@ def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]
 
 def add_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
     session.add(models.RolePermissionAssociation(role=role, scope=scope, operation=operation))
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        if _violates_constraint(error, 'ROLE_PERMISSION_MAP_ROLE_FK'):
+            raise RoleNotFound("Role '%s' does not exist." % role)
+        if _violates_constraint(error, 'ROLE_PERMISSION_MAP_SCOPE_FK'):
+            raise ScopeNotFound("Scope '%s' does not exist." % scope)
+        if _violates_constraint(error, 'ROLE_PERMISSION_MAP_PK'):
+            raise Duplicate("Role '%s' already has '%s' permission on scope '%s'." % (role, operation.value, scope))
+        raise Duplicate("Either role '%s' or scope '%s' does not exist, or role '%s' already has '%s' permission on scope '%s'." % (role, scope, role, operation.value, scope))
 
 
 def delete_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
     mapping = session.get(models.RolePermissionAssociation, (role, scope, operation))
-    if mapping:
-        session.delete(mapping)
-        session.commit()
+    if mapping is None:
+        raise RolePermissionNotFound("Either role '%s' or scope '%s' does not exist, or the role does not have '%s' permission on that scope." % (role, scope, operation.value))
+
+    session.delete(mapping)
+    session.commit()
+
+
+def has_account_role(account: "InternalAccount", role: str, session: "Session") -> bool:
+    stmt = select(models.AccountRoleAssociation).where(
+        models.AccountRoleAssociation.account == account,
+        models.AccountRoleAssociation.role == role,
+    )
+    return bool(session.execute(stmt).scalar_one_or_none())
 
 
 def has_role_scope_access(
