@@ -1,35 +1,74 @@
 from flask import Flask, jsonify, request
 
 from rucio.common.constants import HTTPMethod
+from rucio.common.exception import AccessDenied, Duplicate, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
 from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_permissions, list_roles
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
-from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, response_headers
+from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, generate_http_error_flask, response_headers
 
 
 class RoleList(ErrorHandlingMethodView):
     def get(self):
-        return jsonify(list_roles())
+        try:
+            roles = list_roles(issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+
+        return jsonify(roles), 200
 
     def post(self, role_name: str):
-        add_role(role_name)
-        return jsonify({"message": f"Role '{role_name}' added."}), 201
+        try:
+            add_role(role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except Duplicate as error:
+            return generate_http_error_flask(409, error)
+
+        return jsonify({"message": f"Role '{role_name}' successfully added."}), 201
 
     def delete(self, role_name: str):
-        delete_role(role_name)
-        return '', 200
+        try:
+            delete_role(role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RoleNotFound as error:
+            return generate_http_error_flask(404, error)
+        except RoleInUse as error:
+            return generate_http_error_flask(409, error)
+        return jsonify({"message": f"Role '{role_name}' successfully deleted."}), 200
 
 
 class RolePermissions(ErrorHandlingMethodView):
     def get(self, role_name: str):
-        return jsonify(list_role_permissions(role_name))
+        try:
+            permissions = list_role_permissions(role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        return jsonify(permissions), 200
 
     def post(self, role_name: str, operation: str, scope: str):
-        add_role_permission(role=role_name, operation=operation, scope=scope, vo=request.environ['vo'])
-        return '', 201
+        try:
+            add_role_permission(role=role_name, operation=operation, scope=scope, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RoleNotFound as error:
+            return generate_http_error_flask(404, error)
+        except ScopeNotFound as error:
+            return generate_http_error_flask(404, error)
+        except Duplicate as error:
+            return generate_http_error_flask(409, error)
+        return jsonify({"message": f"Permission '{operation}' on scope '{scope}' successfully added to role '{role_name}'."}), 201
 
     def delete(self, role_name: str, operation: str, scope: str):
-        delete_role_permission(role=role_name, operation=operation, scope=scope, vo=request.environ['vo'])
-        return '', 200
+        try:
+            delete_role_permission(role=role_name, operation=operation, scope=scope, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RoleNotFound as error:
+            return generate_http_error_flask(404, error)
+        except RolePermissionNotFound as error:
+            return generate_http_error_flask(404, error)
+        return jsonify({"message": f"Permission '{operation}' on scope '{scope}' successfully removed from role '{role_name}'."}), 200
 
 
 def blueprint() -> AuthenticatedBlueprint:
