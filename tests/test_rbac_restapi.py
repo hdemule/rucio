@@ -14,6 +14,24 @@
 
 # To run a single test, use `pytest tests/test_rbac_restapi.py::TestDID::test_get_did`
 
+# Assumptions made for the following tests, without which they will fail.
+# Accounts:
+#   1. root  - admin account; root/admin is the only caller allowed to perform role-management
+#              operations (add/delete role, role permissions, account roles), since none of those
+#              actions have a dedicated permission check and thus fall back to perm_default
+#              (root or an account with the 'admin' attribute).
+#   2. alice - regular account; owns scope 'alice' and already has the 'data-scientist' role assigned.
+#   3. bob   - regular account; owns no scope of its own and has no roles assigned.
+# Roles:
+#   1. 'data-scientist' - already exists and grants READ+WRITE permission on scope 'atlas'.
+# Scopes:
+#   1. 'alice' - owned by account 'alice'.
+#   2. 'root'  - owned by account 'root'; also used as a throwaway permission target for role tests.
+#   3. 'atlas' - target of the 'data-scientist' role's permissions.
+# DIDs:
+#   'alice:alice_ds', 'alice:alice_ds2', 'alice:file1.png', 'alice:file2.png' and 'root:file1' exist,
+#   with replication rules registered for some of them (see `_get_rule_id`).
+
 import shutil
 from typing import Any
 from urllib.parse import quote_plus
@@ -27,8 +45,10 @@ from rucio.core.rule import list_rules
 
 # HTTP status code the REST API returns
 OK = 200
+CREATED = 201
 FORBIDDEN = 403
 NOT_FOUND = 404
+CONFLICT = 409  # returned for both Duplicate and RoleInUse errors
 
 # Test accounts and their userpass identities, as provisioned by the dev environment bootstrap.
 _USERNAMES = {
@@ -105,6 +125,20 @@ def _get(path: str, account: str, **kwargs: Any) -> requests.Response:
 
 def _post(path: str, account: str, **kwargs: Any) -> requests.Response:
     return _request('POST', path, account, **kwargs)
+
+
+def _delete(path: str, account: str, **kwargs: Any) -> requests.Response:
+    return _request('DELETE', path, account, **kwargs)
+
+
+def _role_path(role_name: str, *suffix: str) -> str:
+    """Build a `/roles/<role_name>/<suffix>` path."""
+    return '/'.join(['', 'roles', quote_plus(role_name), *suffix])
+
+
+def _account_roles_path(account: str, *suffix: str) -> str:
+    """Build a `/accounts/<account>/roles/<suffix>` path."""
+    return '/'.join(['', 'accounts', quote_plus(account), 'roles', *suffix])
 
 
 def _scope_name_path(resource: str, did: str, *suffix: str) -> str:
@@ -565,3 +599,129 @@ class TestSUBSCRIPTION:
 
     def test_list_subscriptions(self):
         pytest.skip("Filtering Test: list subscriptions and verify filtering based on the scopes in each subscription's DID filter and generated rules.")
+
+
+class TestROLE:
+    """
+    RBAC role management (`/roles` and `/accounts/<account>/roles`). See the assumptions note at the top of this file.
+    """
+
+    # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
+
+    def test_list_roles(self):
+        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and includes the fixture role"""
+        response = _get('/roles/', 'root')
+        assert response.status_code == OK
+        assert 'data-scientist' in response.json()
+        for account in ('alice', 'bob'):
+            assert _get('/roles/', account).status_code == FORBIDDEN
+
+    def test_list_role_permissions(self):
+        """RBAC(ADMIN/USER): GET /roles/<role>/permissions is visible to root/admin and to accounts holding that role"""
+        for account in ('root', 'alice'):
+            response = _get(_role_path('data-scientist', 'permissions'), account)
+            assert response.status_code == OK
+            granted = {(perm['scope'], perm['operation']) for perm in response.json()}
+            assert ('atlas', 'read') in granted
+            assert ('atlas', 'write') in granted
+        assert _get(_role_path('data-scientist', 'permissions'), 'bob').status_code == FORBIDDEN
+
+    def test_list_account_roles(self):
+        """RBAC(ADMIN/USER): GET /accounts/<account>/roles is visible to root/admin and to accounts if they are querying their own roles"""
+        for account in ('root', 'alice'):
+            response = _get(_account_roles_path('alice'), account)
+            assert response.status_code == OK
+            assert 'data-scientist' in response.json()['roles']
+        assert _get(_account_roles_path('bob'), account).status_code == FORBIDDEN
+
+    # --- write operations are refused for every non-admin caller, whatever their own roles ----
+
+    @pytest.mark.parametrize(
+        ('method', 'path'),
+        [
+            ('POST', _role_path('tmp_probe')),
+            ('DELETE', _role_path('data-scientist')),
+            ('POST', _role_path('data-scientist', 'permissions', 'read', 'atlas')),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas')),
+            ('POST', _account_roles_path('bob', 'data-scientist')),
+            ('DELETE', _account_roles_path('alice', 'data-scientist')),
+        ],
+        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role'],
+    )
+    def test_non_admin_cannot_write_role_data(self, method, path):
+        """RBAC(USER): role management write operations are restricted to root/admin regardless of the caller's own RBAC assignments"""
+        for account in ('alice', 'bob'):
+            assert _request(method, path, account).status_code == FORBIDDEN
+
+    # --- lifecycle & error-code scenarios, run by root -----------------------------------
+
+    def test_add_role_duplicate_then_delete(self):
+        """RBAC(ADMIN): creating the same role twice is refused with 409, deleting it twice 404s the second time"""
+        role_name = 'tmp'
+        try:
+            assert _post(_role_path(role_name), 'root').status_code == CREATED
+            assert _post(_role_path(role_name), 'root').status_code == CONFLICT
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+        assert _delete(_role_path(role_name), 'root').status_code == NOT_FOUND
+
+    def test_delete_role_refused_while_assigned_to_account(self):
+        """RBAC(ADMIN): a role still assigned to an account cannot be deleted until the assignment is removed"""
+        role_name = 'tmp'
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
+            assert _delete(_role_path(role_name), 'root').status_code == CONFLICT
+            assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_delete_role_refused_while_it_has_permissions(self):
+        """RBAC(ADMIN): a role that still has permissions defined cannot be deleted until they are removed"""
+        role_name = 'tmp'
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == CREATED
+            assert _delete(_role_path(role_name), 'root').status_code == CONFLICT
+            assert _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == OK
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    @pytest.mark.parametrize(
+        ('method', 'path'),
+        [
+            ('DELETE', _role_path('non_existing_role')),
+            ('POST', _account_roles_path('alice', 'non_existing_role')),
+            ('POST', _account_roles_path('non_existing_account', 'data-scientist')),
+            ('DELETE', _account_roles_path('bob', 'data-scientist')),
+            ('POST', _role_path('non_existing_role', 'permissions', 'read', 'atlas')),
+            ('POST', _role_path('data-scientist', 'permissions', 'read', 'non_existing_scope')),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'root')),
+        ],
+        ids=[
+            'delete non-existing role',
+            'assign non-existing role to account',
+            'assign role to non-existing account',
+            'unassign role not assigned to account',
+            'add permission to non-existing role',
+            'add permission on non-existing scope',
+            'remove permission not granted to role',
+        ],
+    )
+    def test_operations_on_nonexistent_targets_return_not_found(self, method, path):
+        """RBAC(ADMIN): referencing a non-existing role, account, scope or assignment returns 404"""
+        assert _request(method, path, 'root').status_code == NOT_FOUND
+
+    @pytest.mark.parametrize(
+        'path',
+        [
+            _role_path('data-scientist'),
+            _role_path('data-scientist', 'permissions', 'read', 'atlas'),
+            _role_path('data-scientist', 'permissions', 'write', 'atlas'),
+            _account_roles_path('alice', 'data-scientist'),
+        ],
+        ids=['duplicate role', 'duplicate read permission', 'duplicate write permission', 'duplicate account role assignment'],
+    )
+    def test_operations_on_already_existing_targets_return_conflict(self, path):
+        """RBAC(ADMIN): re-creating an already-existing role, permission or account role assignment returns 409"""
+        assert _post(path, 'root').status_code == CONFLICT
