@@ -18,6 +18,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.exception import AccountNotFound, Duplicate, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
+from rucio.common.types import InternalScope
 from rucio.core import permission
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.orm import Session
 
-    from rucio.common.types import InternalAccount, InternalScope
+    from rucio.common.types import InternalAccount
 
 
 def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
@@ -214,17 +215,28 @@ def filter_iterable_by_scope_access(
     account: "InternalAccount",
     session: "Session",
     operation: "DatabaseOperationType" = DatabaseOperationType.READ,
+    scope_keyword: str = 'scope',
 ) -> "Iterator[dict[str, Any]]":
     """
     Yield only items whose scope the account may access in terms of RBAC, ownership and admin/root privileges.
 
     Access decisions are cached for the lifetime of this iterator, so each
     distinct scope is checked at most once.
+
+    :param items: An iterable of dictionaries representing items with associated scopes.
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param scope_keyword: The key in the item dictionaries that contains the associated scope.
+    :returns: An iterator over the items that the account has access to.
     """
     access_by_scope: dict["InternalScope", bool] = {}
 
     for item in items:
-        scope = item['scope']
+        scope = item.get(scope_keyword)
+        if scope is None or not isinstance(scope, InternalScope):
+            continue
+
         if scope not in access_by_scope:
             access_by_scope[scope] = has_scope_access(
                 account=account,
