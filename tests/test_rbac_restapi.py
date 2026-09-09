@@ -32,6 +32,7 @@
 #   'alice:alice_ds', 'alice:alice_ds2', 'alice:file1.png', 'alice:file2.png' and 'root:file1' exist,
 #   with replication rules registered for some of them (see `_get_rule_id`).
 
+import json
 import shutil
 from typing import Any
 from urllib.parse import quote_plus
@@ -42,6 +43,7 @@ import requests
 from rucio.common.config import config_get
 from rucio.common.types import InternalScope
 from rucio.core.rule import list_rules
+from rucio.gateway.did import list_files
 
 # HTTP status code the REST API returns
 OK = 200
@@ -160,6 +162,13 @@ def _get_rule_id(name, vo, user='alice') -> str:
     return rules[0]['id']
 
 
+def _get_file_guid(name, scope='alice', user='alice') -> str:
+    """RBAC(USER): Look up the GUID of the file for <user>:<name> directly from the database"""
+    files = list(list_files(scope=scope, name=name, issuer='root', long=False))
+    assert files, f'No file found for {user}:{name}'
+    return files[0]['guid']
+
+
 class TestDID:
 
     @pytest.mark.parametrize(
@@ -175,8 +184,22 @@ class TestDID:
         for account, expected_status in zip(accounts, expected_statuses):
             assert _post('/dids/bulkfiles', account, json=payload).status_code == expected_status
 
-    def test_get_dataset_by_guid(self):
-        pytest.skip("Ambiguous Test: Either Deny if scope associated to dataset is wrong, but if it's ok, maybe verify results are filtered according to the caller's readable scopes; also cover an unknown GUID.")
+    @pytest.mark.parametrize(
+        ('scope', 'file', 'accounts', 'expected_scope', 'expected_visibilities'),
+        [
+            ('alice', 'file1.png', ['root', 'alice', 'bob'], 'alice', [True, True, False]),
+        ],
+        ids=['ds by guid filtering'],
+    )
+    def test_get_dataset_by_guid(self, scope, file, accounts, expected_scope, expected_visibilities):
+        """RBAC(USER): GET /dids/{guid}/guid is only visible for readable DID scopes"""
+        guid = _get_file_guid(file, scope=scope, user='root')  # get the GUID
+
+        # call /dids/{guid}/guid
+        for account, expected_visibility in zip(accounts, expected_visibilities):
+            response = _get(f'/dids/{guid}/guid', account)
+            scopes = {dataset['scope'] for dataset in map(json.loads, response.text.splitlines())}
+            assert (expected_scope in scopes) is expected_visibility
 
     @pytest.mark.parametrize(
         ('did', 'suffix', 'accounts', 'expected_statuses', 'params'),
