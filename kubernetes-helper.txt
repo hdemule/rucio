@@ -1,0 +1,49 @@
+# Install tools
+pip install python-openstackclient
+# (and later kubectl, argocd, helm downloads)
+
+# Configure access to CERN OpenStack
+eval $(ai-rc 'RUCIO IT')        # if you're on a CERN-managed shell
+# or: source some-openrc-file
+
+# Check OpenStack works
+openstack token issue
+
+# Create your SSH keypair (stored on your machine)
+ssh-keygen -t ed25519 -C "you@cern.ch" -f ~/.ssh/rucio-it-key
+openstack keypair create --public-key ~/.ssh/rucio-it-key.pub rucio-it-key
+
+# Create the Kubernetes cluster (this command runs on your machine,
+# but it tells OpenStack to create VMs in the cloud)
+export KUBERNETES_CLUSTER_NAME=rucio-it-myfirst
+openstack coe cluster create "$KUBERNETES_CLUSTER_NAME" \
+  --keypair rucio-it-key \
+  --cluster-template kubernetes-1.33.3-1 \
+  --node-count 6 \
+  --flavor m2.xlarge \
+  --master-flavor m2.xlarge \
+  --merge-labels \
+  --labels cern_enabled=true
+
+# Check cluster status
+openstack coe cluster show "$KUBERNETES_CLUSTER_NAME"
+
+# Download kubeconfig (a file on your machine that tells kubectl
+# how to talk to the remote cluster)
+openstack coe cluster config "$KUBERNETES_CLUSTER_NAME"
+
+# Talk to the remote cluster
+kubectl get nodes
+
+# Log in to Argo CD (from your machine)
+argocd login argo.rucioit.cern.ch --sso
+
+# Register the remote cluster with Argo CD
+argocd cluster add default --name "$KUBERNETES_CLUSTER_NAME"
+
+# Cluster Commands
+kubectl get nodes
+kubectl get pods -n rucio
+kubectl get deployments -n rucio
+kubectl get services -n rucio
+kubectl logs <some-pod> -n rucio
