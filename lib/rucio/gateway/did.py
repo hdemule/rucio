@@ -733,6 +733,7 @@ def set_status(
 
 def get_dataset_by_guid(
     guid: str,
+    issuer: str,
     vo: str = DEFAULT_VO,
 ) -> 'Iterator[dict[str, Any]]':
     """
@@ -742,10 +743,11 @@ def get_dataset_by_guid(
 
     :returns: A DID
     """
+    internal_account = InternalAccount(issuer, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
         dids = did.get_dataset_by_guid(guid=guid, session=session)
 
-        for d in dids:
+        for d in role.filter_iterable_by_scope_access(dids, account=internal_account, session=session):
             if d['scope'].vo != vo:
                 raise RucioException('GUID unavailable on VO {}'.format(vo))
             yield gateway_update_return_dict(d, session=session)
