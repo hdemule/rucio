@@ -2119,7 +2119,7 @@ class GUIDLookup(ErrorHandlingMethodView):
         """
         try:
             def generate(vo):
-                for dataset in get_dataset_by_guid(guid, vo=vo):
+                for dataset in get_dataset_by_guid(guid, issuer=request.environ['issuer'], vo=vo):
                     yield dumps(dataset, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
