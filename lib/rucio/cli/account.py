@@ -120,7 +120,7 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
     """List roles assigned to ACCOUNT_NAME."""
     rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
     click.echo(f"Roles for account {account_name}:")
-    click.echo(tabulate([[role_name] for role_name in rbac['roles']], headers=["ROLE"], tablefmt=ctx.obj.tablefmt))
+    click.echo(tabulate([[r['role'], r['locked']] for r in rbac['roles']], headers=["ROLE", "LOCKED"], tablefmt=ctx.obj.tablefmt))
     if detail:
         click.echo()
         click.echo(f"Permissions granted via roles for account {account_name}:")
