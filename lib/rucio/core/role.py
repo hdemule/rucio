@@ -76,13 +76,13 @@ def delete_role(role: str, session: "Session") -> None:
         raise RoleInUse("Role '%s' is still assigned to accounts or has permissions defined and cannot be deleted." % role)
 
 
-def list_account_roles(account: "InternalAccount", session: "Session") -> list[str]:
+def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
     stmt = (
-        select(models.AccountRoleAssociation.role)
+        select(models.AccountRoleAssociation.role, models.AccountRoleAssociation.locked)
         .where(models.AccountRoleAssociation.account == account)
         .order_by(models.AccountRoleAssociation.role)
     )
-    return list(session.execute(stmt).scalars())
+    return [{'role': role, 'locked': locked} for role, locked in session.execute(stmt).all()]
 
 
 def add_account_role(account: "InternalAccount", role: str, session: "Session") -> None:

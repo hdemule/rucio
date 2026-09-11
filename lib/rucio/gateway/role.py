@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Any, Union
 
 from rucio.common.constants import DEFAULT_VO
 from rucio.common.exception import AccessDenied
@@ -36,7 +36,7 @@ def delete_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> None:
         core_role.delete_role(role=role, session=session)
 
 
-def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str = DEFAULT_VO) -> dict[str, Union[list[str], list[dict[str, str]]]]:
+def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str = DEFAULT_VO) -> dict[str, Union[list[dict[str, Any]], list[dict[str, str]]]]:
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_account_roles', kwargs={'account': account}, session=session)
         if not auth_result.allowed:
@@ -44,12 +44,12 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
 
         internal_account = InternalAccount(account, vo=vo)
         roles = core_role.list_account_roles(account=internal_account, session=session)
-        result: dict[str, Union[list[str], list[dict[str, str]]]] = {'roles': roles}
+        result: dict[str, Union[list[dict[str, Any]], list[dict[str, str]]]] = {'roles': roles}
         if detail:
             result['permissions'] = [
-                {'role': role, **permission}
+                {'role': role['role'], **permission}
                 for role in roles
-                for permission in core_role.list_role_permissions(role=role, session=session)
+                for permission in core_role.list_role_permissions(role=role['role'], session=session)
             ]
         return result
 
