@@ -654,7 +654,7 @@ class TestROLE:
         for account in ('root', 'alice'):
             response = _get(_account_roles_path('alice'), account)
             assert response.status_code == OK
-            assert 'data-scientist' in response.json()['roles']
+            assert 'data-scientist' in [role['role'] for role in response.json()['roles']]
         assert _get(_account_roles_path('bob'), account).status_code == FORBIDDEN
 
     # --- write operations are refused for every non-admin caller, whatever their own roles ----
