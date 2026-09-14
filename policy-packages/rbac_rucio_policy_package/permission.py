@@ -54,7 +54,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_dataset_replicas_vp': perm_list_dataset_replicas_vp,
         'get_replica_locks_for_rule_id': perm_replica_locks_for_rule_id,
         'know_if_rule_exists': perm_know_if_rule_exists,  # Considered an admin privilege.
-        'can_read_all_scopes': perm_can_read_all_scopes,
+        'can_access_all_scopes': perm_can_access_all_scopes,
         # Roles
         'list_roles': perm_list_roles,
         'add_role': perm_add_role,
@@ -341,9 +341,9 @@ def perm_know_if_rule_exists(issuer: "InternalAccount", kwargs: dict[str, Any], 
     return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
 
 
-def perm_can_read_all_scopes(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+def perm_can_access_all_scopes(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can read all scopes.
+    Checks if an account can access all scopes.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
