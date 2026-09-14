@@ -160,8 +160,11 @@ def has_role_scope_access(
     session: "Session",
 ) -> bool:
     """
-    Return True if the account has the specified operation permission
+    Returns True if the account has the specified operation permission
     on the given scope, according to the RBAC tables.
+
+    This only check the RBAC tables and does not consider ownership or admin/root privileges.
+    For checking ownership or admin/root privileges, use the :func:`has_scope_access` function instead.
     """
     exists_stmt = (
         select(1)
@@ -190,12 +193,12 @@ def has_scope_access(
     session: "Session",
 ) -> bool:
     """
-    Return True if the account has the specified operation permission
+    Returns True if the account has the specified operation permission
     on the given scope, either through ownership, RBAC or admin/root privileges.
     """
 
-    # Check for admin priviledges
-    if permission.has_permission(issuer=account, action='can_read_all_scopes', kwargs={}, session=session):
+    # Check for admin privileges
+    if permission.has_permission(issuer=account, action='can_access_all_scopes', kwargs={'operation': operation}, session=session):
         return True
 
     if is_scope_owner(scope=scope, account=account, session=session):
