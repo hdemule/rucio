@@ -38,6 +38,12 @@ MANIFEST
 .coverage
 **coverage.xml
 build/
+# Track only the RBAC client Dockerfile
+!/build/
+/build/*
+!/build/rbac-client-image/
+/build/rbac-client-image/*
+!/build/rbac-client-image/Dockerfile
 covhtml
 dist/
 examples/whip/results/
