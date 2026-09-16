@@ -54,11 +54,11 @@ services:
       - ../../certs/ssh/ruciouser_sshkey.pub:/root/.ssh/ruciouser_sshkey.pub:z
       - ../../certs/ssh/ruciouser_sshkey:/root/.ssh/ruciouser_sshkey:z
       - ./rucio/idpsecrets.json:/opt/rucio/etc/idpsecrets.json:ro
-      - ../../../containter_upload/etc/rucio-alice.cfg:/opt/rucio/etc/rucio-alice.cfg:ro
-      - ../../../containter_upload/etc/rucio-bob.cfg:/opt/rucio/etc/rucio-bob.cfg:ro
-      - ../../../containter_upload/file1.png:/opt/rucio/file1.png
-      - ../../../containter_upload/file2.png:/opt/rucio/file2.png
-      - ../../../containter_upload/file3.png:/opt/rucio/file3.png
+      - ../../../container_upload/etc/rucio-alice.cfg:/opt/rucio/etc/rucio-alice.cfg:ro
+      - ../../../container_upload/etc/rucio-bob.cfg:/opt/rucio/etc/rucio-bob.cfg:ro
+      - ../../../container_upload/file1.png:/opt/rucio/file1.png
+      - ../../../container_upload/file2.png:/opt/rucio/file2.png
+      - ../../../container_upload/file3.png:/opt/rucio/file3.png
       - ../../../tools:/opt/rucio/tools:Z
       - ../../../bin:/opt/rucio/bin:Z
       - ../../../lib:/opt/rucio/lib:Z
