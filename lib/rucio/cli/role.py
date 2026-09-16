@@ -1,8 +1,16 @@
+from enum import Enum
+
 import click
 from tabulate import tabulate
 
 from rucio.common.exception import Duplicate, RolePermissionNotFound
-from rucio.db.sqla.constants import DatabaseOperationType
+
+
+# Client-side representation of database operation types.
+class DatabaseOperationType(Enum):
+    READ = 'read'
+    WRITE = 'write'
+
 
 # Shorthands accepted on the command line, mapped to the operation(s) they expand to.
 OPERATION_SHORTHANDS: dict[str, list[DatabaseOperationType]] = {
