@@ -40,7 +40,7 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_account_roles', kwargs={'account': account}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s cannot list roles for account %s. Either the requested account does not exist or additional permissions are required.' % (issuer, account))
+            raise AccessDenied('Account %s cannot list roles for account %s. Additional permissions are required.' % (issuer, account))
 
         internal_account = InternalAccount(account, vo=vo)
         roles = core_role.list_account_roles(account=internal_account, session=session)
