@@ -405,6 +405,7 @@ class Roles(BASE, ModelBase):
     """Represents a role for Rule-Based Access Control (RBAC)"""
     __tablename__ = 'roles'
     role: Mapped[str] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(Text)
     _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'))
 
