@@ -706,6 +706,8 @@ class TestROLE:
             assert _delete(_role_path(role_name), 'root').status_code == CONFLICT
             assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
         finally:
+            # the assignment has to go first: a role still assigned to an account cannot be deleted
+            _delete(_account_roles_path('alice', role_name), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_delete_role_refused_while_it_has_permissions(self):
@@ -717,10 +719,12 @@ class TestROLE:
             assert _delete(_role_path(role_name), 'root').status_code == CONFLICT
             assert _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == OK
         finally:
+            # the permission has to go first: a role that still has permissions cannot be deleted
+            _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_lock_and_unlock_account_role(self):
-        """RBAC(ADMIN): locking and unlocking an assignment toggles its locked flag, repeating it succeeds with a warning"""
+        """RBAC(ADMIN): an assignment is locked on creation, locking and unlocking toggles the flag, repeating it succeeds with a warning"""
         role_name = 'tmp'
 
         def _locked() -> bool:
@@ -730,11 +734,8 @@ class TestROLE:
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
             assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
-            assert _locked() is False
-
-            response = _post(_account_roles_path('alice', role_name, 'lock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' not in response.json()
+            # a role assigned through the API is locked right away, so that an external
+            # entity (e.g. an identity provider) cannot alter it
             assert _locked() is True
 
             # locking an already locked assignment is a warning, not an error
@@ -754,8 +755,13 @@ class TestROLE:
             assert 'warning' in response.json()
             assert _locked() is False
 
-            assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
+            response = _post(_account_roles_path('alice', role_name, 'lock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' not in response.json()
+            assert _locked() is True
         finally:
+            # the assignment has to go first: a role still assigned to an account cannot be deleted
+            _delete(_account_roles_path('alice', role_name), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     # --- role descriptions -------------------------------------------------------------
@@ -809,6 +815,8 @@ class TestROLE:
             assert [role['description'] for role in roles if role['role'] == role_name] == ['Assigned role description']
             assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
         finally:
+            # the assignment has to go first: a role still assigned to an account cannot be deleted
+            _delete(_account_roles_path('alice', role_name), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_invalid_role_description_is_rejected(self):
