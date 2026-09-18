@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from json import dumps
 from typing import TYPE_CHECKING, Any, Literal, Optional
 from urllib.parse import quote_plus
@@ -24,6 +25,8 @@ from rucio.common.utils import build_url
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from requests import Response
 
 
 class AccountClient(BaseClient):
@@ -158,6 +161,32 @@ class AccountClient(BaseClient):
         if response.status_code != codes.ok:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
+
+    def lock_account_role(self, account: str, role: str) -> None:
+        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role), 'lock']))
+        response = self._send_request(url, method=HTTPMethod.POST)
+        if response.status_code != codes.ok:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+        self._warn_on_response(response)
+
+    def unlock_account_role(self, account: str, role: str) -> None:
+        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role), 'unlock']))
+        response = self._send_request(url, method=HTTPMethod.POST)
+        if response.status_code != codes.ok:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+        self._warn_on_response(response)
+
+    @staticmethod
+    def _warn_on_response(response: 'Response') -> None:
+        """Surface a warning returned by the server alongside a successful response."""
+        try:
+            warning = response.json().get('warning')
+        except ValueError:
+            return
+        if warning:
+            warnings.warn(warning, stacklevel=3)
 
     def get_account(self, account: str) -> Optional[dict[str, Any]]:
         """
