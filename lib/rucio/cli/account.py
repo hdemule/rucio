@@ -17,7 +17,7 @@ import click
 from rich.text import Text
 from tabulate import tabulate
 
-from rucio.cli.utils import wrap_table_column
+from rucio.cli.utils import format_operations, wrap_table_column
 from rucio.client.richclient import CLITheme, generate_table, print_output
 from rucio.common.exception import InputValidationError
 from rucio.common.utils import get_bytes_value_from_string, sizefmt
@@ -335,7 +335,16 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
     if detail:
         click.echo()
         click.echo(f"Permissions granted via roles for account {account_name}:")
-        click.echo(tabulate([[permission['role'], permission['operation'], permission['scope']] for permission in rbac['permissions']], headers=["ROLE", "OPERATION", "SCOPE"], tablefmt=ctx.obj.tablefmt))
+
+        ops_by_role_scope: dict[tuple[str, str], set[str]] = {}
+        for permission in rbac['permissions']:
+            ops_by_role_scope.setdefault((permission['role'], permission['scope']), set()).add(permission['operation'])
+
+        permission_rows = [
+            [role_name, scope, format_operations(operations)]
+            for (role_name, scope), operations in sorted(ops_by_role_scope.items())
+        ]
+        click.echo(tabulate(permission_rows, headers=["ROLE", "SCOPE", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
 @role.command("add")
