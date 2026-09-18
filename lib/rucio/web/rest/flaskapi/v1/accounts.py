@@ -309,6 +309,32 @@ class Roles(ErrorHandlingMethodView):
         return jsonify({"message": f"Role '{role}' successfully removed from account '{account}'."}), 200
 
 
+class RoleLock(ErrorHandlingMethodView):
+    def post(self, account: str, role: str) -> 'ResponseReturnValue':
+        try:
+            locked = role_gateway.lock_account_role(account=account, role=role, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RoleAssignmentNotFound as error:
+            return generate_http_error_flask(404, error)
+        if not locked:
+            return jsonify({"message": f"Role '{role}' was already locked for account '{account}'.", "warning": f"Role '{role}' is already locked for account '{account}'."}), 200
+        return jsonify({"message": f"Role '{role}' successfully locked for account '{account}'."}), 200
+
+
+class RoleUnlock(ErrorHandlingMethodView):
+    def post(self, account: str, role: str) -> 'ResponseReturnValue':
+        try:
+            unlocked = role_gateway.unlock_account_role(account=account, role=role, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RoleAssignmentNotFound as error:
+            return generate_http_error_flask(404, error)
+        if not unlocked:
+            return jsonify({"message": f"Role '{role}' was already unlocked for account '{account}'.", "warning": f"Role '{role}' is already unlocked for account '{account}'."}), 200
+        return jsonify({"message": f"Role '{role}' successfully unlocked for account '{account}'."}), 200
+
+
 class AccountParameter(ErrorHandlingMethodView):
     """ create, update, get and disable rucio accounts. """
 
@@ -1277,6 +1303,10 @@ def blueprint(with_doc: bool = False) -> AuthenticatedBlueprint:
     roles_view = Roles.as_view('roles')
     bp.add_url_rule('/<account>/roles', view_func=roles_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/roles/<role>', view_func=roles_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
+    role_lock_view = RoleLock.as_view('role_lock')
+    bp.add_url_rule('/<account>/roles/<role>/lock', view_func=role_lock_view, methods=[HTTPMethod.POST.value])
+    role_unlock_view = RoleUnlock.as_view('role_unlock')
+    bp.add_url_rule('/<account>/roles/<role>/unlock', view_func=role_unlock_view, methods=[HTTPMethod.POST.value])
     local_account_limits_view = LocalAccountLimits.as_view('local_account_limit')
     bp.add_url_rule('/<account>/limits/local', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/limits', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
