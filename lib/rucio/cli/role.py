@@ -1,8 +1,10 @@
 from enum import Enum
+from typing import Optional
 
 import click
 from tabulate import tabulate
 
+from rucio.cli.utils import wrap_table_column
 from rucio.common.exception import Duplicate, RolePermissionNotFound
 
 
@@ -34,18 +36,34 @@ def role():
 @role.command("list")
 @click.pass_context
 def list_(ctx: click.Context) -> None:
-    """List all roles."""
+    """List all roles with their description."""
     roles = ctx.obj.client.list_roles()
-    click.echo(tabulate([[role_name] for role_name in roles], headers=["ROLE"], tablefmt=ctx.obj.tablefmt))
+    rows = [[role_entry['role'], role_entry.get('description') or ''] for role_entry in roles]
+    headers = ["ROLE", "DESCRIPTION"]
+    click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
 
 
 @role.command("add")
 @click.pass_context
 @click.argument("role_name")
-def add(ctx: click.Context, role_name: str) -> None:
-    """Add a new role."""
-    ctx.obj.client.add_role(role_name)
+@click.option("--description", help="Description of the role")
+def add(ctx: click.Context, role_name: str, description: Optional[str]) -> None:
+    """Add a new role, optionally with a description."""
+    ctx.obj.client.add_role(role_name, description=description)
     click.echo(f"Role '{role_name}' added.")
+
+
+@role.command("update")
+@click.pass_context
+@click.argument("role_name")
+@click.option("--description", required=True, help='New description of the role, overwriting the existing one. Pass an empty string ("") to remove the description.')
+def update(ctx: click.Context, role_name: str, description: str) -> None:
+    """Update metadata of ROLE_NAME. The given description overwrites the existing one; an empty description removes it."""
+    ctx.obj.client.set_role_description(role_name, description)
+    if description.strip():
+        click.echo(f"Description of role '{role_name}' updated.")
+    else:
+        click.echo(f"Description of role '{role_name}' removed.")
 
 
 @role.command("delete")

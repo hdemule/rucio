@@ -1,10 +1,10 @@
 from flask import Flask, jsonify, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, Duplicate, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
-from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_permissions, list_roles
+from rucio.common.exception import AccessDenied, Duplicate, InputValidationError, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
+from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_permissions, list_roles, set_role_description
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
-from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, generate_http_error_flask, response_headers
+from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, generate_http_error_flask, json_parameters, param_get, response_headers
 
 
 class RoleList(ErrorHandlingMethodView):
@@ -17,14 +17,37 @@ class RoleList(ErrorHandlingMethodView):
         return jsonify(roles), 200
 
     def post(self, role_name: str):
+        parameters = json_parameters(optional=True)
+        description = param_get(parameters, 'description', default=None)
+
         try:
-            add_role(role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
+            add_role(role_name, issuer=request.environ['issuer'], description=description, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
         except Duplicate as error:
             return generate_http_error_flask(409, error)
 
         return jsonify({"message": f"Role '{role_name}' successfully added."}), 201
+
+    def put(self, role_name: str):
+        """Overwrite the description of a role. An empty description clears it."""
+        parameters = json_parameters()
+        description = param_get(parameters, 'description')
+
+        try:
+            stored = set_role_description(role=role_name, description=description, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
+        except RoleNotFound as error:
+            return generate_http_error_flask(404, error)
+
+        if stored is None:
+            return jsonify({"message": f"Description of role '{role_name}' successfully cleared."}), 200
+        return jsonify({"message": f"Description of role '{role_name}' successfully updated."}), 200
 
     def delete(self, role_name: str):
         try:
@@ -75,7 +98,7 @@ def blueprint() -> AuthenticatedBlueprint:
     bp = AuthenticatedBlueprint("roles", __name__, url_prefix="/roles")
     role_list_view = RoleList.as_view("role_list")
     bp.add_url_rule("/", view_func=role_list_view, methods=[HTTPMethod.GET.value])
-    bp.add_url_rule("/<role_name>", view_func=role_list_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
+    bp.add_url_rule("/<role_name>", view_func=role_list_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
     role_permissions_view = RolePermissions.as_view("role_permissions")
     bp.add_url_rule("/<role_name>/permissions", view_func=role_permissions_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule("/<role_name>/permissions/<operation>/<scope>", view_func=role_permissions_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])

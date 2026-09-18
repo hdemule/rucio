@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess  # noqa: S404 -- subprocess used for external commands
 import sys
+import textwrap
 import traceback
 from configparser import NoOptionError, NoSectionError
 from datetime import datetime
@@ -62,6 +63,50 @@ if TYPE_CHECKING:
 
 SUCCESS = 0
 FAILURE = 1
+
+
+def wrap_table_column(
+    rows: "Sequence[Sequence[Any]]",
+    headers: "Sequence[str]",
+    column: int,
+    min_width: int = 24,
+) -> list[list[Any]]:
+    """
+    Wrap a free-text column so that a tabulated table still fits the terminal.
+
+    The other columns keep their natural width and whatever horizontal space is left over
+    is given to `column`, so that long values (e.g. a role description) wrap instead of
+    stretching the table far beyond the terminal. Line breaks already present in the text
+    are kept, so paragraphs stay intact.
+
+    :param rows: The rows that will be tabulated.
+    :param headers: The column headers of the table.
+    :param column: Index of the column to wrap.
+    :param min_width: Lower bound, so a narrow terminal yields a tall table rather than one character per line.
+    :returns: A new list of rows, with `column` wrapped.
+    """
+    natural_width = 0
+    for index, header in enumerate(headers):
+        if index == column:
+            continue
+        natural_width += max([len(header)] + [len(str(row[index])) for row in rows])
+
+    # every column is padded and separated by borders, e.g. '| a | b |' in the default 'psql' format
+    borders = 3 * len(headers) + 1
+    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    width = max(min_width, terminal_width - natural_width - borders)
+
+    wrapped_rows = []
+    for row in rows:
+        wrapped_row = list(row)
+        lines = []
+        for line in str(wrapped_row[column]).splitlines():
+            # an empty line wraps to nothing, keep it so blank lines between paragraphs survive
+            lines.extend(textwrap.wrap(line, width) or [''])
+        wrapped_row[column] = '\n'.join(lines)
+        wrapped_rows.append(wrapped_row)
+
+    return wrapped_rows
 
 
 def exception_handler(function: "Callable") -> "Callable":
