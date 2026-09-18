@@ -223,7 +223,6 @@ def perm_list_content_history(issuer: "InternalAccount", kwargs: dict[str, Any],
 def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can list the files of a DID.
-    ! Note: Check that a user cannot read anything if the parent scope is not readable. Otherwise, consider filter data instead.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
