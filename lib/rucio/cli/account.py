@@ -17,7 +17,7 @@ import click
 from rich.text import Text
 from tabulate import tabulate
 
-from rucio.cli.utils import RichCLITheme, RichUtils
+from rucio.cli.utils import RichCLITheme, RichUtils, wrap_table_column
 from rucio.common.exception import InputValidationError
 from rucio.common.utils import get_bytes_value_from_string, sizefmt
 
@@ -328,7 +328,9 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
     """List roles assigned to ACCOUNT_NAME."""
     rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
     click.echo(f"Roles for account {account_name}:")
-    click.echo(tabulate([[r['role'], r['locked']] for r in rbac['roles']], headers=["ROLE", "LOCKED"], tablefmt=ctx.obj.tablefmt))
+    rows = [[r['role'], r['locked'], r.get('description') or ''] for r in rbac['roles']]
+    headers = ["ROLE", "LOCKED", "DESCRIPTION"]
+    click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
     if detail:
         click.echo()
         click.echo(f"Permissions granted via roles for account {account_name}:")
