@@ -108,42 +108,6 @@ def remove(ctx: click.Context, account_name: str):
     ctx.obj.client.delete_account(account_name)
     print('Deleted account: %s' % account_name)
 
-@account.group()
-def role() -> None:
-    """Manage roles assigned to an account."""
-
-@role.command("list")
-@click.argument("account_name")
-@click.option("--detail", is_flag=True, help="Also list permissions granted by each role.")
-@click.pass_context
-def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
-    """List roles assigned to ACCOUNT_NAME."""
-    rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
-    click.echo(f"Roles for account {account_name}:")
-    click.echo(tabulate([[r['role'], r['locked']] for r in rbac['roles']], headers=["ROLE", "LOCKED"], tablefmt=ctx.obj.tablefmt))
-    if detail:
-        click.echo()
-        click.echo(f"Permissions granted via roles for account {account_name}:")
-        click.echo(tabulate([[permission['role'], permission['operation'], permission['scope']] for permission in rbac['permissions']], headers=["ROLE", "OPERATION", "SCOPE"], tablefmt=ctx.obj.tablefmt))
-
-@role.command("add")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.pass_context
-def role_add(ctx: click.Context, role_name: str, account_name: str) -> None:
-    """Assign ROLE_NAME to ACCOUNT_NAME."""
-    ctx.obj.client.add_account_role(account_name, role_name)
-    click.echo(f"Added role '{role_name}' to account '{account_name}'.")
-
-@role.command("remove")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.pass_context
-def role_remove(ctx: click.Context, role_name: str, account_name: str) -> None:
-    """Remove ROLE_NAME from ACCOUNT_NAME."""
-    ctx.obj.client.delete_account_role(account_name, role_name)
-    click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
-
 
 @account.command("update")
 @click.argument("account-name")
@@ -349,3 +313,63 @@ def identity_remove(ctx: click.Context, account_name: str, type_: str, id: str):
     """Revoke a given ID's access from an account"""
     ctx.obj.client.del_identity(account_name, id, authtype=type_)
     print('Deleted identity: %s' % id)
+
+
+@account.group()
+def role() -> None:
+    """Manage roles assigned to an account."""
+
+
+@role.command("list")
+@click.argument("account_name")
+@click.option("--detail", is_flag=True, help="Also list permissions granted by each role.")
+@click.pass_context
+def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
+    """List roles assigned to ACCOUNT_NAME."""
+    rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
+    click.echo(f"Roles for account {account_name}:")
+    click.echo(tabulate([[r['role'], r['locked']] for r in rbac['roles']], headers=["ROLE", "LOCKED"], tablefmt=ctx.obj.tablefmt))
+    if detail:
+        click.echo()
+        click.echo(f"Permissions granted via roles for account {account_name}:")
+        click.echo(tabulate([[permission['role'], permission['operation'], permission['scope']] for permission in rbac['permissions']], headers=["ROLE", "OPERATION", "SCOPE"], tablefmt=ctx.obj.tablefmt))
+
+
+@role.command("add")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.pass_context
+def role_add(ctx: click.Context, role_name: str, account_name: str) -> None:
+    """Assign ROLE_NAME to ACCOUNT_NAME. The newly assigned role will be locked by default, which means it cannot be altered by any external entity (e.g. identity provider). To unlock it, use the 'rucio account role unlock' command."""
+    ctx.obj.client.add_account_role(account_name, role_name)
+    click.echo(f"Added role '{role_name}' to account '{account_name}'.")
+
+
+@role.command("remove")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.pass_context
+def role_remove(ctx: click.Context, role_name: str, account_name: str) -> None:
+    """Remove ROLE_NAME from ACCOUNT_NAME."""
+    ctx.obj.client.delete_account_role(account_name, role_name)
+    click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
+
+
+@role.command("lock")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.pass_context
+def role_lock(ctx: click.Context, role_name: str, account_name: str) -> None:
+    """Lock ROLE_NAME for ACCOUNT_NAME. A locked role is a role that cannot be altered by any external entity (e.g. identity provider). By default, any role assigned internally to an account (rucio account role add) is locked."""
+    ctx.obj.client.lock_account_role(account_name, role_name)
+    click.echo(f"Locked role '{role_name}' for account '{account_name}'.")
+
+
+@role.command("unlock")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.pass_context
+def role_unlock(ctx: click.Context, role_name: str, account_name: str) -> None:
+    """Unlock ROLE_NAME for ACCOUNT_NAME. A previously locked role can now be altered by external entities (e.g. identity provider)."""
+    ctx.obj.client.unlock_account_role(account_name, role_name)
+    click.echo(f"Unlocked role '{role_name}' for account '{account_name}'.")
