@@ -59,6 +59,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_roles': perm_list_roles,
         'add_role': perm_add_role,
         'delete_role': perm_delete_role,
+        'set_role_description': perm_set_role_description,
         'list_account_roles': perm_list_account_roles,
         'add_account_role': perm_add_account_role,
         'delete_account_role': perm_delete_account_role,
@@ -367,6 +368,17 @@ def perm_list_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
 def perm_add_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can add a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_set_role_description(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can set the description of a role.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
