@@ -668,8 +668,10 @@ class TestROLE:
             ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas')),
             ('POST', _account_roles_path('bob', 'data-scientist')),
             ('DELETE', _account_roles_path('alice', 'data-scientist')),
+            ('POST', _account_roles_path('alice', 'data-scientist', 'lock')),
+            ('POST', _account_roles_path('alice', 'data-scientist', 'unlock')),
         ],
-        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role'],
+        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'lock account role', 'unlock account role'],
     )
     def test_non_admin_cannot_write_role_data(self, method, path):
         """RBAC(USER): role management write operations are restricted to root/admin regardless of the caller's own RBAC assignments"""
@@ -710,6 +712,45 @@ class TestROLE:
         finally:
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
+    def test_lock_and_unlock_account_role(self):
+        """RBAC(ADMIN): locking and unlocking an assignment toggles its locked flag, repeating it succeeds with a warning"""
+        role_name = 'tmp'
+
+        def _locked() -> bool:
+            roles = _get(_account_roles_path('alice'), 'root').json()['roles']
+            return [role['locked'] for role in roles if role['role'] == role_name][0]
+
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
+            assert _locked() is False
+
+            response = _post(_account_roles_path('alice', role_name, 'lock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' not in response.json()
+            assert _locked() is True
+
+            # locking an already locked assignment is a warning, not an error
+            response = _post(_account_roles_path('alice', role_name, 'lock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' in response.json()
+            assert _locked() is True
+
+            response = _post(_account_roles_path('alice', role_name, 'unlock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' not in response.json()
+            assert _locked() is False
+
+            # unlocking an already unlocked assignment is a warning, not an error
+            response = _post(_account_roles_path('alice', role_name, 'unlock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' in response.json()
+            assert _locked() is False
+
+            assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
     @pytest.mark.parametrize(
         ('method', 'path'),
         [
@@ -720,6 +761,8 @@ class TestROLE:
             ('POST', _role_path('non_existing_role', 'permissions', 'read', 'atlas')),
             ('POST', _role_path('data-scientist', 'permissions', 'read', 'non_existing_scope')),
             ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'root')),
+            ('POST', _account_roles_path('bob', 'data-scientist', 'lock')),
+            ('POST', _account_roles_path('bob', 'data-scientist', 'unlock')),
         ],
         ids=[
             'delete non-existing role',
@@ -729,6 +772,8 @@ class TestROLE:
             'add permission to non-existing role',
             'add permission on non-existing scope',
             'remove permission not granted to role',
+            'lock role not assigned to account',
+            'unlock role not assigned to account',
         ],
     )
     def test_operations_on_nonexistent_targets_return_not_found(self, method, path):
