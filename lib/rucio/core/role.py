@@ -109,6 +109,28 @@ def delete_account_role(account: "InternalAccount", role: str, session: "Session
     session.commit()
 
 
+def set_account_role_locked(account: "InternalAccount", role: str, locked: bool, session: "Session") -> bool:
+    """
+    Set the locked state of a role assigned to an account.
+
+    :param account: The account the role is assigned to.
+    :param role: The role to lock or unlock.
+    :param locked: The requested locked state.
+    :param session: The database session.
+    :returns: True if the state was changed, False if the assignment already was in the requested state.
+    """
+    mapping = session.get(models.AccountRoleAssociation, (account, role))
+    if mapping is None:
+        raise RoleAssignmentNotFound("Either account '%s' or role '%s' does not exist, or the account does not have that role assigned." % (account, role))
+
+    if mapping.locked == locked:
+        return False
+
+    mapping.locked = locked
+    session.commit()
+    return True
+
+
 def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
     stmt = (
         select(models.RolePermissionAssociation)

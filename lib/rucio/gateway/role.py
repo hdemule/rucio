@@ -61,6 +61,7 @@ def add_account_role(account: str, role: str, issuer: str, vo: str = DEFAULT_VO)
             raise AccessDenied('Account %s does not have permission to add role %s to account %s.' % (issuer, role, account))
 
         core_role.add_account_role(account=InternalAccount(account, vo=vo), role=role, session=session)
+        core_role.set_account_role_locked(account=InternalAccount(account, vo=vo), role=role, locked=True, session=session)
 
 
 def delete_account_role(account: str, role: str, issuer: str, vo: str = DEFAULT_VO) -> None:
@@ -69,6 +70,34 @@ def delete_account_role(account: str, role: str, issuer: str, vo: str = DEFAULT_
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to delete role %s from account %s.' % (issuer, role, account))
         core_role.delete_account_role(account=InternalAccount(account, vo=vo), role=role, session=session)
+
+
+def lock_account_role(account: str, role: str, issuer: str, vo: str = DEFAULT_VO) -> bool:
+    """
+    Lock a role assigned to an account.
+
+    :returns: True if the role was locked, False if it already was locked.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='lock_account_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to lock role %s for account %s.' % (issuer, role, account))
+
+        return core_role.set_account_role_locked(account=InternalAccount(account, vo=vo), role=role, locked=True, session=session)
+
+
+def unlock_account_role(account: str, role: str, issuer: str, vo: str = DEFAULT_VO) -> bool:
+    """
+    Unlock a role assigned to an account.
+
+    :returns: True if the role was unlocked, False if it already was unlocked.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='unlock_account_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to unlock role %s for account %s.' % (issuer, role, account))
+
+        return core_role.set_account_role_locked(account=InternalAccount(account, vo=vo), role=role, locked=False, session=session)
 
 
 def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, str]]:
