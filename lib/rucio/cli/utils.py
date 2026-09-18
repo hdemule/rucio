@@ -26,6 +26,7 @@ import textwrap
 import traceback
 from configparser import NoOptionError, NoSectionError
 from datetime import datetime
+from enum import Enum
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -57,12 +58,39 @@ from rucio.common.exception import (
 from rucio.common.utils import extract_scope, setup_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from rich.style import StyleType
 
 SUCCESS = 0
 FAILURE = 1
+
+
+# Client-side representation of database operation types.
+class DatabaseOperationType(Enum):
+    READ = 'read'
+    WRITE = 'write'
+
+
+# The letter shown for each operation, in the order the operations are rendered.
+OPERATION_LETTERS: dict[DatabaseOperationType, str] = {
+    DatabaseOperationType.READ: 'r',
+    DatabaseOperationType.WRITE: 'w',
+}
+
+
+def format_operations(operations: "Iterable[str]") -> str:
+    """
+    Render the operations granted on a scope compactly, e.g. 'rw' for read and write, 'r-' for read only.
+
+    :param operations: The operation values that are granted, e.g. 'read' and/or 'write'.
+    :returns: One character per known operation, with '-' where the operation is not granted.
+    """
+    granted = set(operations)
+    return ''.join(
+        letter if operation.value in granted else '-'
+        for operation, letter in OPERATION_LETTERS.items()
+    )
 
 
 def wrap_table_column(
