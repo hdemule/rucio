@@ -1,18 +1,10 @@
-from enum import Enum
 from typing import Optional
 
 import click
 from tabulate import tabulate
 
-from rucio.cli.utils import wrap_table_column
+from rucio.cli.utils import DatabaseOperationType, format_operations, wrap_table_column
 from rucio.common.exception import Duplicate, RolePermissionNotFound
-
-
-# Client-side representation of database operation types.
-class DatabaseOperationType(Enum):
-    READ = 'read'
-    WRITE = 'write'
-
 
 # Shorthands accepted on the command line, mapped to the operation(s) they expand to.
 OPERATION_SHORTHANDS: dict[str, list[DatabaseOperationType]] = {
@@ -21,10 +13,6 @@ OPERATION_SHORTHANDS: dict[str, list[DatabaseOperationType]] = {
     'w': [DatabaseOperationType.WRITE],
     'write': [DatabaseOperationType.WRITE],
     'rw': [DatabaseOperationType.READ, DatabaseOperationType.WRITE],
-}
-OPERATION_LETTERS: dict[str, str] = {
-    DatabaseOperationType.READ.value: 'r',
-    DatabaseOperationType.WRITE.value: 'w',
 }
 
 
@@ -91,10 +79,7 @@ def permission_list(ctx: click.Context, role_name: str) -> None:
     for permission in permissions:
         ops_by_scope.setdefault(permission['scope'], set()).add(permission['operation'])
 
-    rows = [
-        [scope, ''.join(OPERATION_LETTERS[op] if op in ops else '-' for op in (DatabaseOperationType.READ.value, DatabaseOperationType.WRITE.value))]
-        for scope, ops in sorted(ops_by_scope.items())
-    ]
+    rows = [[scope, format_operations(ops)] for scope, ops in sorted(ops_by_scope.items())]
     click.echo(tabulate(rows, headers=["SCOPE", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
