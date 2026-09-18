@@ -46,7 +46,7 @@ def add(ctx: click.Context, role_name: str, description: Optional[str]) -> None:
 @click.argument("role_name")
 @click.option("--description", required=True, help='New description of the role, overwriting the existing one. Pass an empty string ("") to remove the description.')
 def update(ctx: click.Context, role_name: str, description: str) -> None:
-    """Update metadata of ROLE_NAME. The given description overwrites the existing one; an empty description removes it."""
+    """Update metadata of a role. The given description overwrites the existing one; an empty description removes it."""
     ctx.obj.client.set_role_description(role_name, description)
     if description.strip():
         click.echo(f"Description of role '{role_name}' updated.")
