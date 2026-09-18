@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 
-from rucio.common.exception import AccountNotFound, Duplicate, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
+from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
 from rucio.common.types import InternalScope
 from rucio.core import permission
 from rucio.core.scope import is_scope_owner
@@ -37,26 +37,71 @@ def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
     return constraint_name.lower() in str(error.orig or error).lower()
 
 
-def list_roles(session: "Session") -> list[str]:
+def _normalize_description(description: Optional[str]) -> Optional[str]:
     """
-    List all roles defined in the system.
+    Normalise a role description before it is stored.
+
+    Surrounding whitespace is stripped and a description which is empty afterwards
+    is stored as NULL, so that passing an empty string clears the description.
+
+    The length is not restricted here, since `roles.description` is an unbounded text column.
+
+    :param description: The description as supplied by the caller.
+    :returns: The description to store, or None if it should be cleared.
+    :raises InputValidationError: If the description is not a string.
     """
-    stmt = select(models.Roles.role).order_by(models.Roles.role)
-    result = session.execute(stmt).scalars().all()
-    return list(result)
+    if description is None:
+        return None
+
+    if not isinstance(description, str):
+        raise InputValidationError("Role description must be a string, got '%s'." % type(description).__name__)
+
+    return description.strip() or None
 
 
-def add_role(role: str, session: "Session") -> None:
+def list_roles(session: "Session") -> list[dict[str, Any]]:
+    """
+    List all roles defined in the system, together with their description.
+    """
+    stmt = select(models.Roles.role, models.Roles.description).order_by(models.Roles.role)
+    return [{'role': role, 'description': description} for role, description in session.execute(stmt).all()]
+
+
+def add_role(role: str, description: Optional[str] = None, *, session: "Session") -> None:
     """
     Add a new role to the system.
+
+    :param role: The name of the role to add.
+    :param description: An optional description of the role. An empty description is stored as NULL.
+    :param session: The database session.
     """
-    new_role = models.Roles(role=role)
+    new_role = models.Roles(role=role, description=_normalize_description(description))
     session.add(new_role)
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
         raise Duplicate("Role '%s' already exists." % role)
+
+
+def set_role_description(role: str, description: Optional[str], *, session: "Session") -> Optional[str]:
+    """
+    Overwrite the description of an existing role.
+
+    :param role: The role to update.
+    :param description: The new description. An empty description clears the field (stored as NULL).
+    :param session: The database session.
+    :returns: The description as it was stored, or None if it was cleared.
+    """
+    stmt = select(models.Roles).where(models.Roles.role == role)
+    role_obj = session.execute(stmt).scalar_one_or_none()
+    if role_obj is None:
+        raise RoleNotFound("Role '%s' does not exist." % role)
+
+    normalized = _normalize_description(description)
+    role_obj.description = normalized
+    session.commit()
+    return normalized
 
 
 def delete_role(role: str, session: "Session") -> None:
@@ -78,11 +123,15 @@ def delete_role(role: str, session: "Session") -> None:
 
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
     stmt = (
-        select(models.AccountRoleAssociation.role, models.AccountRoleAssociation.locked)
+        select(models.AccountRoleAssociation.role, models.AccountRoleAssociation.locked, models.Roles.description)
+        .join(models.Roles, models.Roles.role == models.AccountRoleAssociation.role)
         .where(models.AccountRoleAssociation.account == account)
         .order_by(models.AccountRoleAssociation.role)
     )
-    return [{'role': role, 'locked': locked} for role, locked in session.execute(stmt).all()]
+    return [
+        {'role': role, 'locked': locked, 'description': description}
+        for role, locked, description in session.execute(stmt).all()
+    ]
 
 
 def add_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
