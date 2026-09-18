@@ -1,4 +1,4 @@
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 from rucio.common.constants import DEFAULT_VO
 from rucio.common.exception import AccessDenied
@@ -9,7 +9,7 @@ from rucio.db.sqla.session import db_session
 from rucio.gateway.permission import has_permission
 
 
-def list_roles(issuer: str, vo: str = DEFAULT_VO) -> list[str]:
+def list_roles(issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, Any]]:
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_roles', kwargs={}, session=session)
         if not auth_result.allowed:
@@ -18,13 +18,39 @@ def list_roles(issuer: str, vo: str = DEFAULT_VO) -> list[str]:
         return core_role.list_roles(session=session)
 
 
-def add_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> None:
+def add_role(role: str, issuer: str, description: Optional[str] = None, vo: str = DEFAULT_VO) -> None:
+    """
+    Add a new role.
+
+    :param role: The name of the role to add.
+    :param issuer: The account issuing the command.
+    :param description: An optional description of the role. An empty description is stored as NULL.
+    :param vo: The VO of the issuing account.
+    """
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='add_role', kwargs={}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to add role.' % issuer)
 
-        core_role.add_role(role=role, session=session)
+        core_role.add_role(role=role, description=description, session=session)
+
+
+def set_role_description(role: str, description: Optional[str], issuer: str, vo: str = DEFAULT_VO) -> Optional[str]:
+    """
+    Overwrite the description of an existing role.
+
+    :param role: The role to update.
+    :param description: The new description. An empty description clears the field (stored as NULL).
+    :param issuer: The account issuing the command.
+    :param vo: The VO of the issuing account.
+    :returns: The description as it was stored, or None if it was cleared.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='set_role_description', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to set the description of role %s.' % (issuer, role))
+
+        return core_role.set_role_description(role=role, description=description, session=session)
 
 
 def delete_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> None:
