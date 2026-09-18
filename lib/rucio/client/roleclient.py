@@ -1,17 +1,26 @@
 from json import loads
+from typing import Any, Optional
 from urllib.parse import quote_plus
 
 from requests.status_codes import codes
 
 from rucio.client.baseclient import BaseClient, choice
 from rucio.common.constants import HTTPMethod
-from rucio.common.utils import build_url
+from rucio.common.utils import build_url, render_json
 
 
 class RoleClient(BaseClient):
     ROLES_BASEURL = "roles"
 
-    def list_roles(self) -> list[str]:
+    def list_roles(self) -> list[dict[str, Any]]:
+        """
+        List all roles.
+
+        Returns
+        -------
+            A list of dictionaries, one per role, with the keys `role` and `description`.
+            `description` is None for roles without a description.
+        """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/")
         response = self._send_request(url, method=HTTPMethod.GET)
 
@@ -25,11 +34,46 @@ class RoleClient(BaseClient):
         )
         raise exc_cls(exc_msg)
 
-    def add_role(self, role: str) -> None:
+    def add_role(self, role: str, description: Optional[str] = None) -> None:
+        """
+        Add a new role.
+
+        Parameters
+        ----------
+        role :
+            The name of the role to add.
+        description :
+            An optional description of the role. An empty description is stored as NULL.
+        """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
-        response = self._send_request(url, method=HTTPMethod.POST)
+        data = render_json(description=description) if description is not None else None
+        response = self._send_request(url, method=HTTPMethod.POST, data=data)
 
         if response.status_code == codes.created:
+            return
+
+        exc_cls, exc_msg = self._get_exception(
+            headers=response.headers,
+            status_code=response.status_code,
+            data=response.content,
+        )
+        raise exc_cls(exc_msg)
+
+    def set_role_description(self, role: str, description: Optional[str]) -> None:
+        """
+        Overwrite the description of an existing role.
+
+        Parameters
+        ----------
+        role :
+            The role to update.
+        description :
+            The new description. An empty string (or None) clears the description.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
+        response = self._send_request(url, method=HTTPMethod.PUT, data=render_json(description=description))
+
+        if response.status_code == codes.ok:
             return
 
         exc_cls, exc_msg = self._get_exception(
