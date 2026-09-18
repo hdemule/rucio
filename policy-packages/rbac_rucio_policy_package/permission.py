@@ -65,6 +65,8 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_role_permissions': perm_list_role_permissions,
         'add_role_permission': perm_add_role_permission,
         'delete_role_permission': perm_delete_role_permission,
+        'lock_account_role': perm_lock_account_role,
+        'unlock_account_role': perm_lock_account_role,
         }
 
     handler = perm.get(action)
@@ -458,6 +460,17 @@ def perm_add_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any], 
 def perm_delete_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can delete a permission from a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_lock_account_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can lock a role assigned to an account.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
