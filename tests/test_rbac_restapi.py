@@ -48,6 +48,7 @@ from rucio.gateway.did import list_files
 # HTTP status code the REST API returns
 OK = 200
 CREATED = 201
+BAD_REQUEST = 400
 FORBIDDEN = 403
 NOT_FOUND = 404
 CONFLICT = 409  # returned for both Duplicate and RoleInUse errors
@@ -632,10 +633,13 @@ class TestROLE:
     # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
 
     def test_list_roles(self):
-        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and includes the fixture role"""
+        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description"""
         response = _get('/roles/', 'root')
         assert response.status_code == OK
-        assert 'data-scientist' in response.json()
+        roles = response.json()
+        assert 'data-scientist' in [role['role'] for role in roles]
+        # every entry carries a description, which is null for roles without one
+        assert all('description' in role for role in roles)
         for account in ('alice', 'bob'):
             assert _get('/roles/', account).status_code == FORBIDDEN
 
@@ -654,7 +658,10 @@ class TestROLE:
         for account in ('root', 'alice'):
             response = _get(_account_roles_path('alice'), account)
             assert response.status_code == OK
-            assert 'data-scientist' in [role['role'] for role in response.json()['roles']]
+            roles = response.json()['roles']
+            assert 'data-scientist' in [role['role'] for role in roles]
+            # the description of each assigned role is reported alongside its locked state
+            assert all({'locked', 'description'} <= set(role) for role in roles)
         assert _get(_account_roles_path('bob'), account).status_code == FORBIDDEN
 
     # --- write operations are refused for every non-admin caller, whatever their own roles ----
@@ -750,6 +757,90 @@ class TestROLE:
             assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
         finally:
             assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    # --- role descriptions -------------------------------------------------------------
+
+    def _role_description(self, role_name: str) -> Any:
+        """Read the description of `role_name` back from GET /roles/."""
+        roles = _get('/roles/', 'root').json()
+        return [role['description'] for role in roles if role['role'] == role_name][0]
+
+    def test_role_description_is_optional_on_add(self):
+        """RBAC(ADMIN): a role added without a description has a null description"""
+        role_name = 'tmp_no_description'
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert self._role_description(role_name) is None
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_role_description_lifecycle(self):
+        """RBAC(ADMIN): a description can be set on add, overwritten via PUT and cleared with an empty string"""
+        role_name = 'tmp_described'
+        assert _post(_role_path(role_name), 'root', json={'description': 'Initial description'}).status_code == CREATED
+        try:
+            assert self._role_description(role_name) == 'Initial description'
+
+            # PUT overwrites the existing description
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': 'Overwritten description'}).status_code == OK
+            assert self._role_description(role_name) == 'Overwritten description'
+
+            # an empty description clears the field
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': ''}).status_code == OK
+            assert self._role_description(role_name) is None
+
+            # a role that has no description can be described afterwards, surrounding whitespace is trimmed
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': '  Trimmed description  '}).status_code == OK
+            assert self._role_description(role_name) == 'Trimmed description'
+
+            # a whitespace-only description clears the field too
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': '   '}).status_code == OK
+            assert self._role_description(role_name) is None
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_role_description_is_reported_for_assigned_roles(self):
+        """RBAC(ADMIN): GET /accounts/<account>/roles reports the description of each assigned role"""
+        role_name = 'tmp_described_assignment'
+        assert _post(_role_path(role_name), 'root', json={'description': 'Assigned role description'}).status_code == CREATED
+        try:
+            assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
+            roles = _get(_account_roles_path('alice'), 'root').json()['roles']
+            assert [role['description'] for role in roles if role['role'] == role_name] == ['Assigned role description']
+            assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_invalid_role_description_is_rejected(self):
+        """RBAC(ADMIN): a missing or non-string description is refused with 400"""
+        role_name = 'tmp_invalid_description'
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            # 'description' is mandatory on PUT, so that clearing it has to be explicit
+            assert _request('PUT', _role_path(role_name), 'root', json={}).status_code == BAD_REQUEST
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': 42}).status_code == BAD_REQUEST
+            assert self._role_description(role_name) is None
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_long_role_description_is_accepted(self):
+        """RBAC(ADMIN): `roles.description` is an unbounded text column, so long descriptions are stored as-is"""
+        role_name = 'tmp_long_description'
+        long_description = 'x' * 4096
+        assert _post(_role_path(role_name), 'root', json={'description': long_description}).status_code == CREATED
+        try:
+            assert self._role_description(role_name) == long_description
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_set_description_of_nonexistent_role_returns_not_found(self):
+        """RBAC(ADMIN): describing a role that does not exist returns 404"""
+        assert _request('PUT', _role_path('non_existing_role'), 'root', json={'description': 'nope'}).status_code == NOT_FOUND
+
+    def test_non_admin_cannot_set_role_description(self):
+        """RBAC(USER): setting a role description is restricted to root/admin"""
+        for account in ('alice', 'bob'):
+            assert _request('PUT', _role_path('data-scientist'), account, json={'description': 'nope'}).status_code == FORBIDDEN
 
     @pytest.mark.parametrize(
         ('method', 'path'),
