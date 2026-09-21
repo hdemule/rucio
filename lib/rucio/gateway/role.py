@@ -58,7 +58,9 @@ def set_role_description(role: str, description: Optional[str], issuer: str, vo:
 
 def lock_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> bool:
     """
-    Lock a role, so that it cannot be altered by any external entity (e.g. an identity provider).
+    Lock a role, protecting its assignments from an identity provider.
+
+    An identity provider cannot assign a locked role to an account or take it away from one, so only Rucio itself alters who holds it. The definition of the role is not protected: the policy package remains its source of truth.
 
     :param role: The role to lock.
     :param issuer: The account issuing the command.
@@ -75,7 +77,7 @@ def lock_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> bool:
 
 def unlock_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> bool:
     """
-    Unlock a role, so that it can be altered by external entities (e.g. an identity provider) again.
+    Unlock a role, so that an identity provider may assign it to accounts and take it away again.
 
     :param role: The role to unlock.
     :param issuer: The account issuing the command.
