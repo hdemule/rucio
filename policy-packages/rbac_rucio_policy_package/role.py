@@ -21,6 +21,10 @@ roles = [
                 "scope": "archive*",
                 "action": "r-",
             },
+            {
+                "scope": "atlas",
+                "action": "rw",
+            }
         ],
     },
 ]
