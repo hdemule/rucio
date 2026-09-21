@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 from flask import Flask, Response, jsonify, redirect, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, AccountNotFound, CounterNotFound, Duplicate, IdentityError, InvalidAccountType, InvalidObject, RoleAssignmentNotFound, RoleNotFound, RSENotFound, RuleNotFound, ScopeNotFound
+from rucio.common.exception import AccessDenied, AccountNotFound, CounterNotFound, Duplicate, IdentityError, InputValidationError, InvalidAccountType, InvalidObject, RoleAssignmentNotFound, RoleNotFound, RSENotFound, RuleNotFound, ScopeNotFound
 from rucio.common.utils import APIEncoder, render_json
 from rucio.gateway import role as role_gateway
 from rucio.gateway.account import add_account, add_account_attribute, del_account, del_account_attribute, get_account_info, get_usage_history, list_account_attributes, list_accounts, list_identities, update_account
@@ -286,18 +286,43 @@ class Roles(ErrorHandlingMethodView):
             roles = role_gateway.list_account_roles(account=account, issuer=request.environ['issuer'], detail=detail, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
-        return jsonify(roles), 200
+        # rendered through the API encoder, so that the expiry date of an assignment is
+        # reported in Rucio's date format
+        return Response(render_json(**roles), content_type='application/json')
 
     def post(self, account: str, role: str) -> 'ResponseReturnValue':
+        parameters = json_parameters(optional=True)
+        expires_at = param_get(parameters, 'expires_at', default=None)
+
         try:
-            role_gateway.add_account_role(account=account, role=role, issuer=request.environ['issuer'], vo=request.environ['vo'])
+            role_gateway.add_account_role(account=account, role=role, issuer=request.environ['issuer'], expires_at=expires_at, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
         except (AccountNotFound, RoleNotFound) as error:
             return generate_http_error_flask(404, error)
         except Duplicate as error:
             return generate_http_error_flask(409, error)
         return jsonify({"message": f"Role '{role}' successfully added to account '{account}'."}), 201
+
+    def put(self, account: str, role: str) -> 'ResponseReturnValue':
+        """Overwrite the `expires_at` of a role assigned to an account. A null value clears it."""
+        parameters = json_parameters()
+        expires_at = param_get(parameters, 'expires_at')
+
+        try:
+            stored = role_gateway.set_account_role_expires_at(account=account, role=role, expires_at=expires_at, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
+        except RoleAssignmentNotFound as error:
+            return generate_http_error_flask(404, error)
+
+        if stored is None:
+            return jsonify({"message": f"Expiry date of role '{role}' for account '{account}' successfully cleared."}), 200
+        return jsonify({"message": f"Expiry date of role '{role}' for account '{account}' successfully updated."}), 200
 
     def delete(self, account: str, role: str) -> 'ResponseReturnValue':
         try:
@@ -307,32 +332,6 @@ class Roles(ErrorHandlingMethodView):
         except RoleAssignmentNotFound as error:
             return generate_http_error_flask(404, error)
         return jsonify({"message": f"Role '{role}' successfully removed from account '{account}'."}), 200
-
-
-class RoleLock(ErrorHandlingMethodView):
-    def post(self, account: str, role: str) -> 'ResponseReturnValue':
-        try:
-            locked = role_gateway.lock_account_role(account=account, role=role, issuer=request.environ['issuer'], vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        except RoleAssignmentNotFound as error:
-            return generate_http_error_flask(404, error)
-        if not locked:
-            return jsonify({"message": f"Role '{role}' was already locked for account '{account}'.", "warning": f"Role '{role}' is already locked for account '{account}'."}), 200
-        return jsonify({"message": f"Role '{role}' successfully locked for account '{account}'."}), 200
-
-
-class RoleUnlock(ErrorHandlingMethodView):
-    def post(self, account: str, role: str) -> 'ResponseReturnValue':
-        try:
-            unlocked = role_gateway.unlock_account_role(account=account, role=role, issuer=request.environ['issuer'], vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        except RoleAssignmentNotFound as error:
-            return generate_http_error_flask(404, error)
-        if not unlocked:
-            return jsonify({"message": f"Role '{role}' was already unlocked for account '{account}'.", "warning": f"Role '{role}' is already unlocked for account '{account}'."}), 200
-        return jsonify({"message": f"Role '{role}' successfully unlocked for account '{account}'."}), 200
 
 
 class AccountParameter(ErrorHandlingMethodView):
@@ -1302,11 +1301,7 @@ def blueprint(with_doc: bool = False) -> AuthenticatedBlueprint:
     bp.add_url_rule('/<account>/scopes/<scope>', view_func=scopes_view, methods=[HTTPMethod.POST.value])
     roles_view = Roles.as_view('roles')
     bp.add_url_rule('/<account>/roles', view_func=roles_view, methods=[HTTPMethod.GET.value])
-    bp.add_url_rule('/<account>/roles/<role>', view_func=roles_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
-    role_lock_view = RoleLock.as_view('role_lock')
-    bp.add_url_rule('/<account>/roles/<role>/lock', view_func=role_lock_view, methods=[HTTPMethod.POST.value])
-    role_unlock_view = RoleUnlock.as_view('role_unlock')
-    bp.add_url_rule('/<account>/roles/<role>/unlock', view_func=role_unlock_view, methods=[HTTPMethod.POST.value])
+    bp.add_url_rule('/<account>/roles/<role>', view_func=roles_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
     local_account_limits_view = LocalAccountLimits.as_view('local_account_limit')
     bp.add_url_rule('/<account>/limits/local', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/limits', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
