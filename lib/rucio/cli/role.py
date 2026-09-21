@@ -67,7 +67,7 @@ def delete(ctx: click.Context, role_name: str) -> None:
 @click.pass_context
 @click.argument("role_name")
 def lock(ctx: click.Context, role_name: str) -> None:
-    """Lock ROLE_NAME. A locked role is a role that cannot be altered by any external entity (e.g. policy package)."""
+    """Lock ROLE_NAME. An identity provider can neither assign a locked role to an account nor take it away from one, so only Rucio itself alters who holds it. The role definition itself stays owned by the policy package."""
     ctx.obj.client.lock_role(role_name)
     click.echo(f"Role '{role_name}' locked.")
 
@@ -76,7 +76,7 @@ def lock(ctx: click.Context, role_name: str) -> None:
 @click.pass_context
 @click.argument("role_name")
 def unlock(ctx: click.Context, role_name: str) -> None:
-    """Unlock ROLE_NAME. A previously locked role can now be altered by external entities (e.g. policy package)."""
+    """Unlock ROLE_NAME. An identity provider may assign a previously locked role to accounts and take it away again."""
     ctx.obj.client.unlock_role(role_name)
     click.echo(f"Role '{role_name}' unlocked.")
 
