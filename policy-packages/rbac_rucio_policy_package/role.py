@@ -11,10 +11,14 @@ roles = [
     },
     {
         "name": "data-scientist",
-        "description": "Data scientist role with read access to data scope",
+        "description": "Data scientist role with read access to data scope and archived content.",
         "permissions": [
             {
                 "scope": "data",
+                "action": "r-",
+            },
+            {
+                "scope": "archive*",
                 "action": "r-",
             },
         ],
