@@ -85,7 +85,7 @@ class RoleClient(BaseClient):
 
     def lock_role(self, role: str) -> None:
         """
-        Lock a role, so that it cannot be altered by any external entity (e.g. an identity provider).
+        Lock a role, so that an identity provider can neither assign it to an account nor take it away from one.
 
         Parameters
         ----------
@@ -96,7 +96,7 @@ class RoleClient(BaseClient):
 
     def unlock_role(self, role: str) -> None:
         """
-        Unlock a role, so that it can be altered by external entities (e.g. an identity provider) again.
+        Unlock a role, so that an identity provider may assign it to accounts and take it away again.
 
         Parameters
         ----------
