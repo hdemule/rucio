@@ -60,14 +60,15 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'add_role': perm_add_role,
         'delete_role': perm_delete_role,
         'set_role_description': perm_set_role_description,
+        'lock_role': perm_lock_role,
+        'unlock_role': perm_lock_role,
         'list_account_roles': perm_list_account_roles,
         'add_account_role': perm_add_account_role,
         'delete_account_role': perm_delete_account_role,
+        'set_account_role_expires_at': perm_set_account_role_expires_at,
         'list_role_permissions': perm_list_role_permissions,
         'add_role_permission': perm_add_role_permission,
         'delete_role_permission': perm_delete_role_permission,
-        'lock_account_role': perm_lock_account_role,
-        'unlock_account_role': perm_lock_account_role,
         }
 
     handler = perm.get(action)
@@ -479,9 +480,20 @@ def perm_delete_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any
     return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
 
 
-def perm_lock_account_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+def perm_lock_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can lock a role assigned to an account.
+    Checks if an account can lock or unlock a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_set_account_role_expires_at(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can set the expires_at of a role assigned to an account.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
