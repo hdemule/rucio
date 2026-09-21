@@ -406,8 +406,10 @@ class Roles(BASE, ModelBase):
     __tablename__ = 'roles'
     role: Mapped[str] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
     _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
-                   CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'))
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'),
+                   CheckConstraint('LOCKED IS NOT NULL', name='ROLES_LOCKED_NN'))
 
 
 class AccountRoleAssociation(BASE, ModelBase):
@@ -415,13 +417,12 @@ class AccountRoleAssociation(BASE, ModelBase):
     __tablename__ = 'account_role_map'
     account: Mapped[InternalAccount] = mapped_column(InternalAccountString(common_schema.get_schema_value('ACCOUNT_LENGTH')))
     role: Mapped[str] = mapped_column(String(255))
-    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     _table_args = (PrimaryKeyConstraint('account', 'role', name='ACCOUNT_ROLE_MAP_PK'),
                    ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_ROLE_MAP_ACCOUNT_FK'),
                    ForeignKeyConstraint(['role'], ['roles.role'], name='ACCOUNT_ROLE_MAP_ROLE_FK'),
                    CheckConstraint('ACCOUNT IS NOT NULL', name='ACCOUNT_ROLE_MAP_ACCOUNT_NN'),
-                   CheckConstraint('ROLE IS NOT NULL', name='ACCOUNT_ROLE_MAP_ROLE_NN'),
-                   CheckConstraint('LOCKED IS NOT NULL', name='ACCOUNT_ROLE_MAP_LOCKED_NN'))
+                   CheckConstraint('ROLE IS NOT NULL', name='ACCOUNT_ROLE_MAP_ROLE_NN'))
 
 
 class RolePermissionAssociation(BASE, ModelBase):
