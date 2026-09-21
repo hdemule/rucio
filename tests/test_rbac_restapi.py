@@ -951,4 +951,13 @@ class TestROLE:
     )
     def test_operations_on_already_existing_targets_return_conflict(self, path):
         """RBAC(ADMIN): re-creating an already-existing role, permission or account role assignment returns 409"""
-        assert _post(path, 'root').status_code == CONFLICT
+        # the target is expected to exist already (see the assumptions at the top of this file),
+        # in which case this first call is the duplicate and answers 409. Should it not exist,
+        # it is created here and removed again in the cleanup below, so that the test leaves the
+        # database as it found it either way.
+        created = _post(path, 'root').status_code == CREATED
+        try:
+            assert _post(path, 'root').status_code == CONFLICT
+        finally:
+            if created:
+                assert _delete(path, 'root').status_code == OK
