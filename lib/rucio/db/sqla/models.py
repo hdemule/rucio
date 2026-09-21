@@ -375,8 +375,8 @@ class IdentityAccountAssociation(BASE, ModelBase):
     is_default: Mapped[bool] = mapped_column(Boolean(name='ACCOUNT_MAP_DEFAULT_CHK', create_constraint=True),
                                              default=False)
     _table_args = (PrimaryKeyConstraint('identity', 'identity_type', 'account', name='ACCOUNT_MAP_PK'),
-                   ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_MAP_ACCOUNT_FK'),
-                   ForeignKeyConstraint(['identity', 'identity_type'], ['identities.identity', 'identities.identity_type'], name='ACCOUNT_MAP_ID_TYPE_FK'),
+                   ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_MAP_ACCOUNT_FK', onupdate='CASCADE', ondelete='RESTRICT'),
+                   ForeignKeyConstraint(['identity', 'identity_type'], ['identities.identity', 'identities.identity_type'], name='ACCOUNT_MAP_ID_TYPE_FK', onupdate='CASCADE', ondelete='RESTRICT'),
                    CheckConstraint('is_default IS NOT NULL', name='ACCOUNT_MAP_IS_DEFAULT_NN'),
                    CheckConstraint('IDENTITY_TYPE IS NOT NULL', name='ACCOUNT_MAP_ID_TYPE_NN'))
 
@@ -395,7 +395,7 @@ class Scope(BASE, ModelBase):
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     _table_args = (PrimaryKeyConstraint('scope', name='SCOPES_SCOPE_PK'),
-                   ForeignKeyConstraint(['account'], ['accounts.account'], name='SCOPES_ACCOUNT_FK'),
+                   ForeignKeyConstraint(['account'], ['accounts.account'], name='SCOPES_ACCOUNT_FK', onupdate='CASCADE', ondelete='RESTRICT'),
                    CheckConstraint('is_default IS NOT NULL', name='SCOPES_IS_DEFAULT_NN'),
                    CheckConstraint('STATUS IS NOT NULL', name='SCOPES_STATUS_NN'),
                    CheckConstraint('ACCOUNT IS NOT NULL', name='SCOPES_ACCOUNT_NN'))
@@ -419,8 +419,8 @@ class AccountRoleAssociation(BASE, ModelBase):
     role: Mapped[str] = mapped_column(String(255))
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
     _table_args = (PrimaryKeyConstraint('account', 'role', name='ACCOUNT_ROLE_MAP_PK'),
-                   ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_ROLE_MAP_ACCOUNT_FK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ACCOUNT_ROLE_MAP_ROLE_FK'),
+                   ForeignKeyConstraint(['account'], ['accounts.account'], name='ACCOUNT_ROLE_MAP_ACCOUNT_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ACCOUNT_ROLE_MAP_ROLE_FK', onupdate='CASCADE', ondelete='RESTRICT'),
                    CheckConstraint('ACCOUNT IS NOT NULL', name='ACCOUNT_ROLE_MAP_ACCOUNT_NN'),
                    CheckConstraint('ROLE IS NOT NULL', name='ACCOUNT_ROLE_MAP_ROLE_NN'))
 
@@ -434,8 +434,8 @@ class RolePermissionAssociation(BASE, ModelBase):
                                                                   create_constraint=True,
                                                                   values_callable=lambda obj: [e.value for e in obj]))
     _table_args = (PrimaryKeyConstraint('role', 'scope', 'operation', name='ROLE_PERMISSION_MAP_PK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK'),
-                   ForeignKeyConstraint(['scope'], ['scopes.scope'], name='ROLE_PERMISSION_MAP_SCOPE_FK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='RESTRICT'),
+                   ForeignKeyConstraint(['scope'], ['scopes.scope'], name='ROLE_PERMISSION_MAP_SCOPE_FK', onupdate='CASCADE', ondelete='CASCADE'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
                    CheckConstraint('SCOPE IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_NN'),
                    CheckConstraint('OPERATION IS NOT NULL', name='ROLE_PERMISSION_MAP_OPERATION_NN'))
