@@ -43,7 +43,7 @@ def sync_account_roles_from_idp(account: str, roles: dict, vo: str = DEFAULT_VO)
     # once the synchronisation stops being a dry run, this has to become
     # DatabaseOperationType.WRITE, otherwise the session refuses to write
     with db_session(DatabaseOperationType.READ) as session:
-        role_core.sync_account_roles_from_idp(account=account, roles=roles, vo=vo, session=session)
+        role_core.sync_account_roles_from_idp_dry_run(account=account, roles=roles, vo=vo, session=session)
 
 
 def main() -> None:
