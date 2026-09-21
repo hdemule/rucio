@@ -63,7 +63,7 @@ class RoleList(ErrorHandlingMethodView):
 
 class RoleLock(ErrorHandlingMethodView):
     def post(self, role_name: str):
-        """Lock a role, so that it cannot be altered by any external entity (e.g. an identity provider)."""
+        """Lock a role, so that an identity provider can neither assign it to an account nor take it away from one."""
         try:
             locked = lock_role(role=role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except AccessDenied as error:
@@ -77,7 +77,7 @@ class RoleLock(ErrorHandlingMethodView):
 
 class RoleUnlock(ErrorHandlingMethodView):
     def post(self, role_name: str):
-        """Unlock a role, so that it can be altered by external entities (e.g. an identity provider) again."""
+        """Unlock a role, so that an identity provider may assign it to accounts and take it away again."""
         try:
             unlocked = unlock_role(role=role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except AccessDenied as error:
