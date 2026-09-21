@@ -67,7 +67,7 @@ def delete(ctx: click.Context, role_name: str) -> None:
 @click.pass_context
 @click.argument("role_name")
 def lock(ctx: click.Context, role_name: str) -> None:
-    """Lock ROLE_NAME. A locked role is a role that cannot be altered by any external entity (e.g. identity provider)."""
+    """Lock ROLE_NAME. A locked role is a role that cannot be altered by any external entity (e.g. policy package)."""
     ctx.obj.client.lock_role(role_name)
     click.echo(f"Role '{role_name}' locked.")
 
@@ -76,7 +76,7 @@ def lock(ctx: click.Context, role_name: str) -> None:
 @click.pass_context
 @click.argument("role_name")
 def unlock(ctx: click.Context, role_name: str) -> None:
-    """Unlock ROLE_NAME. A previously locked role can now be altered by external entities (e.g. identity provider)."""
+    """Unlock ROLE_NAME. A previously locked role can now be altered by external entities (e.g. policy package)."""
     ctx.obj.client.unlock_role(role_name)
     click.echo(f"Role '{role_name}' unlocked.")
 

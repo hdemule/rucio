@@ -394,7 +394,7 @@ def sync_roles_from_policy_package(session: "Session") -> None:
     print("Roles defined by the policy package: %s" % roles)
 
     # Step 2: Retreive all roles and their associated permissions (Roles, RolePermissionAssociation)
-    # If a role 
+    # If a role is locked, don't touch it, it shouldn't be modified by the policy package
 
 
 
