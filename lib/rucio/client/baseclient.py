@@ -23,6 +23,7 @@ import os
 import secrets
 import sys
 import time
+import warnings
 from configparser import NoOptionError, NoSectionError
 from os import environ, fdopen, geteuid, makedirs
 from shutil import move
@@ -401,6 +402,16 @@ class BaseClient:
             return getattr(exception, exc_cls), exc_msg
         else:
             return exception.RucioException, "%s: %s" % (exc_cls, exc_msg)
+
+    @staticmethod
+    def _warn_on_response(response: Response) -> None:
+        """Surface a warning returned by the server alongside a successful response."""
+        try:
+            warning = response.json().get('warning')
+        except ValueError:
+            return
+        if warning:
+            warnings.warn(warning, stacklevel=3)
 
     def _load_json_data(self, response: requests.Response) -> 'Generator[Any, Any, Any]':
         """

@@ -24,11 +24,11 @@ def role():
 @role.command("list")
 @click.pass_context
 def list_(ctx: click.Context) -> None:
-    """List all roles with their description."""
+    """List all roles with their locked state and description."""
     roles = ctx.obj.client.list_roles()
-    rows = [[role_entry['role'], role_entry.get('description') or ''] for role_entry in roles]
-    headers = ["ROLE", "DESCRIPTION"]
-    click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
+    rows = [[role_entry['role'], role_entry.get('locked'), role_entry.get('description') or ''] for role_entry in roles]
+    headers = ["ROLE", "LOCKED", "DESCRIPTION"]
+    click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
 
 
 @role.command("add")
@@ -61,6 +61,24 @@ def delete(ctx: click.Context, role_name: str) -> None:
     """Delete an existing role."""
     ctx.obj.client.delete_role(role_name)
     click.echo(f"Role '{role_name}' deleted.")
+
+
+@role.command("lock")
+@click.pass_context
+@click.argument("role_name")
+def lock(ctx: click.Context, role_name: str) -> None:
+    """Lock ROLE_NAME. A locked role is a role that cannot be altered by any external entity (e.g. identity provider)."""
+    ctx.obj.client.lock_role(role_name)
+    click.echo(f"Role '{role_name}' locked.")
+
+
+@role.command("unlock")
+@click.pass_context
+@click.argument("role_name")
+def unlock(ctx: click.Context, role_name: str) -> None:
+    """Unlock ROLE_NAME. A previously locked role can now be altered by external entities (e.g. identity provider)."""
+    ctx.obj.client.unlock_role(role_name)
+    click.echo(f"Role '{role_name}' unlocked.")
 
 
 @role.group()
