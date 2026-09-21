@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any, Optional
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
 from rucio.common.types import InternalScope
+from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
@@ -59,12 +61,43 @@ def _normalize_description(description: Optional[str]) -> Optional[str]:
     return description.strip() or None
 
 
+def _normalize_expires_at(expires_at: Optional[Union[str, datetime]]) -> Optional[datetime]:
+    """
+    Normalise the `expires_at` of a role assignment before it is stored.
+
+    The date may be given as a datetime, or as a string either in Rucio's date
+    format ('%a, %d %b %Y %H:%M:%S UTC') or in ISO 8601. An empty string and None both
+    mean that the assignment does not expire, which is stored as NULL.
+
+    :param expires_at: The date as supplied by the caller.
+    :returns: The date to store, or None if the assignment should not expire.
+    :raises InputValidationError: If the expires_at is not a date Rucio understands.
+    """
+    if expires_at is None or isinstance(expires_at, datetime):
+        return expires_at
+
+    if not isinstance(expires_at, str):
+        raise InputValidationError("'expires_at' must be a date, got '%s'." % type(expires_at).__name__)
+
+    expires_at = expires_at.strip()
+    if not expires_at:
+        return None
+
+    for parse in (str_to_date, datetime.fromisoformat):
+        try:
+            return parse(expires_at)
+        except ValueError:
+            continue
+
+    raise InputValidationError("'expires_at' value '%s' is not a valid date, expected either the Rucio date format ('%s') or ISO 8601." % (expires_at, DATE_FORMAT))
+
+
 def list_roles(session: "Session") -> list[dict[str, Any]]:
     """
-    List all roles defined in the system, together with their description.
+    List all roles defined in the system, together with their description and locked state.
     """
-    stmt = select(models.Roles.role, models.Roles.description).order_by(models.Roles.role)
-    return [{'role': role, 'description': description} for role, description in session.execute(stmt).all()]
+    stmt = select(models.Roles.role, models.Roles.description, models.Roles.locked).order_by(models.Roles.role)
+    return [{"role": role, "description": description, "locked": locked} for role, description, locked in session.execute(stmt).all()]
 
 
 def add_role(role: str, description: Optional[str] = None, *, session: "Session") -> None:
@@ -104,6 +137,31 @@ def set_role_description(role: str, description: Optional[str], *, session: "Ses
     return normalized
 
 
+def set_role_locked(role: str, locked: bool, *, session: "Session") -> bool:
+    """
+    Set the locked state of a role.
+
+    A locked role cannot be altered by any external entity (e.g. an identity provider).
+
+    :param role: The role to lock or unlock.
+    :param locked: The requested locked state.
+    :param session: The database session.
+    :returns: True if the state was changed, False if the role already was in the requested state.
+    :raises RoleNotFound: If the role does not exist.
+    """
+    stmt = select(models.Roles).where(models.Roles.role == role)
+    role_obj = session.execute(stmt).scalar_one_or_none()
+    if role_obj is None:
+        raise RoleNotFound("Role '%s' does not exist." % role)
+
+    if role_obj.locked == locked:
+        return False
+
+    role_obj.locked = locked
+    session.commit()
+    return True
+
+
 def delete_role(role: str, session: "Session") -> None:
     """
     Delete an existing role from the system.
@@ -122,29 +180,39 @@ def delete_role(role: str, session: "Session") -> None:
 
 
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
+    """
+    List the roles assigned to an account, together with their expiry date and description.
+
+    An `expires_at` of None means that the assignment does not expire.
+    """
     stmt = (
-        select(models.AccountRoleAssociation.role, models.AccountRoleAssociation.locked, models.Roles.description)
+        select(models.AccountRoleAssociation.role, models.AccountRoleAssociation.expires_at, models.Roles.description)
         .join(models.Roles, models.Roles.role == models.AccountRoleAssociation.role)
         .where(models.AccountRoleAssociation.account == account)
         .order_by(models.AccountRoleAssociation.role)
     )
-    return [
-        {'role': role, 'locked': locked, 'description': description}
-        for role, locked, description in session.execute(stmt).all()
-    ]
+    return [{"role": role, "expires_at": expires_at, "description": description} for role, expires_at, description in session.execute(stmt).all()]
 
 
-def add_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
-    session.add(models.AccountRoleAssociation(account=account, role=role))
+def add_account_role(account: "InternalAccount", role: str, expires_at: Optional[Union[str, datetime]] = None, *, session: "Session") -> None:
+    """
+    Assign a role to an account.
+
+    :param account: The account to assign the role to.
+    :param role: The role to assign.
+    :param expires_at: An optional date at which the assignment expires. None means that it does not expire.
+    :param session: The database session.
+    """
+    session.add(models.AccountRoleAssociation(account=account, role=role, expires_at=_normalize_expires_at(expires_at)))
     try:
         session.commit()
     except IntegrityError as error:
         session.rollback()
-        if _violates_constraint(error, 'ACCOUNT_ROLE_MAP_ACCOUNT_FK'):
+        if _violates_constraint(error, "ACCOUNT_ROLE_MAP_ACCOUNT_FK"):
             raise AccountNotFound("Account '%s' does not exist." % account)
-        if _violates_constraint(error, 'ACCOUNT_ROLE_MAP_ROLE_FK'):
+        if _violates_constraint(error, "ACCOUNT_ROLE_MAP_ROLE_FK"):
             raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, 'ACCOUNT_ROLE_MAP_PK'):
+        if _violates_constraint(error, "ACCOUNT_ROLE_MAP_PK"):
             raise Duplicate("Account '%s' already has role '%s'." % (account, role))
         raise Duplicate("Either account '%s' or role '%s' does not exist, or account '%s' already has role '%s'." % (account, role, account, role))
 
@@ -158,38 +226,30 @@ def delete_account_role(account: "InternalAccount", role: str, session: "Session
     session.commit()
 
 
-def set_account_role_locked(account: "InternalAccount", role: str, locked: bool, session: "Session") -> bool:
+def set_account_role_expires_at(account: "InternalAccount", role: str, expires_at: Optional[Union[str, datetime]], *, session: "Session") -> Optional[datetime]:
     """
-    Set the locked state of a role assigned to an account.
+    Overwrite the expiry date of a role assigned to an account.
 
     :param account: The account the role is assigned to.
-    :param role: The role to lock or unlock.
-    :param locked: The requested locked state.
+    :param role: The role to set the `expires_at` of.
+    :param expires_at: The new date. None (or an empty string) clears it, so that the assignment does not expire.
     :param session: The database session.
-    :returns: True if the state was changed, False if the assignment already was in the requested state.
+    :returns: The date as it was stored, or None if it was cleared.
+    :raises RoleAssignmentNotFound: If the role is not assigned to the account.
     """
     mapping = session.get(models.AccountRoleAssociation, (account, role))
     if mapping is None:
         raise RoleAssignmentNotFound("Either account '%s' or role '%s' does not exist, or the account does not have that role assigned." % (account, role))
 
-    if mapping.locked == locked:
-        return False
-
-    mapping.locked = locked
+    normalized = _normalize_expires_at(expires_at)
+    mapping.expires_at = normalized
     session.commit()
-    return True
+    return normalized
 
 
 def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
-    stmt = (
-        select(models.RolePermissionAssociation)
-        .where(models.RolePermissionAssociation.role == role)
-        .order_by(models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
-    )
-    return [
-        {'operation': permission.operation.value, 'scope': str(permission.scope.external)}
-        for permission in session.execute(stmt).scalars()
-    ]
+    stmt = select(models.RolePermissionAssociation).where(models.RolePermissionAssociation.role == role).order_by(models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
+    return [{"operation": permission.operation.value, "scope": str(permission.scope.external)} for permission in session.execute(stmt).scalars()]
 
 
 def add_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
@@ -198,11 +258,11 @@ def add_role_permission(role: str, scope: "InternalScope", operation: "DatabaseO
         session.commit()
     except IntegrityError as error:
         session.rollback()
-        if _violates_constraint(error, 'ROLE_PERMISSION_MAP_ROLE_FK'):
+        if _violates_constraint(error, "ROLE_PERMISSION_MAP_ROLE_FK"):
             raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, 'ROLE_PERMISSION_MAP_SCOPE_FK'):
+        if _violates_constraint(error, "ROLE_PERMISSION_MAP_SCOPE_FK"):
             raise ScopeNotFound("Scope '%s' does not exist." % scope)
-        if _violates_constraint(error, 'ROLE_PERMISSION_MAP_PK'):
+        if _violates_constraint(error, "ROLE_PERMISSION_MAP_PK"):
             raise Duplicate("Role '%s' already has '%s' permission on scope '%s'." % (role, operation.value, scope))
         raise Duplicate("Either role '%s' or scope '%s' does not exist, or role '%s' already has '%s' permission on scope '%s'." % (role, scope, role, operation.value, scope))
 
@@ -242,8 +302,7 @@ def has_role_scope_access(
         .select_from(models.AccountRoleAssociation)
         .join(
             models.RolePermissionAssociation,
-            models.RolePermissionAssociation.role
-            == models.AccountRoleAssociation.role,
+            models.RolePermissionAssociation.role == models.AccountRoleAssociation.role,
         )
         .where(
             models.AccountRoleAssociation.account == account,
@@ -269,7 +328,7 @@ def has_scope_access(
     """
 
     # Check for admin privileges
-    if permission.has_permission(issuer=account, action='can_access_all_scopes', kwargs={'operation': operation}, session=session):
+    if permission.has_permission(issuer=account, action="can_access_all_scopes", kwargs={"operation": operation}, session=session):
         return True
 
     if is_scope_owner(scope=scope, account=account, session=session):
@@ -289,7 +348,7 @@ def filter_iterable_by_scope_access(
     account: "InternalAccount",
     session: "Session",
     operation: "DatabaseOperationType" = DatabaseOperationType.READ,
-    scope_keyword: str = 'scope',
+    scope_keyword: str = "scope",
 ) -> "Iterator[dict[str, Any]]":
     """
     Yield only items whose scope the account may access in terms of RBAC, ownership and admin/root privileges.
@@ -320,3 +379,25 @@ def filter_iterable_by_scope_access(
             )
         if access_by_scope[scope]:
             yield item
+
+
+def sync_roles_from_policy_package(session: "Session") -> None:
+    """
+    Synchronizes the internal roles with the roles defined by the policy package.
+    """
+    print("Syncing roles...")
+    print("For now, not doing anything but reading the role definitions from the policy package")
+
+    # Read the role definitions from the policy package (the `roles` attribute of its role module)
+    # Step 1: Retrieve Roles from the policy package
+    roles = permission.get_roles()
+    print("Roles defined by the policy package: %s" % roles)
+
+    # Step 2: Retreive all roles and their associated permissions (Roles, RolePermissionAssociation)
+    # If a role 
+
+
+
+
+def sync_account_roles():
+    pass
