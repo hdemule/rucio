@@ -12,21 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from json import dumps
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 from urllib.parse import quote_plus
 
 from requests.status_codes import codes
 
 from rucio.client.baseclient import BaseClient, choice
 from rucio.common.constants import HTTPMethod
-from rucio.common.utils import build_url
+from rucio.common.utils import build_url, render_json
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    from requests import Response
+    from datetime import datetime
 
 
 class AccountClient(BaseClient):
@@ -148,10 +146,42 @@ class AccountClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
         raise exc_cls(exc_msg)
 
-    def add_account_role(self, account: str, role: str) -> None:
+    def add_account_role(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]] = None) -> None:
+        """
+        Assign a role to an account.
+
+        Parameters
+        ----------
+        account :
+            The account to assign the role to.
+        role :
+            The role to assign.
+        expires_at :
+            An optional date at which the assignment expires. None means that it does not expire.
+        """
         url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
-        response = self._send_request(url, method=HTTPMethod.POST)
+        data = render_json(expires_at=expires_at) if expires_at is not None else None
+        response = self._send_request(url, method=HTTPMethod.POST, data=data)
         if response.status_code != codes.created:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
+    def set_account_role_expires_at(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]]) -> None:
+        """
+        Overwrite the expiry date of a role assigned to an account.
+
+        Parameters
+        ----------
+        account :
+            The account the role is assigned to.
+        role :
+            The role to set the `expires_at` of.
+        expires_at :
+            The new date. None clears it, so that the assignment does not expire.
+        """
+        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
+        response = self._send_request(url, method=HTTPMethod.PUT, data=render_json(expires_at=expires_at))
+        if response.status_code != codes.ok:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
 
@@ -161,32 +191,6 @@ class AccountClient(BaseClient):
         if response.status_code != codes.ok:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
-
-    def lock_account_role(self, account: str, role: str) -> None:
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role), 'lock']))
-        response = self._send_request(url, method=HTTPMethod.POST)
-        if response.status_code != codes.ok:
-            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-            raise exc_cls(exc_msg)
-        self._warn_on_response(response)
-
-    def unlock_account_role(self, account: str, role: str) -> None:
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role), 'unlock']))
-        response = self._send_request(url, method=HTTPMethod.POST)
-        if response.status_code != codes.ok:
-            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-            raise exc_cls(exc_msg)
-        self._warn_on_response(response)
-
-    @staticmethod
-    def _warn_on_response(response: 'Response') -> None:
-        """Surface a warning returned by the server alongside a successful response."""
-        try:
-            warning = response.json().get('warning')
-        except ValueError:
-            return
-        if warning:
-            warnings.warn(warning, stacklevel=3)
 
     def get_account(self, account: str) -> Optional[dict[str, Any]]:
         """
