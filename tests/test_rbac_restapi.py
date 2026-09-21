@@ -633,13 +633,13 @@ class TestROLE:
     # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
 
     def test_list_roles(self):
-        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description"""
+        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description and locked state"""
         response = _get('/roles/', 'root')
         assert response.status_code == OK
         roles = response.json()
         assert 'data-scientist' in [role['role'] for role in roles]
-        # every entry carries a description, which is null for roles without one
-        assert all('description' in role for role in roles)
+        # every entry carries a description, which is null for roles without one, and a locked state
+        assert all({'description', 'locked'} <= set(role) for role in roles)
         for account in ('alice', 'bob'):
             assert _get('/roles/', account).status_code == FORBIDDEN
 
@@ -660,8 +660,8 @@ class TestROLE:
             assert response.status_code == OK
             roles = response.json()['roles']
             assert 'data-scientist' in [role['role'] for role in roles]
-            # the description of each assigned role is reported alongside its locked state
-            assert all({'locked', 'description'} <= set(role) for role in roles)
+            # the description of each assigned role is reported alongside its expiry date
+            assert all({'expires_at', 'description'} <= set(role) for role in roles)
         assert _get(_account_roles_path('bob'), account).status_code == FORBIDDEN
 
     # --- write operations are refused for every non-admin caller, whatever their own roles ----
@@ -675,10 +675,10 @@ class TestROLE:
             ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas')),
             ('POST', _account_roles_path('bob', 'data-scientist')),
             ('DELETE', _account_roles_path('alice', 'data-scientist')),
-            ('POST', _account_roles_path('alice', 'data-scientist', 'lock')),
-            ('POST', _account_roles_path('alice', 'data-scientist', 'unlock')),
+            ('POST', _role_path('data-scientist', 'lock')),
+            ('POST', _role_path('data-scientist', 'unlock')),
         ],
-        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'lock account role', 'unlock account role'],
+        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'lock role', 'unlock role'],
     )
     def test_non_admin_cannot_write_role_data(self, method, path):
         """RBAC(USER): role management write operations are restricted to root/admin regardless of the caller's own RBAC assignments"""
@@ -723,46 +723,106 @@ class TestROLE:
             _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
-    def test_lock_and_unlock_account_role(self):
-        """RBAC(ADMIN): an assignment is locked on creation, locking and unlocking toggles the flag, repeating it succeeds with a warning"""
+    def test_lock_and_unlock_role(self):
+        """RBAC(ADMIN): a role is unlocked on creation, locking and unlocking toggles the flag, repeating it succeeds with a warning"""
         role_name = 'tmp'
 
         def _locked() -> bool:
-            roles = _get(_account_roles_path('alice'), 'root').json()['roles']
+            roles = _get('/roles/', 'root').json()
             return [role['locked'] for role in roles if role['role'] == role_name][0]
 
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
+            # a new role is not locked, so that an external entity (e.g. an identity
+            # provider) may still alter it
+            assert _locked() is False
+
+            response = _post(_role_path(role_name, 'lock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' not in response.json()
+            assert _locked() is True
+
+            # locking an already locked role is a warning, not an error
+            response = _post(_role_path(role_name, 'lock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' in response.json()
+            assert _locked() is True
+
+            response = _post(_role_path(role_name, 'unlock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' not in response.json()
+            assert _locked() is False
+
+            # unlocking an already unlocked role is a warning, not an error
+            response = _post(_role_path(role_name, 'unlock'), 'root')
+            assert response.status_code == OK
+            assert 'warning' in response.json()
+            assert _locked() is False
+        finally:
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    # --- expiry date of a role assigned to an account -----------------------------------
+
+    def _account_role_expires_at(self, account: str, role_name: str) -> Any:
+        """Read the `expires_at` of `role_name` for `account` back from GET /accounts/<account>/roles."""
+        roles = _get(_account_roles_path(account), 'root').json()['roles']
+        return [role['expires_at'] for role in roles if role['role'] == role_name][0]
+
+    def test_account_role_expires_at_lifecycle(self):
+        """RBAC(ADMIN): an assignment does not expire unless an expiry date is given, which can be set on assignment, overwritten via PUT and cleared"""
+        role_name = 'tmp_expiring'
+        expires_at = 'Mon, 31 Jan 2028 12:00:00 UTC'
+        later = 'Tue, 29 Feb 2028 12:00:00 UTC'
+
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            # an assignment without an expiry date never expires
             assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
-            # a role assigned through the API is locked right away, so that an external
-            # entity (e.g. an identity provider) cannot alter it
-            assert _locked() is True
+            assert self._account_role_expires_at('alice', role_name) is None
 
-            # locking an already locked assignment is a warning, not an error
-            response = _post(_account_roles_path('alice', role_name, 'lock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' in response.json()
-            assert _locked() is True
+            # PUT sets the expiry date of an assignment that had none
+            assert _request('PUT', _account_roles_path('alice', role_name), 'root', json={'expires_at': expires_at}).status_code == OK
+            assert self._account_role_expires_at('alice', role_name) == expires_at
 
-            response = _post(_account_roles_path('alice', role_name, 'unlock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' not in response.json()
-            assert _locked() is False
+            # PUT overwrites an existing expiry date, and a null value clears it
+            assert _request('PUT', _account_roles_path('alice', role_name), 'root', json={'expires_at': later}).status_code == OK
+            assert self._account_role_expires_at('alice', role_name) == later
+            assert _request('PUT', _account_roles_path('alice', role_name), 'root', json={'expires_at': None}).status_code == OK
+            assert self._account_role_expires_at('alice', role_name) is None
 
-            # unlocking an already unlocked assignment is a warning, not an error
-            response = _post(_account_roles_path('alice', role_name, 'unlock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' in response.json()
-            assert _locked() is False
-
-            response = _post(_account_roles_path('alice', role_name, 'lock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' not in response.json()
-            assert _locked() is True
+            # the expiry date can be given right away when the role is assigned
+            assert _delete(_account_roles_path('alice', role_name), 'root').status_code == OK
+            assert _post(_account_roles_path('alice', role_name), 'root', json={'expires_at': expires_at}).status_code == CREATED
+            assert self._account_role_expires_at('alice', role_name) == expires_at
         finally:
             # the assignment has to go first: a role still assigned to an account cannot be deleted
             _delete(_account_roles_path('alice', role_name), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_invalid_account_role_expires_at_is_rejected(self):
+        """RBAC(ADMIN): a missing or unparsable expires_at is refused with 400"""
+        role_name = 'tmp_invalid_expires_at'
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_account_roles_path('alice', role_name), 'root', json={'expires_at': 'not a date'}).status_code == BAD_REQUEST
+            assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
+            # 'expires_at' is mandatory on PUT, so that clearing it has to be explicit
+            assert _request('PUT', _account_roles_path('alice', role_name), 'root', json={}).status_code == BAD_REQUEST
+            assert _request('PUT', _account_roles_path('alice', role_name), 'root', json={'expires_at': 'not a date'}).status_code == BAD_REQUEST
+            assert self._account_role_expires_at('alice', role_name) is None
+        finally:
+            # the assignment has to go first: a role still assigned to an account cannot be deleted
+            _delete(_account_roles_path('alice', role_name), 'root')
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_set_expires_at_of_role_not_assigned_to_account_returns_not_found(self):
+        """RBAC(ADMIN): setting the expiry date of a role that is not assigned to the account returns 404"""
+        assert _request('PUT', _account_roles_path('bob', 'data-scientist'), 'root', json={'expires_at': None}).status_code == NOT_FOUND
+
+    def test_non_admin_cannot_set_account_role_expires_at(self):
+        """RBAC(USER): setting the expiry date of an account's role is restricted to root/admin"""
+        for account in ('alice', 'bob'):
+            assert _request('PUT', _account_roles_path('alice', 'data-scientist'), account, json={'expires_at': None}).status_code == FORBIDDEN
 
     # --- role descriptions -------------------------------------------------------------
 
@@ -860,8 +920,8 @@ class TestROLE:
             ('POST', _role_path('non_existing_role', 'permissions', 'read', 'atlas')),
             ('POST', _role_path('data-scientist', 'permissions', 'read', 'non_existing_scope')),
             ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'root')),
-            ('POST', _account_roles_path('bob', 'data-scientist', 'lock')),
-            ('POST', _account_roles_path('bob', 'data-scientist', 'unlock')),
+            ('POST', _role_path('non_existing_role', 'lock')),
+            ('POST', _role_path('non_existing_role', 'unlock')),
         ],
         ids=[
             'delete non-existing role',
@@ -871,8 +931,8 @@ class TestROLE:
             'add permission to non-existing role',
             'add permission on non-existing scope',
             'remove permission not granted to role',
-            'lock role not assigned to account',
-            'unlock role not assigned to account',
+            'lock non-existing role',
+            'unlock non-existing role',
         ],
     )
     def test_operations_on_nonexistent_targets_return_not_found(self, method, path):
