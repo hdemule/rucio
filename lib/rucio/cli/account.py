@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from datetime import datetime
 from typing import Literal, Optional
 
 import click
@@ -20,6 +21,30 @@ from tabulate import tabulate
 from rucio.cli.utils import RichCLITheme, RichUtils, format_operations, wrap_table_column
 from rucio.common.exception import InputValidationError
 from rucio.common.utils import get_bytes_value_from_string, sizefmt
+
+
+class OptionalDateTime(click.ParamType):
+    """A date, or None when the given value is empty."""
+
+    name = "date"
+    FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
+
+    def convert(self, value, param, ctx) -> Optional[datetime]:
+        """Turn a command line value into a datetime, or None if it is empty."""
+        if value is None or isinstance(value, datetime):
+            return value
+        if not value.strip():
+            return None
+        for date_format in self.FORMATS:
+            try:
+                return datetime.strptime(value.strip(), date_format)
+            except ValueError:
+                continue
+        self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)}", param, ctx)
+
+
+OPTIONAL_DATE = OptionalDateTime()
+DATE_EXAMPLE = "2027-01-31 or 2027-01-31T12:00:00"
 
 
 @click.group()
@@ -328,10 +353,15 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
     """List roles assigned to ACCOUNT_NAME."""
     rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
     click.echo(f"Roles for account {account_name}:")
-    rows = [[r['role'], r['locked'], r.get('description') or ''] for r in rbac['roles']]
-    headers = ["ROLE", "LOCKED", "DESCRIPTION"]
-    click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
-    if detail:
+    if not detail:
+        rows = [[r['role'], r.get('expires_at') or '-'] for r in rbac['roles']]
+        headers = ["ROLE", "EXPIRES AT"]
+        click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
+    else:
+        rows = [[r['role'], r.get('expires_at') or '-', r.get('description') or '-'] for r in rbac['roles']]
+        headers = ["ROLE", "EXPIRES AT", "DESCRIPTION"]
+        click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
+
         click.echo()
         click.echo(f"Permissions granted via roles for account {account_name}:")
 
@@ -349,11 +379,29 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
 @role.command("add")
 @click.argument("role_name")
 @click.argument("account_name")
+@click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, the assignment does not expire.")
 @click.pass_context
-def role_add(ctx: click.Context, role_name: str, account_name: str) -> None:
-    """Assign ROLE_NAME to ACCOUNT_NAME. The newly assigned role will be locked by default, which means it cannot be altered by any external entity (e.g. identity provider). To unlock it, use the 'rucio account role unlock' command."""
-    ctx.obj.client.add_account_role(account_name, role_name)
-    click.echo(f"Added role '{role_name}' to account '{account_name}'.")
+def role_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime]) -> None:
+    """Assign ROLE_NAME to ACCOUNT_NAME, optionally until an expiry date."""
+    ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at)
+    if expires_at:
+        click.echo(f"Added role '{role_name}' to account '{account_name}', expiring at {expires_at}.")
+    else:
+        click.echo(f"Added role '{role_name}' to account '{account_name}'.")
+
+
+@role.command("update")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.option("--expires-at", type=OPTIONAL_DATE, required=True, help=f'New date at which the assignment expires, e.g. {DATE_EXAMPLE}, overwriting the existing one. Pass an empty string ("") so that the assignment does not expire.')
+@click.pass_context
+def role_update(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime]) -> None:
+    """Update the expiry date of ROLE_NAME for ACCOUNT_NAME. The given date overwrites the existing one; an empty date removes it."""
+    ctx.obj.client.set_account_role_expires_at(account_name, role_name, expires_at)
+    if expires_at:
+        click.echo(f"Role '{role_name}' for account '{account_name}' now expires at {expires_at}.")
+    else:
+        click.echo(f"Role '{role_name}' for account '{account_name}' does not expire any more.")
 
 
 @role.command("remove")
@@ -364,23 +412,3 @@ def role_remove(ctx: click.Context, role_name: str, account_name: str) -> None:
     """Remove ROLE_NAME from ACCOUNT_NAME."""
     ctx.obj.client.delete_account_role(account_name, role_name)
     click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
-
-
-@role.command("lock")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.pass_context
-def role_lock(ctx: click.Context, role_name: str, account_name: str) -> None:
-    """Lock ROLE_NAME for ACCOUNT_NAME. A locked role is a role that cannot be altered by any external entity (e.g. identity provider). By default, any role assigned internally to an account (rucio account role add) is locked."""
-    ctx.obj.client.lock_account_role(account_name, role_name)
-    click.echo(f"Locked role '{role_name}' for account '{account_name}'.")
-
-
-@role.command("unlock")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.pass_context
-def role_unlock(ctx: click.Context, role_name: str, account_name: str) -> None:
-    """Unlock ROLE_NAME for ACCOUNT_NAME. A previously locked role can now be altered by external entities (e.g. identity provider)."""
-    ctx.obj.client.unlock_account_role(account_name, role_name)
-    click.echo(f"Unlocked role '{role_name}' for account '{account_name}'.")
