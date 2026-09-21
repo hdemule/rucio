@@ -18,7 +18,7 @@ class RoleClient(BaseClient):
 
         Returns
         -------
-            A list of dictionaries, one per role, with the keys `role` and `description`.
+            A list of dictionaries, one per role, with the keys `role`, `description` and `locked`.
             `description` is None for roles without a description.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/")
@@ -82,6 +82,37 @@ class RoleClient(BaseClient):
             data=response.content,
         )
         raise exc_cls(exc_msg)
+
+    def lock_role(self, role: str) -> None:
+        """
+        Lock a role, so that it cannot be altered by any external entity (e.g. an identity provider).
+
+        Parameters
+        ----------
+        role :
+            The role to lock.
+        """
+        self._set_role_locked(role, locked=True)
+
+    def unlock_role(self, role: str) -> None:
+        """
+        Unlock a role, so that it can be altered by external entities (e.g. an identity provider) again.
+
+        Parameters
+        ----------
+        role :
+            The role to unlock.
+        """
+        self._set_role_locked(role, locked=False)
+
+    def _set_role_locked(self, role: str, locked: bool) -> None:
+        """Lock or unlock a role, warning if it already was in the requested state."""
+        path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/{'lock' if locked else 'unlock'}"
+        response = self._send_request(build_url(choice(self.list_hosts), path=path), method=HTTPMethod.POST)
+        if response.status_code != codes.ok:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+        self._warn_on_response(response)
 
     def delete_role(self, role: str) -> None:
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
