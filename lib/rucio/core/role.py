@@ -16,7 +16,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from sqlalchemy import exists, inspect, select
+from sqlalchemy import delete, exists, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.constants import DEFAULT_VO
@@ -533,7 +533,7 @@ def _format_scope_list(scopes: list[str], limit: int = 4) -> str:
     return "%s, ... (%d scopes)" % (", ".join(scopes[:limit]), len(scopes))
 
 
-def _policy_package_permissions(role: str, definition: dict[str, Any], vo: str, *, session: "Session") -> tuple[set[tuple[str, str]], list[list[str]], list[str]]:
+def _policy_package_role_permissions(role: str, definition: dict[str, Any], vo: str, *, session: "Session") -> tuple[set[tuple[str, str]], list[list[str]], list[str]]:
     """
     Turn the permissions of a policy package role definition into (scope, operation) pairs.
 
@@ -648,7 +648,7 @@ def _is_locked(role: str, known_roles: dict[str, Any]) -> bool:
     return bool(entry and entry.get("locked"))
 
 
-def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") -> None:
+def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Session") -> None:
     """
     Synchronizes the internal roles with the roles defined by the policy package.
 
@@ -674,7 +674,7 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     warnings: list[str] = []
     rows: list[list[Any]] = []
     for role, definition in sorted(roles.items()):
-        desired_permissions[role], declared, role_warnings = _policy_package_permissions(role, definition, vo, session=session)
+        desired_permissions[role], declared, role_warnings = _policy_package_role_permissions(role, definition, vo, session=session)
         warnings.extend(role_warnings)
 
         description = definition.get("description") or ""
@@ -764,14 +764,6 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     # the policy package holds the whole set of roles, so anything it does not define goes,
     # including roles that were created by hand through the CLI
     to_delete = sorted(set(current) - set(roles))
-    if to_delete:
-        # a role is only deletable once nothing references it any more
-        holding_back = {name: rule for name, rule in _role_delete_rules(session).items() if rule != "CASCADE"}
-        if holding_back:
-            print("  Note: %s, so the rows depending on a role have to be removed before the role itself."
-                  % ", ".join("%s is ON DELETE %s" % (name, rule) for name, rule in sorted(holding_back.items())))
-        else:
-            print("  Note: the foreign keys to `roles` cascade on delete, so the database removes the rows depending on a role along with it.")
 
     for role in to_delete:
         deleted += 1
@@ -788,7 +780,145 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
           % (created, updated, deleted, unchanged, granted, revoked, unassigned))
 
 
-def sync_account_roles_from_idp(account: Union[str, "InternalAccount"], roles: Any, vo: str = DEFAULT_VO, *, session: "Session") -> None:
+def _delete_role_with_references(role: str, *, session: "Session") -> tuple[int, int]:
+    """
+    Delete a role together with the rows referencing it.
+
+    `account_role_map.role` and `role_permission_map.role` reference `roles.role`, so the
+    database refuses to delete a role which is still assigned to an account or still carries
+    permissions. Those rows are therefore removed first, which keeps the deletion working
+    whatever referential action the foreign keys are declared with, see :func:`_role_delete_rules`.
+
+    :param role: The role to delete.
+    :param session: The database session.
+    :returns: The number of permissions and of account assignments removed along with the role.
+    """
+    revoked = session.execute(delete(models.RolePermissionAssociation).where(models.RolePermissionAssociation.role == role)).rowcount
+    unassigned = session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role == role)).rowcount
+    session.execute(delete(models.Roles).where(models.Roles.role == role))
+    return revoked, unassigned
+
+
+def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") -> None:
+    """
+    Synchronize the internal roles with the roles defined by the policy package.
+
+    The policy package is the source of truth for the roles themselves: every role it defines is
+    created or brought in line with it, and a role it does not define is deleted, together with
+    the permissions and the account assignments of that role. The `locked` flag does not apply
+    here, it only keeps an identity provider from altering who holds a role, see
+    :func:`sync_account_roles_from_idp`.
+
+    A permission on a scope which does not exist is skipped rather than being an error, since
+    `role_permission_map.scope` references `scopes.scope`; it is applied by the next run once
+    the scope has been created.
+
+    The whole synchronisation is a single transaction, so either all of it is applied or none of
+    it is. See :func:`sync_roles_from_policy_package_dry_run` to report the changes instead of
+    applying them.
+
+    :param vo: The VO whose policy package defines the roles.
+    :param session: The database session.
+    """
+    print("Syncing the roles of VO '%s' with the policy package..." % vo)
+
+    # Step 1: Retrieve Roles from the policy package
+    roles = permission.get_roles(vo=vo)
+
+    desired_role_permissions: dict[str, set[tuple[str, str]]] = {}
+    for role, definition in sorted(roles.items()):
+        # a scope pattern is expanded to the scopes it matches right now
+        desired_role_permissions[role], _, warnings = _policy_package_role_permissions(role, definition, vo, session=session)
+        for warning in warnings:
+            print("  Warning: %s" % warning)
+
+    # Step 2: Retreive all roles and their associated permissions (Roles, RolePermissionAssociation)
+    # A role the policy package defines is brought in line with it and a role it does not define
+    # is deleted, whether or not the role is locked: a lock only protects the assignments of a
+    # role against an identity provider, never the role itself.
+    current = {entry["role"]: entry for entry in list_roles(session=session)}
+    current_permissions = {
+        role: {(entry["scope"], entry["operation"]) for entry in list_role_permissions(role=role, session=session)}
+        for role in current
+    }
+    # `role_permission_map.scope` references `scopes.scope`, so a permission can only be stored
+    # on a scope which exists
+    known_scopes = set(_matching_scopes(SCOPE_WILDCARD, vo, session=session))
+
+    created, updated, unchanged, deleted = 0, 0, 0, 0
+    granted, revoked, unassigned, skipped = 0, 0, 0, 0
+
+    try:
+        # Step 3: Create the roles of the policy package and bring the existing ones in line with it
+        for role in sorted(roles):
+            wanted = desired_role_permissions[role]
+            description = _normalize_description(roles[role].get("description"))
+            changed = role not in current
+
+            if changed:
+                session.add(models.Roles(role=role, description=description))
+                # `role_permission_map.role` references `roles.role`, so the row has to be in
+                # the database before the permissions of the role are inserted below
+                session.flush()
+                created += 1
+                print("  Role '%s' created with description %r." % (role, description))
+            elif (current[role]["description"] or None) != description:
+                session.execute(update(models.Roles).where(models.Roles.role == role).values(description=description))
+                print("  Role '%s': description changed from %r to %r." % (role, current[role]["description"], description))
+                changed = True
+
+            for scope, operation in sorted(wanted - current_permissions.get(role, set())):
+                if scope not in known_scopes:
+                    skipped += 1
+                    print("  Role '%s': scope '%s' does not exist in Rucio, so %s is not granted." % (role, scope, operation))
+                    continue
+                session.add(models.RolePermissionAssociation(role=role, scope=InternalScope(scope, vo=vo), operation=DatabaseOperationType(operation)))
+                granted += 1
+                changed = True
+                print("  Role '%s': granted %s on scope '%s'." % (role, operation, scope))
+
+            for scope, operation in sorted(current_permissions.get(role, set()) - wanted):
+                session.execute(
+                    delete(models.RolePermissionAssociation).where(
+                        models.RolePermissionAssociation.role == role,
+                        models.RolePermissionAssociation.scope == InternalScope(scope, vo=vo),
+                        models.RolePermissionAssociation.operation == DatabaseOperationType(operation),
+                    )
+                )
+                revoked += 1
+                changed = True
+                print("  Role '%s': revoked %s on scope '%s'." % (role, operation, scope))
+
+            if role in current:
+                if changed:
+                    updated += 1
+                else:
+                    unchanged += 1
+
+        # Step 4: Delete the roles the policy package does not define any more, including the
+        # ones that were created by hand through the CLI. Neither foreign key to `roles` can be
+        # relied on to cascade, so each role takes its permissions and its account assignments
+        # along explicitly.
+        for role in sorted(set(current) - set(roles)):
+            role_revoked, role_unassigned = _delete_role_with_references(role, session=session)
+            deleted += 1
+            revoked += role_revoked
+            unassigned += role_unassigned
+            print("  Role '%s' is not defined by the policy package, so it was deleted with its %d permission(s) and %d account assignment(s)."
+                  % (role, role_revoked, role_unassigned))
+
+        session.commit()
+    except Exception:
+        session.rollback()
+        print("  The synchronisation failed, so nothing reported above was applied.")
+        raise
+
+    print()
+    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged; granted %d and revoked %d permission(s), removed %d account assignment(s), skipped %d permission(s) on a scope which does not exist."
+          % (created, updated, deleted, unchanged, granted, revoked, unassigned, skipped))
+
+
+def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], roles: Any, vo: str = DEFAULT_VO, *, session: "Session") -> None:
     """
     Synchronize an account's role assignments with roles supplied by an IdP.
 
