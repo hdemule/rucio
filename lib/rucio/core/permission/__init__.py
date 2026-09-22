@@ -154,7 +154,9 @@ def _parse_roles(roles: Any, module_name: str) -> dict[str, dict[str, Any]]:
     The `roles` attribute of a policy package role module may either be a mapping of
     role name to role definition, or a sequence of role definitions carrying their own
     'name' key. Both are normalised into a mapping of role name to a definition holding
-    a 'description' and a list of 'permissions'.
+    a 'description'. The policy package only defines the role and its description; its
+    permissions and account assignments are managed from within Rucio, see
+    :func:`rucio.core.role.sync_roles_from_policy_package`.
 
     :param roles: The `roles` attribute as defined by the policy package.
     :param module_name: The name of the role module, used for error messages.
@@ -184,7 +186,6 @@ def _parse_roles(roles: Any, module_name: str) -> dict[str, dict[str, Any]]:
 
         parsed[name] = {
             'description': definition.get('description'),
-            'permissions': list(definition.get('permissions') or []),
         }
 
     return parsed
@@ -241,8 +242,8 @@ def get_roles(vo: str = DEFAULT_VO) -> dict[str, dict[str, Any]]:
     The definitions are loaded from the policy package on first use and cached afterwards.
 
     :param vo: The VO to get the role definitions for.
-    :returns: A dictionary mapping role name to its definition, each holding a 'description'
-              and a list of 'permissions'. Empty if the VO has no policy-defined roles.
+    :returns: A dictionary mapping role name to its definition, each holding a 'description'.
+              Empty if the VO has no policy-defined roles.
     """
     if vo not in role_definitions:
         load_roles_for_vo(vo)
