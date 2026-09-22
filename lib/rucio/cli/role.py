@@ -24,34 +24,41 @@ def role():
 @role.command("list")
 @click.pass_context
 def list_(ctx: click.Context) -> None:
-    """List all roles with their locked state and description."""
+    """List all roles with their assignment_disabled/internal_role_flag state and description."""
     roles = ctx.obj.client.list_roles()
-    rows = [[role_entry['role'], role_entry.get('locked'), role_entry.get('description') or ''] for role_entry in roles]
-    headers = ["ROLE", "LOCKED", "DESCRIPTION"]
-    click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
+    rows = [
+        [role_entry['role'], role_entry.get('assignment_disabled'), role_entry.get('internal_role_flag'), role_entry.get('description') or '']
+        for role_entry in roles
+    ]
+    headers = ["ROLE", "ASSIGNMENT DISABLED", "INTERNAL ROLE FLAG", "DESCRIPTION"]
+    click.echo(tabulate(wrap_table_column(rows, headers, column=3), headers=headers, tablefmt=ctx.obj.tablefmt))
 
 
 @role.command("add")
 @click.pass_context
 @click.argument("role_name")
 @click.option("--description", help="Description of the role")
-def add(ctx: click.Context, role_name: str, description: Optional[str]) -> None:
+@click.option("--assignment-disabled", type=bool, is_flag=False, default=False, help="Prevents this role from being assigned to, or taken away from, an account. Only bypassable with '--force' on `account role add`/`remove`.")
+@click.option("--internal-role-flag", type=bool, is_flag=False, default=False, help="Prevents a policy package from altering the role such as deleting it.")
+def add(ctx: click.Context, role_name: str, description: Optional[str], assignment_disabled: bool, internal_role_flag: bool) -> None:
     """Add a new role, optionally with a description."""
-    ctx.obj.client.add_role(role_name, description=description)
+    ctx.obj.client.add_role(role_name, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag)
     click.echo(f"Role '{role_name}' added.")
 
 
 @role.command("update")
 @click.pass_context
 @click.argument("role_name")
-@click.option("--description", required=True, help='New description of the role, overwriting the existing one. Pass an empty string ("") to remove the description.')
-def update(ctx: click.Context, role_name: str, description: str) -> None:
-    """Update metadata of a role. The given description overwrites the existing one; an empty description removes it."""
-    ctx.obj.client.set_role_description(role_name, description)
-    if description.strip():
-        click.echo(f"Description of role '{role_name}' updated.")
-    else:
-        click.echo(f"Description of role '{role_name}' removed.")
+@click.option("--description", help='New description of the role, overwriting the existing one. Pass an empty string ("") to remove the description.')
+@click.option("--assignment-disabled", type=bool, is_flag=False, default=None, help="Prevents (true) or allow (false) this role from being assigned to, or taken away from, an account. Only bypassable with '--force' on `account role add`/`remove`.")
+@click.option("--internal-role-flag", type=bool, is_flag=False, default=None, help="Flags (true) or unflags (false) the role as internal.")
+def update(ctx: click.Context, role_name: str, description: Optional[str], assignment_disabled: Optional[bool], internal_role_flag: Optional[bool]) -> None:
+    """Update metadata of a role. Only the given options are changed; an empty description removes it."""
+    if description is None and assignment_disabled is None and internal_role_flag is None:
+        raise click.UsageError("At least one of --description, --assignment-disabled or --internal-role-flag must be given.")
+
+    ctx.obj.client.update_role(role_name, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag)
+    click.echo(f"Role '{role_name}' updated.")
 
 
 @role.command("delete")
@@ -63,82 +70,129 @@ def delete(ctx: click.Context, role_name: str) -> None:
     click.echo(f"Role '{role_name}' deleted.")
 
 
-@role.command("lock")
-@click.pass_context
-@click.argument("role_name")
-def lock(ctx: click.Context, role_name: str) -> None:
-    """Lock ROLE_NAME. An identity provider can neither assign a locked role to an account nor take it away from one, so only Rucio itself alters who holds it. The role definition itself stays owned by the policy package."""
-    ctx.obj.client.lock_role(role_name)
-    click.echo(f"Role '{role_name}' locked.")
-
-
-@role.command("unlock")
-@click.pass_context
-@click.argument("role_name")
-def unlock(ctx: click.Context, role_name: str) -> None:
-    """Unlock ROLE_NAME. An identity provider may assign a previously locked role to accounts and take it away again."""
-    ctx.obj.client.unlock_role(role_name)
-    click.echo(f"Role '{role_name}' unlocked.")
-
-
 @role.group()
 def permission() -> None:
     """Manage permissions assigned to a role."""
 
 
+def _matching_scopes(scope_pattern: str, known_scopes: list[str]) -> list[str]:
+    """Return the known scopes a wildcard scope pattern matches. Only a trailing '*' is accepted, as enforced server-side."""
+    prefix = scope_pattern[:-1]
+    return sorted(scope for scope in known_scopes if scope.startswith(prefix))
+
+
+def _confirm_scope_pattern(ctx: click.Context, scope_pattern: str, verb: str) -> bool:
+    """
+    Show the scopes a wildcard scope pattern currently matches and ask for confirmation.
+
+    Always True for a scope pattern without a wildcard, since it names a single scope and
+    there is nothing to expand or confirm.
+
+    :param verb: The action to ask confirmation for, e.g. 'add' or 'remove'.
+    :returns: True if the caller should proceed, False if the user declined.
+    """
+    if '*' not in scope_pattern:
+        return True
+
+    matches = _matching_scopes(scope_pattern, ctx.obj.client.list_scopes())
+    click.echo(f"The '{scope_pattern}' pattern currently matches the following scope(s):")
+    for scope in matches:
+        click.echo(f"  {scope}")
+    if not matches:
+        click.echo("  (none)")
+
+    return click.confirm(f"Do you still want to {verb} this permission?")
+
+
 @permission.command("list")
 @click.argument("role_name")
+@click.option("--detail", is_flag=True, help="Expand each wildcard scope pattern into the scopes it currently matches.")
 @click.pass_context
-def permission_list(ctx: click.Context, role_name: str) -> None:
+def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
     """List permissions assigned to ROLE_NAME."""
     permissions = ctx.obj.client.list_role_permissions(role_name)
 
-    ops_by_scope: dict[str, set[str]] = {}
+    ops_by_scope_pattern: dict[str, set[str]] = {}
     for permission in permissions:
-        ops_by_scope.setdefault(permission['scope'], set()).add(permission['operation'])
+        ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
 
-    rows = [[scope, format_operations(ops)] for scope, ops in sorted(ops_by_scope.items())]
-    click.echo(tabulate(rows, headers=["SCOPE", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
+    if not detail:
+        rows = [[scope_pattern, format_operations(ops)] for scope_pattern, ops in sorted(ops_by_scope_pattern.items())]
+        click.echo(tabulate(rows, headers=["SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
+        return
+
+    # only fetch the (potentially large) list of every scope if a pattern actually needs expanding
+    known_scopes = ctx.obj.client.list_scopes() if any('*' in scope_pattern for scope_pattern in ops_by_scope_pattern) else []
+
+    rows = []
+    for scope_pattern, ops in sorted(ops_by_scope_pattern.items()):
+        rows.append([scope_pattern, format_operations(ops)])
+        if '*' not in scope_pattern:
+            continue
+
+        matches = _matching_scopes(scope_pattern, known_scopes)
+        if not matches:
+            rows.append(["    (no scope currently matches)", ""])
+            continue
+        for index, scope in enumerate(matches):
+            branch = "`-- " if index == len(matches) - 1 else "|-- "
+            rows.append([f"    {branch}{scope}", ""])
+
+    click.echo(tabulate(rows, headers=["SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
 @permission.command("add")
 @click.argument("role_name")
 @click.argument("operation", type=click.Choice(list(OPERATION_SHORTHANDS), case_sensitive=False))
-@click.argument("scope")
+@click.argument("scope_pattern")
 @click.pass_context
-def permission_add(ctx: click.Context, role_name: str, operation: str, scope: str) -> None:
-    """Add OPERATION on SCOPE to ROLE_NAME. OPERATION is read ('r'/'read'), write ('w'/'write') or both ('rw')."""
+def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pattern: str) -> None:
+    """Add OPERATION on SCOPE_PATTERN to ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write' or both ('rw'). SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob."""
+    if not _confirm_scope_pattern(ctx, scope_pattern, "add"):
+        click.echo("Aborted, no permission was added.")
+        return
     added, already_assigned = [], []
     for op in OPERATION_SHORTHANDS[operation.lower()]:
         try:
-            ctx.obj.client.add_role_permission(role_name, op.value, scope)
+            ctx.obj.client.add_role_permission(role_name, op.value, scope_pattern)
             added.append(op.value)
         except Duplicate:
             already_assigned.append(op.value)
 
     if already_assigned:
-        click.echo(f"Warning: {'/'.join(already_assigned)} permission(s) on {scope} already assigned to role '{role_name}'.")
+        click.echo(f"Warning: {'/'.join(already_assigned)} permission(s) on {scope_pattern} already assigned to role '{role_name}'.")
     if added:
-        click.echo(f"Added {'/'.join(added)} permission(s) on {scope} to role '{role_name}'.")
+        click.echo(f"Added {'/'.join(added)} permission(s) on {scope_pattern} to role '{role_name}'.")
 
 
 @permission.command("remove")
 @click.argument("role_name")
 @click.argument("operation", type=click.Choice(list(OPERATION_SHORTHANDS), case_sensitive=False))
-@click.argument("scope")
+@click.argument("scope_pattern")
 @click.pass_context
-def permission_remove(ctx: click.Context, role_name: str, operation: str, scope: str) -> None:
-    """Remove OPERATION on SCOPE from ROLE_NAME. OPERATION is read ('r'/'read'), write ('w'/'write') or both ('rw')."""
+def permission_remove(ctx: click.Context, role_name: str, operation: str, scope_pattern: str) -> None:
+    """Remove OPERATION on SCOPE_PATTERN from ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write' or both ('rw')."""
+    requested = OPERATION_SHORTHANDS[operation.lower()]
+    assigned = {
+        permission['operation']
+        for permission in ctx.obj.client.list_role_permissions(role_name)
+        if permission['scope_pattern'] == scope_pattern
+    }
+    if not any(op.value in assigned for op in requested):
+        raise RolePermissionNotFound(
+            f"None of the requested permissions ({'/'.join(op.value for op in requested)}) are assigned to role '{role_name}' on scope pattern '{scope_pattern}'.")
+
+    if not _confirm_scope_pattern(ctx, scope_pattern, "remove"):
+        click.echo("Aborted, no permission was removed.")
+        return
+
     removed, not_assigned = [], []
-    for op in OPERATION_SHORTHANDS[operation.lower()]:
+    for op in requested:
         try:
-            ctx.obj.client.delete_role_permission(role_name, op.value, scope)
+            ctx.obj.client.delete_role_permission(role_name, op.value, scope_pattern)
             removed.append(op.value)
         except RolePermissionNotFound:
             not_assigned.append(op.value)
-
-    if not removed:
-        raise RolePermissionNotFound(f"None of the requested permissions ({'/'.join(not_assigned)}) were assigned to role '{role_name}' on scope '{scope}'.")
     if not_assigned:
-        click.echo(f"Warning: {'/'.join(not_assigned)} permission(s) on {scope} were already not assigned to role '{role_name}'.")
-    click.echo(f"Removed {'/'.join(removed)} permission(s) on {scope} from role '{role_name}'.")
+        click.echo(f"Warning: {'/'.join(not_assigned)} permission(s) on {scope_pattern} were already not assigned to role '{role_name}'.")
+    click.echo(f"Removed {'/'.join(removed)} permission(s) on {scope_pattern} from role '{role_name}'.")

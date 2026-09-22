@@ -44,7 +44,7 @@ class OptionalDateTime(click.ParamType):
 
 
 OPTIONAL_DATE = OptionalDateTime()
-DATE_EXAMPLE = "2027-01-31 or 2027-01-31T12:00:00"
+DATE_EXAMPLE = "2012-02-29 or 2012-02-29T16:33:30"
 
 
 @click.group()
@@ -365,25 +365,26 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
         click.echo()
         click.echo(f"Permissions granted via roles for account {account_name}:")
 
-        ops_by_role_scope: dict[tuple[str, str], set[str]] = {}
+        ops_by_role_scope_pattern: dict[tuple[str, str], set[str]] = {}
         for permission in rbac['permissions']:
-            ops_by_role_scope.setdefault((permission['role'], permission['scope']), set()).add(permission['operation'])
+            ops_by_role_scope_pattern.setdefault((permission['role'], permission['scope_pattern']), set()).add(permission['operation'])
 
         permission_rows = [
-            [role_name, scope, format_operations(operations)]
-            for (role_name, scope), operations in sorted(ops_by_role_scope.items())
+            [role_name, scope_pattern, format_operations(operations)]
+            for (role_name, scope_pattern), operations in sorted(ops_by_role_scope_pattern.items())
         ]
-        click.echo(tabulate(permission_rows, headers=["ROLE", "SCOPE", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
+        click.echo(tabulate(permission_rows, headers=["ROLE", "SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
 @role.command("add")
 @click.argument("role_name")
 @click.argument("account_name")
 @click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, the assignment does not expire.")
+@click.option("--force", is_flag=True, default=False, help="Assign the role even if it has assignment_disabled set.")
 @click.pass_context
-def role_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime]) -> None:
+def role_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime], force: bool) -> None:
     """Assign ROLE_NAME to ACCOUNT_NAME, optionally until an expiry date."""
-    ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at)
+    ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force)
     if expires_at:
         click.echo(f"Added role '{role_name}' to account '{account_name}', expiring at {expires_at}.")
     else:
@@ -407,8 +408,9 @@ def role_update(ctx: click.Context, role_name: str, account_name: str, expires_a
 @role.command("remove")
 @click.argument("role_name")
 @click.argument("account_name")
+@click.option("--force", is_flag=True, default=False, help="Remove the role even if it has assignment_disabled set.")
 @click.pass_context
-def role_remove(ctx: click.Context, role_name: str, account_name: str) -> None:
+def role_remove(ctx: click.Context, role_name: str, account_name: str, force: bool) -> None:
     """Remove ROLE_NAME from ACCOUNT_NAME."""
-    ctx.obj.client.delete_account_role(account_name, role_name)
+    ctx.obj.client.delete_account_role(account_name, role_name, force=force)
     click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
