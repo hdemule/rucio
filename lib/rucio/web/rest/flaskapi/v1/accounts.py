@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 from flask import Flask, Response, jsonify, redirect, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, AccountNotFound, CounterNotFound, Duplicate, IdentityError, InputValidationError, InvalidAccountType, InvalidObject, RoleAssignmentNotFound, RoleNotFound, RSENotFound, RuleNotFound, ScopeNotFound
+from rucio.common.exception import AccessDenied, AccountNotFound, CounterNotFound, Duplicate, IdentityError, InputValidationError, InvalidAccountType, InvalidObject, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleNotFound, RSENotFound, RuleNotFound, ScopeNotFound
 from rucio.common.utils import APIEncoder, render_json
 from rucio.gateway import role as role_gateway
 from rucio.gateway.account import add_account, add_account_attribute, del_account, del_account_attribute, get_account_info, get_usage_history, list_account_attributes, list_accounts, list_identities, update_account
@@ -293,15 +293,18 @@ class Roles(ErrorHandlingMethodView):
     def post(self, account: str, role: str) -> 'ResponseReturnValue':
         parameters = json_parameters(optional=True)
         expires_at = param_get(parameters, 'expires_at', default=None)
+        force = param_get(parameters, 'force', default=False)
 
         try:
-            role_gateway.add_account_role(account=account, role=role, issuer=request.environ['issuer'], expires_at=expires_at, vo=request.environ['vo'])
+            role_gateway.add_account_role(account=account, role=role, issuer=request.environ['issuer'], expires_at=expires_at, force=force, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
         except (AccountNotFound, RoleNotFound) as error:
             return generate_http_error_flask(404, error)
+        except RoleAssignmentDisabled as error:
+            return generate_http_error_flask(403, error)
         except Duplicate as error:
             return generate_http_error_flask(409, error)
         return jsonify({"message": f"Role '{role}' successfully added to account '{account}'."}), 201
@@ -325,12 +328,17 @@ class Roles(ErrorHandlingMethodView):
         return jsonify({"message": f"Expiry date of role '{role}' for account '{account}' successfully updated."}), 200
 
     def delete(self, account: str, role: str) -> 'ResponseReturnValue':
+        parameters = json_parameters(optional=True)
+        force = param_get(parameters, 'force', default=False)
+
         try:
-            role_gateway.delete_account_role(account=account, role=role, issuer=request.environ['issuer'], vo=request.environ['vo'])
+            role_gateway.delete_account_role(account=account, role=role, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
         except RoleAssignmentNotFound as error:
             return generate_http_error_flask(404, error)
+        except RoleAssignmentDisabled as error:
+            return generate_http_error_flask(403, error)
         return jsonify({"message": f"Role '{role}' successfully removed from account '{account}'."}), 200
 
 
