@@ -406,10 +406,12 @@ class Roles(BASE, ModelBase):
     __tablename__ = 'roles'
     role: Mapped[str] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text)
-    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    assignment_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    internal_role_flag: Mapped[bool] = mapped_column(Boolean, default=False)
     _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'),
-                   CheckConstraint('LOCKED IS NOT NULL', name='ROLES_LOCKED_NN'))
+                   CheckConstraint('ASSIGNMENT_DISABLED IS NOT NULL', name='ROLES_ASSIGNMENT_DISABLED_NN'),
+                   CheckConstraint('INTERNAL_ROLE_FLAG IS NOT NULL', name='ROLES_INTERNAL_ROLE_FLAG_NN'))
 
 
 class AccountRoleAssociation(BASE, ModelBase):
@@ -429,15 +431,14 @@ class RolePermissionAssociation(BASE, ModelBase):
     """Represents a role's permission (scope + operation) for Rule-Based Access Control (RBAC)"""
     __tablename__ = 'role_permission_map'
     role: Mapped[str] = mapped_column(String(255))
-    scope: Mapped[InternalScope] = mapped_column(InternalScopeString(common_schema.get_schema_value('SCOPE_LENGTH')))
+    scope_pattern: Mapped[str] = mapped_column(String(common_schema.get_schema_value('SCOPE_LENGTH')))
     operation: Mapped[DatabaseOperationType] = mapped_column(Enum(DatabaseOperationType, name='ROLE_PERMISSION_MAP_OPERATION_CHK',
                                                                   create_constraint=True,
                                                                   values_callable=lambda obj: [e.value for e in obj]))
-    _table_args = (PrimaryKeyConstraint('role', 'scope', 'operation', name='ROLE_PERMISSION_MAP_PK'),
+    _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_PERMISSION_MAP_PK'),
                    ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='RESTRICT'),
-                   ForeignKeyConstraint(['scope'], ['scopes.scope'], name='ROLE_PERMISSION_MAP_SCOPE_FK', onupdate='CASCADE', ondelete='CASCADE'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
-                   CheckConstraint('SCOPE IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_NN'),
+                   CheckConstraint('SCOPE_PATTERN IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_PATTERN_NN'),
                    CheckConstraint('OPERATION IS NOT NULL', name='ROLE_PERMISSION_MAP_OPERATION_NN'))
 
 
