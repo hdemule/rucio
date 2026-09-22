@@ -146,7 +146,7 @@ class AccountClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
         raise exc_cls(exc_msg)
 
-    def add_account_role(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]] = None) -> None:
+    def add_account_role(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]] = None, force: bool = False) -> None:
         """
         Assign a role to an account.
 
@@ -158,9 +158,11 @@ class AccountClient(BaseClient):
             The role to assign.
         expires_at :
             An optional date at which the assignment expires. None means that it does not expire.
+        force :
+            Assign the role even if it has `assignment_disabled` set.
         """
         url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
-        data = render_json(expires_at=expires_at) if expires_at is not None else None
+        data = render_json(expires_at=expires_at, force=force) if expires_at is not None or force else None
         response = self._send_request(url, method=HTTPMethod.POST, data=data)
         if response.status_code != codes.created:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
@@ -185,9 +187,22 @@ class AccountClient(BaseClient):
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
 
-    def delete_account_role(self, account: str, role: str) -> None:
+    def delete_account_role(self, account: str, role: str, force: bool = False) -> None:
+        """
+        Remove a role from an account.
+
+        Parameters
+        ----------
+        account :
+            The account to remove the role from.
+        role :
+            The role to remove.
+        force :
+            Remove the role even if it has `assignment_disabled` set.
+        """
         url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
-        response = self._send_request(url, method=HTTPMethod.DELETE)
+        data = render_json(force=force) if force else None
+        response = self._send_request(url, method=HTTPMethod.DELETE, data=data)
         if response.status_code != codes.ok:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
