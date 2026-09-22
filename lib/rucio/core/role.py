@@ -16,11 +16,11 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from sqlalchemy import delete, exists, inspect, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.constants import DEFAULT_VO
-from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, ScopeNotFound
+from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
@@ -34,14 +34,8 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 
-# the only wildcard a policy package may use in a scope, see `_scope_like_pattern`
+# the only wildcard a scope pattern may use, see `_validate_scope_pattern`
 SCOPE_WILDCARD = "*"
-
-# the tables referencing `roles.role`, which a role deletion has to deal with
-ROLE_REFERENCES = {
-    "account_role_map": "ACCOUNT_ROLE_MAP_ROLE_FK",
-    "role_permission_map": "ROLE_PERMISSION_MAP_ROLE_FK",
-}
 
 
 def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
@@ -104,21 +98,26 @@ def _normalize_expires_at(expires_at: Optional[Union[str, datetime]]) -> Optiona
 
 def list_roles(session: "Session") -> list[dict[str, Any]]:
     """
-    List all roles defined in the system, together with their description and locked state.
+    List all roles defined in the system, together with their description, assignment_disabled and internal_role_flag state.
     """
-    stmt = select(models.Roles.role, models.Roles.description, models.Roles.locked).order_by(models.Roles.role)
-    return [{"role": role, "description": description, "locked": locked} for role, description, locked in session.execute(stmt).all()]
+    stmt = select(models.Roles.role, models.Roles.description, models.Roles.assignment_disabled, models.Roles.internal_role_flag).order_by(models.Roles.role)
+    return [
+        {"role": role, "description": description, "assignment_disabled": assignment_disabled, "internal_role_flag": internal_role_flag}
+        for role, description, assignment_disabled, internal_role_flag in session.execute(stmt).all()
+    ]
 
 
-def add_role(role: str, description: Optional[str] = None, *, session: "Session") -> None:
+def add_role(role: str, description: Optional[str] = None, assignment_disabled: bool = False, internal_role_flag: bool = False, *, session: "Session") -> None:
     """
     Add a new role to the system.
 
     :param role: The name of the role to add.
     :param description: An optional description of the role. An empty description is stored as NULL.
+    :param assignment_disabled: Whether an identity provider is barred from assigning this role to, or taking it away from, an account; only Rucio itself then alters who holds it.
+    :param internal_role_flag: Whether the role is flagged as internal.
     :param session: The database session.
     """
-    new_role = models.Roles(role=role, description=_normalize_description(description))
+    new_role = models.Roles(role=role, description=_normalize_description(description), assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag)
     session.add(new_role)
     try:
         session.commit()
@@ -127,36 +126,22 @@ def add_role(role: str, description: Optional[str] = None, *, session: "Session"
         raise Duplicate("Role '%s' already exists." % role)
 
 
-def set_role_description(role: str, description: Optional[str], *, session: "Session") -> Optional[str]:
+def update_role(
+        role: str,
+        *,
+        description: Optional[str] = None,
+        assignment_disabled: Optional[bool] = None,
+        internal_role_flag: Optional[bool] = None,
+        session: "Session") -> dict[str, Any]:
     """
-    Overwrite the description of an existing role.
+    Update the metadata of an existing role, changing only the parameters explicitly given.
 
     :param role: The role to update.
-    :param description: The new description. An empty description clears the field (stored as NULL).
+    :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
+    :param assignment_disabled: The new assignment_disabled state, or None to leave it untouched.
+    :param internal_role_flag: The new internal_role_flag state, or None to leave it untouched.
     :param session: The database session.
-    :returns: The description as it was stored, or None if it was cleared.
-    """
-    stmt = select(models.Roles).where(models.Roles.role == role)
-    role_obj = session.execute(stmt).scalar_one_or_none()
-    if role_obj is None:
-        raise RoleNotFound("Role '%s' does not exist." % role)
-
-    normalized = _normalize_description(description)
-    role_obj.description = normalized
-    session.commit()
-    return normalized
-
-
-def set_role_locked(role: str, locked: bool, *, session: "Session") -> bool:
-    """
-    Set the locked state of a role.
-
-    An identity provider cannot assign a locked role to an account or take it away from one, so only Rucio itself alters who holds it. The definition of the role is not protected: the policy package remains its source of truth.
-
-    :param role: The role to lock or unlock.
-    :param locked: The requested locked state.
-    :param session: The database session.
-    :returns: True if the state was changed, False if the role already was in the requested state.
+    :returns: The role as it is stored after the update.
     :raises RoleNotFound: If the role does not exist.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
@@ -164,12 +149,20 @@ def set_role_locked(role: str, locked: bool, *, session: "Session") -> bool:
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
 
-    if role_obj.locked == locked:
-        return False
+    if description is not None:
+        role_obj.description = _normalize_description(description)
+    if assignment_disabled is not None:
+        role_obj.assignment_disabled = assignment_disabled
+    if internal_role_flag is not None:
+        role_obj.internal_role_flag = internal_role_flag
 
-    role_obj.locked = locked
     session.commit()
-    return True
+    return {
+        "role": role,
+        "description": role_obj.description,
+        "assignment_disabled": role_obj.assignment_disabled,
+        "internal_role_flag": role_obj.internal_role_flag,
+    }
 
 
 def delete_role(role: str, session: "Session") -> None:
@@ -204,15 +197,26 @@ def list_account_roles(account: "InternalAccount", session: "Session") -> list[d
     return [{"role": role, "expires_at": expires_at, "description": description} for role, expires_at, description in session.execute(stmt).all()]
 
 
-def add_account_role(account: "InternalAccount", role: str, expires_at: Optional[Union[str, datetime]] = None, *, session: "Session") -> None:
+def _role_assignment_disabled(role: str, session: "Session") -> bool:
+    """Tell whether a role has `assignment_disabled` set. False (also) for a role which does not exist."""
+    stmt = select(models.Roles.assignment_disabled).where(models.Roles.role == role)
+    return bool(session.execute(stmt).scalar_one_or_none())
+
+
+def add_account_role(account: "InternalAccount", role: str, expires_at: Optional[Union[str, datetime]] = None, force: bool = False, *, session: "Session") -> None:
     """
     Assign a role to an account.
 
     :param account: The account to assign the role to.
     :param role: The role to assign.
     :param expires_at: An optional date at which the assignment expires. None means that it does not expire.
+    :param force: Assign the role even if it has `assignment_disabled` set.
     :param session: The database session.
+    :raises RoleAssignmentDisabled: If the role has `assignment_disabled` set and `force` is not given.
     """
+    if not force and _role_assignment_disabled(role, session):
+        raise RoleAssignmentDisabled("Role '%s' has assignment_disabled set, so it cannot be assigned to an account without forcing it." % role)
+
     session.add(models.AccountRoleAssociation(account=account, role=role, expires_at=_normalize_expires_at(expires_at)))
     try:
         session.commit()
@@ -227,10 +231,23 @@ def add_account_role(account: "InternalAccount", role: str, expires_at: Optional
         raise Duplicate("Either account '%s' or role '%s' does not exist, or account '%s' already has role '%s'." % (account, role, account, role))
 
 
-def delete_account_role(account: "InternalAccount", role: str, session: "Session") -> None:
+def delete_account_role(account: "InternalAccount", role: str, force: bool = False, *, session: "Session") -> None:
+    """
+    Remove a role from an account.
+
+    :param account: The account to remove the role from.
+    :param role: The role to remove.
+    :param force: Remove the role even if it has `assignment_disabled` set.
+    :param session: The database session.
+    :raises RoleAssignmentNotFound: If the account does not have the role assigned.
+    :raises RoleAssignmentDisabled: If the role has `assignment_disabled` set and `force` is not given.
+    """
     mapping = session.get(models.AccountRoleAssociation, (account, role))
     if mapping is None:
         raise RoleAssignmentNotFound("Either account '%s' or role '%s' does not exist, or the account does not have that role assigned." % (account, role))
+
+    if not force and _role_assignment_disabled(role, session):
+        raise RoleAssignmentDisabled("Role '%s' has assignment_disabled set, so it cannot be removed from an account without forcing it." % role)
 
     session.delete(mapping)
     session.commit()
@@ -257,30 +274,100 @@ def set_account_role_expires_at(account: "InternalAccount", role: str, expires_a
     return normalized
 
 
+def _validate_scope_pattern(scope_pattern: str) -> str:
+    """
+    Validate a scope pattern of a role permission.
+
+    A '*' is the only wildcard, and it is only accepted on its own ('*', every scope) or at
+    the end of a scope ('data*', every scope starting with 'data'). A leading or embedded
+    wildcard is refused, since it cannot be matched unambiguously against a concrete scope.
+    The pattern is not checked against the scopes which currently exist: it is stored as
+    given, and a scope created later is covered by it immediately.
+
+    :param scope_pattern: The scope pattern as supplied by the caller.
+    :returns: The scope pattern, stripped of surrounding whitespace.
+    :raises InputValidationError: If the scope pattern is not a string, is empty, or uses the wildcard other than as a trailing '*'.
+    """
+    if not isinstance(scope_pattern, str):
+        raise InputValidationError("scope pattern must be a string, got '%s'." % type(scope_pattern).__name__)
+
+    scope_pattern = scope_pattern.strip()
+    if not scope_pattern:
+        raise InputValidationError("scope pattern must not be empty.")
+
+    if scope_pattern.count(SCOPE_WILDCARD) > 1 or (SCOPE_WILDCARD in scope_pattern and not scope_pattern.endswith(SCOPE_WILDCARD)):
+        raise InputValidationError(
+            "scope pattern '%s' is not supported, a '*' may only stand on its own or close a scope, as in 'data*'." % scope_pattern)
+
+    return scope_pattern
+
+
+def _scope_pattern_matches(scope: "InternalScope", scope_pattern: str) -> bool:
+    """
+    Tell whether a concrete scope matches a role's scope pattern.
+
+    The pattern is matched against the external (human-readable) name of the scope: '*' on
+    its own matches every scope, a pattern ending in '*' matches every scope whose external
+    name starts with the literal part that precedes it, and a pattern without '*' matches
+    only that exact scope.
+
+    :param scope: The concrete scope to check.
+    :param scope_pattern: The scope pattern of a role permission, as stored.
+    :returns: True if the scope matches the pattern.
+    """
+    external = str(scope.external)
+    if scope_pattern.endswith(SCOPE_WILDCARD):
+        return external.startswith(scope_pattern[:-1])
+    return external == scope_pattern
+
+
 def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
-    stmt = select(models.RolePermissionAssociation).where(models.RolePermissionAssociation.role == role).order_by(models.RolePermissionAssociation.scope, models.RolePermissionAssociation.operation)
-    return [{"operation": permission.operation.value, "scope": str(permission.scope.external)} for permission in session.execute(stmt).scalars()]
+    """
+    List the permissions granted to a role, each as an operation on a scope pattern.
+
+    :raises RoleNotFound: If the role does not exist.
+    """
+    if session.execute(select(models.Roles.role).where(models.Roles.role == role)).scalar_one_or_none() is None:
+        raise RoleNotFound("Role '%s' does not exist." % role)
+
+    stmt = (
+        select(models.RolePermissionAssociation)
+        .where(models.RolePermissionAssociation.role == role)
+        .order_by(models.RolePermissionAssociation.scope_pattern, models.RolePermissionAssociation.operation)
+    )
+    return [{"operation": permission.operation.value, "scope_pattern": permission.scope_pattern} for permission in session.execute(stmt).scalars()]
 
 
-def add_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
-    session.add(models.RolePermissionAssociation(role=role, scope=scope, operation=operation))
+def add_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", session: "Session") -> None:
+    """
+    Grant a role a permission on a scope pattern.
+
+    :param role: The role to grant the permission to.
+    :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted, see :func:`_validate_scope_pattern`.
+    :param operation: The operation to grant.
+    :param session: The database session.
+    :raises InputValidationError: If the scope pattern is not a trailing wildcard.
+    :raises RoleNotFound: If the role does not exist.
+    :raises Duplicate: If the role already has that permission on that scope pattern.
+    """
+    scope_pattern = _validate_scope_pattern(scope_pattern)
+
+    session.add(models.RolePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
     try:
         session.commit()
     except IntegrityError as error:
         session.rollback()
         if _violates_constraint(error, "ROLE_PERMISSION_MAP_ROLE_FK"):
             raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, "ROLE_PERMISSION_MAP_SCOPE_FK"):
-            raise ScopeNotFound("Scope '%s' does not exist." % scope)
         if _violates_constraint(error, "ROLE_PERMISSION_MAP_PK"):
-            raise Duplicate("Role '%s' already has '%s' permission on scope '%s'." % (role, operation.value, scope))
-        raise Duplicate("Either role '%s' or scope '%s' does not exist, or role '%s' already has '%s' permission on scope '%s'." % (role, scope, role, operation.value, scope))
+            raise Duplicate("Role '%s' already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
+        raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
 
 
-def delete_role_permission(role: str, scope: "InternalScope", operation: "DatabaseOperationType", session: "Session") -> None:
-    mapping = session.get(models.RolePermissionAssociation, (role, scope, operation))
+def delete_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", session: "Session") -> None:
+    mapping = session.get(models.RolePermissionAssociation, (role, scope_pattern, operation))
     if mapping is None:
-        raise RolePermissionNotFound("Either role '%s' or scope '%s' does not exist, or the role does not have '%s' permission on that scope." % (role, scope, operation.value))
+        raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
 
     session.delete(mapping)
     session.commit()
@@ -304,11 +391,15 @@ def has_role_scope_access(
     Returns True if the account has the specified operation permission
     on the given scope, according to the RBAC tables.
 
+    A role's permission is granted on a scope pattern rather than a single scope, so this
+    matches the given scope against the patterns of the account's roles in Python, see
+    :func:`_scope_pattern_matches`.
+
     This only check the RBAC tables and does not consider ownership or admin/root privileges.
     For checking ownership or admin/root privileges, use the :func:`has_scope_access` function instead.
     """
-    exists_stmt = (
-        select(1)
+    stmt = (
+        select(models.RolePermissionAssociation.scope_pattern)
         .select_from(models.AccountRoleAssociation)
         .join(
             models.RolePermissionAssociation,
@@ -316,13 +407,11 @@ def has_role_scope_access(
         )
         .where(
             models.AccountRoleAssociation.account == account,
-            models.RolePermissionAssociation.scope == scope,
             models.RolePermissionAssociation.operation == operation,
         )
     )
 
-    stmt = select(exists(exists_stmt))
-    return bool(session.execute(stmt).scalar())
+    return any(_scope_pattern_matches(scope, scope_pattern) for scope_pattern in session.execute(stmt).scalars())
 
 
 def has_scope_access(
@@ -405,192 +494,9 @@ def _print_table(headers: list[str], rows: list[list[Any]], indent: str = "  ") 
         print(indent + " | ".join(row[index].ljust(widths[index]) for index in range(len(headers))))
 
 
-def _format_operations(operations: "Iterable[str]") -> str:
-    """Join operation names for display, e.g. 'read+write'."""
-    return "+".join(sorted(operations)) or "-"
-
-
 def _format_expires_at(expires_at: Optional[datetime]) -> str:
     """Render the expiry date of a role assignment, 'never' if it does not expire."""
     return "never" if expires_at is None else str(expires_at)
-
-
-def _parse_operations(action: Any) -> set["DatabaseOperationType"]:
-    """
-    Turn the action of a policy package permission into the database operations it grants.
-
-    Accepted forms are an rw-style mask ('rw', 'r-', '-w'), a single operation
-    ('read', 'write') or a list of any of those.
-
-    :param action: The action as defined by the policy package.
-    :returns: The operations the action grants.
-    :raises InputValidationError: If the action is not understood.
-    """
-    if isinstance(action, (list, tuple, set)):
-        operations: set[DatabaseOperationType] = set()
-        for item in action:
-            operations |= _parse_operations(item)
-        return operations
-
-    if not isinstance(action, str):
-        raise InputValidationError("permission action must be a string, got '%s'." % type(action).__name__)
-
-    text = action.strip().lower()
-    if text in (DatabaseOperationType.READ.value, DatabaseOperationType.WRITE.value):
-        return {DatabaseOperationType(text)}
-
-    # an rw-style mask, in which a '-' stands for a permission that is not granted
-    if text and set(text) <= {"r", "w", "-"}:
-        return {operation for character, operation in (("r", DatabaseOperationType.READ), ("w", DatabaseOperationType.WRITE)) if character in text}
-
-    raise InputValidationError("permission action '%s' is not understood, expected 'read', 'write' or an rw-style mask such as 'rw' or 'r-'." % action)
-
-
-def _role_delete_rules(session: "Session") -> dict[str, str]:
-    """
-    Return the delete rule of each foreign key referencing `roles`.
-
-    A role cannot be deleted while it is still assigned to an account or still has permissions:
-    either the rows of `account_role_map` and `role_permission_map` go first, or the database
-    takes them along, which it only does for a foreign key declared ON DELETE CASCADE.
-
-    :param session: The database session.
-    :returns: The delete rule of each foreign key, by constraint name.
-    """
-    inspector = inspect(session.get_bind())
-    schema = models.BASE.metadata.schema
-    rules = {}
-
-    for table, constraint in sorted(ROLE_REFERENCES.items()):
-        for foreign_key in inspector.get_foreign_keys(table, schema=schema):
-            if foreign_key.get("referred_table") != "roles":
-                continue
-            rule = ((foreign_key.get("options") or {}).get("ondelete") or "NO ACTION").upper()
-            rules[foreign_key.get("name") or constraint] = rule
-
-    return rules
-
-
-def _scope_like_pattern(pattern: str, vo: str) -> str:
-    """
-    Turn a scope pattern of the policy package into the SQL LIKE pattern it stands for.
-
-    A '*' is the only wildcard, and it is only accepted on its own ('*', every scope of the
-    VO) or at the end of a scope ('data*', every scope starting with 'data'). A leading or
-    embedded wildcard is refused: it cannot be answered from the index on `scopes.scope`, and
-    it over-matches in ways that are hard to review, which is a poor property for something
-    that grants access.
-
-    :param pattern: The scope pattern as defined by the policy package.
-    :param vo: The VO the pattern applies to, so that it cannot reach into another one.
-    :returns: The pattern to hand to a LIKE, escaped with a backslash.
-    :raises InputValidationError: If the wildcard is not a trailing one.
-    """
-    if pattern.count(SCOPE_WILDCARD) > 1 or (SCOPE_WILDCARD in pattern and not pattern.endswith(SCOPE_WILDCARD)):
-        raise InputValidationError(
-            "scope pattern '%s' is not supported, a '*' may only stand on its own or close a scope, as in 'data*'." % pattern)
-
-    literal = pattern[:-1] if pattern.endswith(SCOPE_WILDCARD) else pattern
-    # '%', '_' and the escape character itself are ordinary characters in a scope name, so
-    # they must not be taken for LIKE wildcards
-    escaped = literal.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-    if pattern.endswith(SCOPE_WILDCARD):
-        escaped += SCOPE_WILDCARD
-
-    # the internal representation carries the VO ('data@tst' outside the default VO), so the
-    # conversion has to happen before the wildcard is translated, which keeps the VO anchored
-    # at the end of the pattern
-    return InternalScope(escaped, vo=vo).internal.replace(SCOPE_WILDCARD, '%')
-
-
-def _matching_scopes(pattern: str, vo: str, *, session: "Session") -> list[str]:
-    """
-    Return the existing scopes a scope pattern of the policy package covers.
-
-    The matching is left to the database, so that a trailing wildcard is answered from the
-    index on `scopes.scope`.
-
-    :param pattern: The scope pattern as defined by the policy package.
-    :param vo: The VO the pattern applies to.
-    :param session: The database session.
-    :returns: The external names of the matching scopes.
-    """
-    stmt = select(models.Scope.scope).where(models.Scope.scope.like(_scope_like_pattern(pattern, vo), escape='\\'))
-    if vo == DEFAULT_VO:
-        # the internal name of a scope of the default VO carries no VO at all, so a pattern of
-        # that VO would otherwise reach the scopes of the other VOs of a multi-VO instance,
-        # whose internal name ends in '@<vo>'. A '@' cannot appear in a scope name itself.
-        stmt = stmt.where(~models.Scope.scope.like('%@%'))
-    return sorted(str(scope) for scope in session.execute(stmt).scalars())
-
-
-def _format_scope_list(scopes: list[str], limit: int = 4) -> str:
-    """Render the scopes a pattern expanded to, shortened once there are too many to read."""
-    if not scopes:
-        return "(no scope matches)"
-    if len(scopes) <= limit:
-        return ", ".join(scopes)
-    return "%s, ... (%d scopes)" % (", ".join(scopes[:limit]), len(scopes))
-
-
-def _policy_package_role_permissions(role: str, definition: dict[str, Any], vo: str, *, session: "Session") -> tuple[set[tuple[str, str]], list[list[str]], list[str]]:
-    """
-    Turn the permissions of a policy package role definition into (scope, operation) pairs.
-
-    A scope pattern is expanded to the scopes it matches at this point, since
-    `role_permission_map.scope` references `scopes.scope` and therefore only holds scopes
-    which exist. A scope created later is picked up by the next synchronisation.
-
-    :param role: The name of the role, used in the warnings.
-    :param definition: The role definition as provided by the policy package.
-    :param vo: The VO the role belongs to.
-    :param session: The database session.
-    :returns: The pairs the role should grant, the declared permissions for display, and the
-              warnings about entries which cannot be applied.
-    """
-    pairs: set[tuple[str, str]] = set()
-    declared: list[list[str]] = []
-    warnings: list[str] = []
-
-    for entry in definition.get("permissions") or []:
-        if not isinstance(entry, dict):
-            warnings.append("Role '%s': permission entry %r is not a mapping, so it is ignored." % (role, entry))
-            continue
-
-        scope = entry.get("scope")
-        if not isinstance(scope, str) or not scope.strip():
-            warnings.append("Role '%s': permission entry %r has no scope, so it is ignored." % (role, entry))
-            continue
-        scope = scope.strip()
-
-        try:
-            operations = _parse_operations(entry.get("action"))
-        except InputValidationError as error:
-            warnings.append("Role '%s': %s" % (role, error))
-            continue
-        operations_shown = _format_operations(operation.value for operation in operations)
-
-        if SCOPE_WILDCARD not in scope:
-            declared.append([scope, operations_shown, ""])
-            for operation in operations:
-                pairs.add((scope, operation.value))
-            continue
-
-        try:
-            matches = _matching_scopes(scope, vo, session=session)
-        except InputValidationError as error:
-            warnings.append("Role '%s': %s" % (role, error))
-            declared.append([scope, operations_shown, "(unsupported pattern)"])
-            continue
-
-        if not matches:
-            warnings.append("Role '%s': scope pattern '%s' matches no scope, so %s is granted nowhere." % (role, scope, operations_shown))
-        declared.append([scope, operations_shown, _format_scope_list(matches)])
-        for matched in matches:
-            for operation in operations:
-                pairs.add((matched, operation.value))
-
-    return pairs, declared, warnings
 
 
 def _parse_idp_roles(roles: Any) -> dict[str, Optional[datetime]]:
@@ -632,30 +538,28 @@ def _parse_idp_roles(roles: Any) -> dict[str, Optional[datetime]]:
     return parsed
 
 
-def _scope_note(scope: str, known_scopes: set[str]) -> str:
-    """Point out that a permission references a scope which does not exist in Rucio."""
-    return "" if scope in known_scopes else " (note: scope '%s' does not exist in Rucio, so the permission cannot be granted)" % scope
-
-
-def _is_locked(role: str, known_roles: dict[str, Any]) -> bool:
+def _assignment_disabled(role: str, known_roles: dict[str, Any]) -> bool:
     """
-    Tell whether a role is locked.
+    Tell whether a role's assignment_disabled flag is set.
 
-    The assignments of a locked role may only be altered from within Rucio: an identity
+    The assignments of such a role may only be altered from within Rucio: an identity
     provider can neither have it assigned to an account nor taken away from one.
     """
     entry = known_roles.get(role)
-    return bool(entry and entry.get("locked"))
+    return bool(entry and entry.get("assignment_disabled"))
 
 
 def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Session") -> None:
     """
     Synchronizes the internal roles with the roles defined by the policy package.
 
-    The policy package is the source of truth for the roles themselves: every role it defines
-    is brought in line with it, and a role it does not define is deleted, together with the
-    permissions and the account assignments that role has. The `locked` flag does not apply
-    here, it only keeps an identity provider from altering who holds a role, see
+    The policy package is the source of truth for the description of the roles it defines, not
+    for their permissions or their account assignments, which are managed from within Rucio. A
+    role the policy package defines is created, as an external role (`assignment_disabled` and
+    `internal_role_flag` both False), if it does not exist yet, or has its description brought
+    in line with the policy package if it exists and is not flagged internal. A role flagged
+    internal (`internal_role_flag` True) is never touched by the policy package, whether or not
+    the policy package defines it: such a role is managed entirely from within Rucio, see
     :func:`sync_account_roles_from_idp`.
 
     This is a dry run: it reports what the synchronisation would do and leaves the database
@@ -666,118 +570,61 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
     """
     print("Syncing roles... (dry run, nothing is written to the database)")
 
-    # Read the role definitions from the policy package (the `roles` attribute of its role module)
     # Step 1: Retrieve Roles from the policy package
     roles = permission.get_roles(vo=vo)
 
-    desired_permissions: dict[str, set[tuple[str, str]]] = {}
-    warnings: list[str] = []
-    rows: list[list[Any]] = []
-    for role, definition in sorted(roles.items()):
-        desired_permissions[role], declared, role_warnings = _policy_package_role_permissions(role, definition, vo, session=session)
-        warnings.extend(role_warnings)
-
-        description = definition.get("description") or ""
-        if not declared:
-            rows.append([role, description, "", "", ""])
-        for index, (scope, operations, matches) in enumerate(declared):
-            rows.append([role if index == 0 else "", description if index == 0 else "", scope, operations, matches])
-
     print()
     print("Step 1: Retrieve Roles from the policy package")
-    # a scope pattern is shown as it is declared, next to the scopes it matches today
-    _print_table(["ROLE", "DESCRIPTION", "SCOPE", "OPERATION(S)", "MATCHING SCOPES"], rows)
-    for warning in warnings:
-        print("  Warning: %s" % warning)
+    _print_table(["ROLE", "DESCRIPTION"], [[role, definition.get("description") or ""] for role, definition in sorted(roles.items())])
 
-    # Step 2: Retreive all roles and their associated permissions (Roles, RolePermissionAssociation)
-    # The policy package is the source of truth, so a role it defines is always brought in line
-    # with it and a role it does not define is deleted, whether or not the role is locked: a lock
-    # only protects the assignments of a role against an identity provider, never the role itself.
+    # Step 2: Retrieve all roles currently known to Rucio
     current = {entry["role"]: entry for entry in list_roles(session=session)}
-    current_permissions = {
-        role: {(entry["scope"], entry["operation"]) for entry in list_role_permissions(role=role, session=session)}
-        for role in current
-    }
-    # `role_permission_map.scope` references `scopes.scope`, so a permission on a scope
-    # which does not exist cannot be stored
-    known_scopes = {str(scope.external) for scope in session.execute(select(models.Scope.scope)).scalars()}
-    # a role that still has permissions or assignments cannot be deleted, so the accounts
-    # holding each role are needed to plan a deletion
-    accounts_by_role: dict[str, list[str]] = {}
-    for assigned_role, assigned_account in session.execute(select(models.AccountRoleAssociation.role, models.AccountRoleAssociation.account)).all():
-        accounts_by_role.setdefault(assigned_role, []).append(str(assigned_account))
-
-    rows = []
-    for role in sorted(current):
-        operations_by_scope = {}
-        for scope, operation in current_permissions[role]:
-            operations_by_scope.setdefault(scope, set()).add(operation)
-
-        description = current[role]["description"] or ""
-        if not operations_by_scope:
-            rows.append([role, description, "", ""])
-        for index, (scope, operations) in enumerate(sorted(operations_by_scope.items())):
-            rows.append([role if index == 0 else "", description if index == 0 else "", scope, _format_operations(operations)])
 
     print()
-    print("Step 2: Retreive all roles and their associated permissions")
-    _print_table(["ROLE", "DESCRIPTION", "SCOPE", "OPERATION(S)"], rows)
+    print("Step 2: Retrieve all roles known to Rucio")
+    _print_table(
+        ["ROLE", "DESCRIPTION", "INTERNAL"],
+        [[role, entry["description"] or "", "yes" if entry["internal_role_flag"] else "no"] for role, entry in sorted(current.items())],
+    )
 
     print()
     print("Step 3: What the synchronisation would do")
-    created, updated, unchanged, deleted = 0, 0, 0, 0
-    granted, revoked, unassigned = 0, 0, 0
+    created, updated, unchanged, skipped_internal, deleted = 0, 0, 0, 0, 0
 
     for role in sorted(roles):
-        wanted = desired_permissions[role]
-        description = roles[role].get("description")
+        description = _normalize_description(roles[role].get("description"))
 
         if role not in current:
             created += 1
-            granted += len(wanted)
             print("  Role '%s' does not exist yet, so it would be created with description %r." % (role, description))
-            for scope, operation in sorted(wanted):
-                print("    would grant %s on scope '%s'%s" % (operation, scope, _scope_note(scope, known_scopes)))
             continue
 
-        changes = []
-        if (current[role]["description"] or None) != (description or None):
-            changes.append("would change the description from %r to %r" % (current[role]["description"], description))
-        for scope, operation in sorted(wanted - current_permissions[role]):
-            changes.append("would grant %s on scope '%s'%s" % (operation, scope, _scope_note(scope, known_scopes)))
-            granted += 1
-        for scope, operation in sorted(current_permissions[role] - wanted):
-            changes.append("would revoke %s on scope '%s'" % (operation, scope))
-            revoked += 1
+        if current[role]["internal_role_flag"]:
+            skipped_internal += 1
+            print("  Role '%s' is flagged internal, so it would be left untouched." % role)
+            continue
 
-        if not changes:
+        if current[role]["description"] != description:
+            updated += 1
+            print("  Role '%s': description would change from %r to %r." % (role, current[role]["description"], description))
+        else:
             unchanged += 1
             print("  Role '%s' is already in line with the policy package." % role)
-            continue
 
-        updated += 1
-        print("  Role '%s':" % role)
-        for change in changes:
-            print("    %s" % change)
-
-    # the policy package holds the whole set of roles, so anything it does not define goes,
-    # including roles that were created by hand through the CLI
-    to_delete = sorted(set(current) - set(roles))
-
-    for role in to_delete:
-        deleted += 1
-        print("  Role '%s' is not defined by the policy package, so it would be deleted." % role)
-        for scope, operation in sorted(current_permissions[role]):
-            revoked += 1
-            print("    would also remove its %s permission on scope '%s'" % (operation, scope))
-        for held_by in sorted(accounts_by_role.get(role, [])):
-            unassigned += 1
-            print("    would also remove its assignment to account '%s'" % held_by)
+    # a role which is not internal and which the policy package does not define goes, including
+    # one that was created by hand through the CLI; a role flagged internal is out of the policy
+    # package's reach entirely, so it is left untouched even if the policy package does not define it
+    for role in sorted(set(current) - set(roles)):
+        if current[role]["internal_role_flag"]:
+            skipped_internal += 1
+            print("  Role '%s' is not defined by the policy package but is flagged internal, so it would be left untouched." % role)
+        else:
+            deleted += 1
+            print("  Role '%s' is not defined by the policy package, so it would be deleted." % role)
 
     print()
-    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged; would grant %d and revoke %d permission(s) and remove %d account assignment(s)."
-          % (created, updated, deleted, unchanged, granted, revoked, unassigned))
+    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d internal role(s) untouched."
+          % (created, updated, deleted, unchanged, skipped_internal))
 
 
 def _delete_role_with_references(role: str, *, session: "Session") -> tuple[int, int]:
@@ -803,15 +650,15 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     """
     Synchronize the internal roles with the roles defined by the policy package.
 
-    The policy package is the source of truth for the roles themselves: every role it defines is
-    created or brought in line with it, and a role it does not define is deleted, together with
-    the permissions and the account assignments of that role. The `locked` flag does not apply
-    here, it only keeps an identity provider from altering who holds a role, see
-    :func:`sync_account_roles_from_idp`.
-
-    A permission on a scope which does not exist is skipped rather than being an error, since
-    `role_permission_map.scope` references `scopes.scope`; it is applied by the next run once
-    the scope has been created.
+    The policy package is the source of truth for the description of the roles it defines, not
+    for their permissions or their account assignments, which are managed from within Rucio. A
+    role the policy package defines is created, as an external role (`assignment_disabled` and
+    `internal_role_flag` both False), if it does not exist yet, or has its description brought
+    in line with the policy package if it exists and is not flagged internal. A role flagged
+    internal (`internal_role_flag` True) is never touched here, whether or not the policy
+    package defines it: such a role is managed entirely from within Rucio, see
+    :func:`sync_account_roles_from_idp`. A role which is not internal and which the policy
+    package does not define is deleted, together with its permissions and account assignments.
 
     The whole synchronisation is a single transaction, so either all of it is applied or none of
     it is. See :func:`sync_roles_from_policy_package_dry_run` to report the changes instead of
@@ -825,81 +672,47 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     # Step 1: Retrieve Roles from the policy package
     roles = permission.get_roles(vo=vo)
 
-    desired_role_permissions: dict[str, set[tuple[str, str]]] = {}
-    for role, definition in sorted(roles.items()):
-        # a scope pattern is expanded to the scopes it matches right now
-        desired_role_permissions[role], _, warnings = _policy_package_role_permissions(role, definition, vo, session=session)
-        for warning in warnings:
-            print("  Warning: %s" % warning)
-
-    # Step 2: Retreive all roles and their associated permissions (Roles, RolePermissionAssociation)
-    # A role the policy package defines is brought in line with it and a role it does not define
-    # is deleted, whether or not the role is locked: a lock only protects the assignments of a
-    # role against an identity provider, never the role itself.
+    # Step 2: Retrieve all roles currently known to Rucio
     current = {entry["role"]: entry for entry in list_roles(session=session)}
-    current_permissions = {
-        role: {(entry["scope"], entry["operation"]) for entry in list_role_permissions(role=role, session=session)}
-        for role in current
-    }
-    # `role_permission_map.scope` references `scopes.scope`, so a permission can only be stored
-    # on a scope which exists
-    known_scopes = set(_matching_scopes(SCOPE_WILDCARD, vo, session=session))
 
-    created, updated, unchanged, deleted = 0, 0, 0, 0
-    granted, revoked, unassigned, skipped = 0, 0, 0, 0
+    created, updated, unchanged, skipped_internal, deleted = 0, 0, 0, 0, 0
+    revoked, unassigned = 0, 0
 
     try:
-        # Step 3: Create the roles of the policy package and bring the existing ones in line with it
+        # Step 3: Create the roles of the policy package and bring the existing, non-internal
+        # ones in line with it. A role flagged internal is left untouched.
         for role in sorted(roles):
-            wanted = desired_role_permissions[role]
             description = _normalize_description(roles[role].get("description"))
-            changed = role not in current
 
-            if changed:
-                session.add(models.Roles(role=role, description=description))
-                # `role_permission_map.role` references `roles.role`, so the row has to be in
-                # the database before the permissions of the role are inserted below
-                session.flush()
+            if role not in current:
+                session.add(models.Roles(role=role, description=description, assignment_disabled=False, internal_role_flag=False))
                 created += 1
                 print("  Role '%s' created with description %r." % (role, description))
-            elif (current[role]["description"] or None) != description:
+                continue
+
+            if current[role]["internal_role_flag"]:
+                skipped_internal += 1
+                print("  Role '%s' is flagged internal, so it is left untouched." % role)
+                continue
+
+            if current[role]["description"] != description:
                 session.execute(update(models.Roles).where(models.Roles.role == role).values(description=description))
+                updated += 1
                 print("  Role '%s': description changed from %r to %r." % (role, current[role]["description"], description))
-                changed = True
-
-            for scope, operation in sorted(wanted - current_permissions.get(role, set())):
-                if scope not in known_scopes:
-                    skipped += 1
-                    print("  Role '%s': scope '%s' does not exist in Rucio, so %s is not granted." % (role, scope, operation))
-                    continue
-                session.add(models.RolePermissionAssociation(role=role, scope=InternalScope(scope, vo=vo), operation=DatabaseOperationType(operation)))
-                granted += 1
-                changed = True
-                print("  Role '%s': granted %s on scope '%s'." % (role, operation, scope))
-
-            for scope, operation in sorted(current_permissions.get(role, set()) - wanted):
-                session.execute(
-                    delete(models.RolePermissionAssociation).where(
-                        models.RolePermissionAssociation.role == role,
-                        models.RolePermissionAssociation.scope == InternalScope(scope, vo=vo),
-                        models.RolePermissionAssociation.operation == DatabaseOperationType(operation),
-                    )
-                )
-                revoked += 1
-                changed = True
-                print("  Role '%s': revoked %s on scope '%s'." % (role, operation, scope))
-
-            if role in current:
-                if changed:
-                    updated += 1
-                else:
-                    unchanged += 1
+            else:
+                unchanged += 1
 
         # Step 4: Delete the roles the policy package does not define any more, including the
-        # ones that were created by hand through the CLI. Neither foreign key to `roles` can be
-        # relied on to cascade, so each role takes its permissions and its account assignments
-        # along explicitly.
+        # ones that were created by hand through the CLI, unless they are flagged internal, which
+        # takes them entirely out of the policy package's reach. Neither foreign key to `roles`
+        # can be relied on to cascade, so each deleted role takes its permissions and its account
+        # assignments along explicitly.
         for role in sorted(set(current) - set(roles)):
+            if current[role]["internal_role_flag"]:
+                skipped_internal += 1
+                print("  Role '%s' is not defined by the policy package but is flagged internal, so it is left untouched." % role)
+                continue
+
             role_revoked, role_unassigned = _delete_role_with_references(role, session=session)
             deleted += 1
             revoked += role_revoked
@@ -914,17 +727,17 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
         raise
 
     print()
-    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged; granted %d and revoked %d permission(s), removed %d account assignment(s), skipped %d permission(s) on a scope which does not exist."
-          % (created, updated, deleted, unchanged, granted, revoked, unassigned, skipped))
+    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged, left %d internal role(s) untouched; removed %d permission(s) and %d account assignment(s) with the deleted roles."
+          % (created, updated, deleted, unchanged, skipped_internal, revoked, unassigned))
 
 
 def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], roles: Any, vo: str = DEFAULT_VO, *, session: "Session") -> None:
     """
     Synchronize an account's role assignments with roles supplied by an IdP.
 
-    A locked role is off limits to the identity provider: it is neither assigned to nor
-    removed from an account here, and its expiry date is left as it is. Only Rucio itself
-    can alter who holds such a role.
+    A role with assignment_disabled set is off limits to the identity provider: it is neither
+    assigned to nor removed from an account here, and its expiry date is left as it is. Only
+    Rucio itself can alter who holds such a role.
 
     This is a dry run: it reports what the synchronisation would do and leaves the database
     untouched.
@@ -950,9 +763,9 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
     print()
     print("Roles supplied by the IdP")
     _print_table(
-        ["ROLE", "EXPIRES AT", "KNOWN TO RUCIO", "LOCKED"],
+        ["ROLE", "EXPIRES AT", "KNOWN TO RUCIO", "ASSIGNMENT DISABLED"],
         [
-            [role, _format_expires_at(expires_at), "yes" if role in known_roles else "no", "yes" if _is_locked(role, known_roles) else "no"]
+            [role, _format_expires_at(expires_at), "yes" if role in known_roles else "no", "yes" if _assignment_disabled(role, known_roles) else "no"]
             for role, expires_at in sorted(desired.items())
         ],
     )
@@ -963,23 +776,23 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
     print()
     print("Step 1: Retrieve the roles assigned to the account")
     _print_table(
-        ["ROLE", "EXPIRES AT", "LOCKED"],
-        [[role, _format_expires_at(expires_at), "yes" if _is_locked(role, known_roles) else "no"] for role, expires_at in sorted(current.items())],
+        ["ROLE", "EXPIRES AT", "ASSIGNMENT DISABLED"],
+        [[role, _format_expires_at(expires_at), "yes" if _assignment_disabled(role, known_roles) else "no"] for role, expires_at in sorted(current.items())],
     )
 
     # Step 2: Cleaning:
-    # A locked role is skipped at every step below, since an identity provider must not alter
-    # who holds it.
+    # A role with assignment_disabled set is skipped at every step below, since an identity
+    # provider must not alter who holds it.
     now = datetime.utcnow()
     print()
     print("Step 2: Cleaning, as of %s" % now)
-    # a role is only reported the first time it is held back, so that the same lock is not
+    # a role is only reported the first time it is held back, so that the same role is not
     # mentioned once per step
     held_back: set[str] = set()
 
     def _hold_back(role: str, message: str) -> bool:
-        """Report that a locked role keeps a change from being applied, once per role."""
-        if not _is_locked(role, known_roles):
+        """Report that assignment_disabled keeps a change from being applied, once per role."""
+        if not _assignment_disabled(role, known_roles):
             return False
         if role not in held_back:
             held_back.add(role)
@@ -991,7 +804,7 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
     for role, expires_at in sorted(current.items()):
         if expires_at is None or expires_at >= now:
             continue
-        if _hold_back(role, "  2.1 Role '%s' expired at %s but is locked, so the assignment would be left untouched." % (role, expires_at)):
+        if _hold_back(role, "  2.1 Role '%s' expired at %s but has assignment_disabled set, so the assignment would be left untouched." % (role, expires_at)):
             continue
         expired[role] = expires_at
         print("  2.1 Role '%s' expired at %s, so the assignment would be removed." % (role, expires_at))
@@ -1002,7 +815,7 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
     # 2.2 Remove roles from the account that are not in the list of roles from the IDP (AccountRoleAssociation)
     to_remove = []
     for role in sorted(set(remaining) - set(desired)):
-        if _hold_back(role, "  2.2 Role '%s' is not supplied by the IdP but is locked, so the assignment would be kept." % role):
+        if _hold_back(role, "  2.2 Role '%s' is not supplied by the IdP but has assignment_disabled set, so the assignment would be kept." % role):
             continue
         to_remove.append(role)
         print("  2.2 Role '%s' is not supplied by the IdP, so the assignment would be removed." % role)
@@ -1014,7 +827,7 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
             unknown.append(role)
             print("  2.3 Role '%s' is supplied by the IdP but does not exist in Rucio, so it cannot be assigned." % role)
             continue
-        if _hold_back(role, "  2.3 Role '%s' is locked, so the IdP cannot have it assigned to the account." % role):
+        if _hold_back(role, "  2.3 Role '%s' has assignment_disabled set, so the IdP cannot have it assigned to the account." % role):
             continue
         to_add.append(role)
         print("  2.3 Role '%s' would be assigned, expiring %s." % (role, _format_expires_at(desired[role])))
@@ -1025,7 +838,7 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
         if desired[role] == remaining[role]:
             unchanged += 1
             continue
-        if _hold_back(role, "  2.4 Role '%s' is locked, so its expiry date of %s would be kept instead of %s."
+        if _hold_back(role, "  2.4 Role '%s' has assignment_disabled set, so its expiry date of %s would be kept instead of %s."
                             % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role]))):
             continue
         to_update.append(role)
@@ -1033,5 +846,5 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
               % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role])))
 
     print()
-    print("Summary: would remove %d assignment(s) (%d expired, %d no longer supplied), add %d, change the expiry date of %d, leave %d unchanged; %d locked role(s) held back; %d role(s) supplied by the IdP are unknown to Rucio."
+    print("Summary: would remove %d assignment(s) (%d expired, %d no longer supplied), add %d, change the expiry date of %d, leave %d unchanged; %d role(s) held back by assignment_disabled; %d role(s) supplied by the IdP are unknown to Rucio."
           % (len(expired) + len(to_remove), len(expired), len(to_remove), len(to_add), len(to_update), unchanged, len(held_back), len(unknown)))
