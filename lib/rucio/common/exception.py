@@ -1343,3 +1343,13 @@ class RolePermissionNotFound(RucioException):
         super(RolePermissionNotFound, self).__init__(*args)
         self._message = "The role does not have the specified permission on this scope."
         self.error_code = 127
+
+
+class RoleAssignmentDisabled(RucioException):
+    """
+    RoleAssignmentDisabled
+    """
+    def __init__(self, *args):
+        super(RoleAssignmentDisabled, self).__init__(*args)
+        self._message = "The role has assignment_disabled set, so it cannot be assigned to, or removed from, an account without forcing it."
+        self.error_code = 128
