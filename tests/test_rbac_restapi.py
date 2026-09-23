@@ -653,6 +653,17 @@ class TestROLE:
             assert ('atlas', 'write') in granted
         assert _get(_role_path('data-scientist', 'permissions'), 'bob').status_code == FORBIDDEN
 
+    def test_list_role_accounts(self):
+        """RBAC(ADMIN): GET /roles/<role>/accounts is only visible to root/admin and lists each account holding the role with its expiry date"""
+        response = _get(_role_path('data-scientist', 'accounts'), 'root')
+        assert response.status_code == OK
+        assignments = response.json()
+        assert 'alice' in [assignment['account'] for assignment in assignments]
+        assert all({'account', 'expires_at'} <= set(assignment) for assignment in assignments)
+        assert _get(_role_path('does-not-exist', 'accounts'), 'root').status_code == NOT_FOUND
+        for account in ('alice', 'bob'):
+            assert _get(_role_path('data-scientist', 'accounts'), account).status_code == FORBIDDEN
+
     def test_list_account_roles(self):
         """RBAC(ADMIN/USER): GET /accounts/<account>/roles is visible to root/admin and to accounts if they are querying their own roles"""
         for account in ('root', 'alice'):
@@ -722,6 +733,29 @@ class TestROLE:
             # the permission has to go first: a role that still has permissions cannot be deleted
             _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_force_delete_role_in_use(self):
+        """RBAC(ADMIN): a forced deletion removes a role still assigned to accounts and carrying permissions, along with those references"""
+        role_name = 'tmp_force_delete'
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == CREATED
+            assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
+            assert _delete(_role_path(role_name), 'root', json={'force': True}).status_code == OK
+
+            assert _get(_role_path(role_name, 'accounts'), 'root').status_code == NOT_FOUND
+            roles = _get(_account_roles_path('alice'), 'root').json()['roles']
+            assert role_name not in [role['role'] for role in roles]
+        finally:
+            # only needed if the forced deletion failed, in which case the role is still in use
+            _delete(_account_roles_path('alice', role_name), 'root')
+            _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root')
+            _delete(_role_path(role_name), 'root')
+
+    def test_non_admin_cannot_force_delete_role(self):
+        """RBAC(USER): a forced role deletion is restricted to root/admin like any other role deletion"""
+        for account in ('alice', 'bob'):
+            assert _delete(_role_path('data-scientist'), account, json={'force': True}).status_code == FORBIDDEN
 
     def test_lock_and_unlock_role(self):
         """RBAC(ADMIN): a role is unlocked on creation, locking and unlocking toggles the flag, repeating it succeeds with a warning"""
@@ -797,6 +831,32 @@ class TestROLE:
         finally:
             # the assignment has to go first: a role still assigned to an account cannot be deleted
             _delete(_account_roles_path('alice', role_name), 'root')
+            assert _delete(_role_path(role_name), 'root').status_code == OK
+
+    def test_expired_account_role_grants_no_scope_access(self):
+        """RBAC(USER): a role only grants its permissions while its assignment has not expired"""
+        role_name = 'tmp_expired_access'
+        path = '/dids/alice/dids/search'
+        params = {'name': '*'}
+
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'read', 'alice'), 'root').status_code == CREATED
+            assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
+            # an assignment without an expiry date grants access
+            assert _get(path, 'bob', params=params).status_code == OK
+
+            # once the expiry date is in the past, the role no longer grants anything
+            assert _request('PUT', _account_roles_path('bob', role_name), 'root', json={'expires_at': 'Mon, 01 Jan 2024 00:00:00 UTC'}).status_code == OK
+            assert _get(path, 'bob', params=params).status_code == FORBIDDEN
+
+            # an expiry date in the future grants access again
+            assert _request('PUT', _account_roles_path('bob', role_name), 'root', json={'expires_at': 'Fri, 01 Jan 2100 00:00:00 UTC'}).status_code == OK
+            assert _get(path, 'bob', params=params).status_code == OK
+        finally:
+            # the assignment and the permission have to go first: a role still in use cannot be deleted
+            _delete(_account_roles_path('bob', role_name), 'root')
+            _delete(_role_path(role_name, 'permissions', 'read', 'alice'), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_invalid_account_role_expires_at_is_rejected(self):
