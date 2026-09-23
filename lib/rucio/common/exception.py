@@ -1321,7 +1321,7 @@ class RoleInUse(RucioException):
     """
     def __init__(self, *args):
         super(RoleInUse, self).__init__(*args)
-        self._message = "Role is still assigned to one or more accounts or has permissions defined and cannot be deleted."
+        self._message = "Role is still assigned to one or more accounts and cannot be deleted."
         self.error_code = 125
 
 
