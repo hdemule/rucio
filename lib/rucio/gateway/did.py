@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 
 def list_dids(
+    issuer: str,
     scope: str,
     filters: 'Iterable[dict[Any, Any]]',
     did_type: str = 'collection',
@@ -65,6 +66,10 @@ def list_dids(
             or_group['scope'] = InternalScope(or_group['scope'], vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_dids', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not list data identifiers in scope %s. %s' % (issuer, scope, auth_result.message))
+
         result = did.list_dids(scope=internal_scope, filters=filters, did_type=did_type, ignore_case=ignore_case,
                                limit=limit, offset=offset, long=long, recursive=recursive, session=session)
 
