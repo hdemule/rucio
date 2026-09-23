@@ -24,14 +24,27 @@ def role():
 
 
 @role.command("list")
+@click.option("--detail", is_flag=True, help="Show the permissions assigned to each role. Use `role permission list --detail` to also expand their scope patterns.")
 @click.pass_context
-def list_(ctx: click.Context) -> None:
-    """List all roles with their assignment_disabled/internal_role_flag state and description."""
+def list_(ctx: click.Context, detail: bool) -> None:
+    """List all roles."""
     roles = ctx.obj.client.list_roles()
-    rows = [
-        [role_entry['role'], role_entry.get('assignment_disabled'), role_entry.get('internal_role_flag'), role_entry.get('description') or '']
-        for role_entry in roles
-    ]
+    rows = []
+    for role_entry in roles:
+        rows.append([role_entry['role'], role_entry.get('assignment_disabled'), role_entry.get('internal_role_flag'), role_entry.get('description') or ''])
+        if not detail:
+            continue
+
+        ops_by_scope_pattern: dict[str, set[str]] = {}
+        for permission in ctx.obj.client.list_role_permissions(role_entry['role']):
+            ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
+        if not ops_by_scope_pattern:
+            rows.append(["    (no permission assigned)", "", "", ""])
+            continue
+        for index, (scope_pattern, ops) in enumerate(sorted(ops_by_scope_pattern.items())):
+            branch = "`-- " if index == len(ops_by_scope_pattern) - 1 else "|-- "
+            rows.append([f"    {branch}{format_operations(ops)}  {scope_pattern}", "", "", ""])
+
     headers = ["ROLE", "ASSIGNMENT DISABLED", "INTERNAL ROLE FLAG", "DESCRIPTION"]
     click.echo(tabulate(wrap_table_column(rows, headers, column=3), headers=headers, tablefmt=ctx.obj.tablefmt))
 
