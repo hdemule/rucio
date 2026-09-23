@@ -61,6 +61,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'delete_role': perm_delete_role,
         'update_role': perm_update_role,
         'list_account_roles': perm_list_account_roles,
+        'list_role_accounts': perm_list_role_accounts,
         'add_account_role': perm_add_account_role,
         'delete_account_role': perm_delete_account_role,
         'set_account_role_expires_at': perm_set_account_role_expires_at,
@@ -389,6 +390,17 @@ def perm_update_role(issuer: "InternalAccount", kwargs: dict[str, Any], session:
 def perm_delete_role(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can delete a role.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_list_role_accounts(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list all accounts a role is assigned to.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
