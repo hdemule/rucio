@@ -70,6 +70,28 @@ def delete(ctx: click.Context, role_name: str) -> None:
     click.echo(f"Role '{role_name}' deleted.")
 
 
+
+@role.group()
+def account() -> None:
+    """Show the accounts a role is assigned to."""
+
+
+@account.command("list")
+@click.argument("role_name")
+@click.option("--active", is_flag=True, help="Hide the accounts whose assignment has already expired.")
+@click.pass_context
+def account_list(ctx: click.Context, role_name: str, active: bool) -> None:
+    """List the accounts ROLE_NAME is assigned to, with the expiry date of each assignment."""
+    assignments = ctx.obj.client.list_role_accounts(role_name)
+    if active:
+        # expiry dates are stored as naive UTC datetimes
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        assignments = [assignment for assignment in assignments if not assignment.get('expires_at') or str_to_date(assignment['expires_at']) > now]
+
+    rows = [[assignment['account'], assignment.get('expires_at') or '-'] for assignment in assignments]
+    click.echo(tabulate(rows, headers=["ACCOUNT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
+
+
 @role.group()
 def permission() -> None:
     """Manage permissions assigned to a role."""
