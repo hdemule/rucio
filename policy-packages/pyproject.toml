@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rbac-rucio-policy-package"
+version = "0.1.0"
+description = "RBAC Rucio policy package"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["rbac_rucio_policy_package*"]
