@@ -72,13 +72,21 @@ def update_role(
         return core_role.update_role(role=role, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag, session=session)
 
 
-def delete_role(role: str, issuer: str, vo: str = DEFAULT_VO) -> None:
+def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
+    """
+    Delete a role.
+
+    :param role: The role to delete.
+    :param issuer: The account issuing the command.
+    :param force: Also remove the role from every account it is assigned to and drop its permissions.
+    :param vo: The VO of the issuing account.
+    """
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role', kwargs={}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to delete role.' % issuer)
 
-        core_role.delete_role(role=role, session=session)
+        core_role.delete_role(role=role, force=force, session=session)
 
 
 def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str = DEFAULT_VO) -> dict[str, Union[list[dict[str, Any]], list[dict[str, str]]]]:
