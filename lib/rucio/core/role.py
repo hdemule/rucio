@@ -414,6 +414,9 @@ def has_role_scope_access(
     matches the given scope against the patterns of the account's roles in Python, see
     :func:`_scope_pattern_matches`.
 
+    Role assignments whose `expires_at` is in the past are ignored, so at least one
+    matching permission must come from a role assignment that has not expired yet.
+
     This only check the RBAC tables and does not consider ownership or admin/root privileges.
     For checking ownership or admin/root privileges, use the :func:`has_scope_access` function instead.
     """
@@ -427,6 +430,11 @@ def has_role_scope_access(
         .where(
             models.AccountRoleAssociation.account == account,
             models.RolePermissionAssociation.operation == operation,
+            or_(
+                models.AccountRoleAssociation.expires_at.is_(None),
+                # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
+                models.AccountRoleAssociation.expires_at > datetime.now(timezone.utc).replace(tzinfo=None),
+            ),
         )
     )
 
