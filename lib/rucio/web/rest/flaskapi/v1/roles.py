@@ -1,8 +1,9 @@
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from rucio.common.constants import HTTPMethod
 from rucio.common.exception import AccessDenied, Duplicate, InputValidationError, RoleInUse, RoleNotFound, RolePermissionNotFound
-from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_permissions, list_roles, update_role
+from rucio.common.utils import render_json
+from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_accounts, list_role_permissions, list_roles, update_role
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
 from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, generate_http_error_flask, json_parameters, param_get, response_headers
 
@@ -112,6 +113,19 @@ class RolePermissions(ErrorHandlingMethodView):
         return jsonify({"message": f"Permission '{operation}' on scope pattern '{scope_pattern}' successfully removed from role '{role_name}'."}), 200
 
 
+class RoleAccounts(ErrorHandlingMethodView):
+    def get(self, role_name: str):
+        try:
+            accounts = list_role_accounts(role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RoleNotFound as error:
+            return generate_http_error_flask(404, error)
+        # rendered through the API encoder, so that the expiry date of an assignment is
+        # reported in Rucio's date format
+        return Response(render_json(accounts), content_type='application/json'), 200
+
+
 def blueprint() -> AuthenticatedBlueprint:
     bp = AuthenticatedBlueprint("roles", __name__, url_prefix="/roles")
     role_list_view = RoleList.as_view("role_list")
@@ -120,6 +134,8 @@ def blueprint() -> AuthenticatedBlueprint:
     role_permissions_view = RolePermissions.as_view("role_permissions")
     bp.add_url_rule("/<role_name>/permissions", view_func=role_permissions_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule("/<role_name>/permissions/<operation>/<scope_pattern>", view_func=role_permissions_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
+    role_accounts_view = RoleAccounts.as_view("role_accounts")
+    bp.add_url_rule("/<role_name>/accounts", view_func=role_accounts_view, methods=[HTTPMethod.GET.value])
     bp.after_request(response_headers)
     return bp
 
