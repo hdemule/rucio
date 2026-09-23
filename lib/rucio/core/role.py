@@ -13,10 +13,10 @@
 # limitations under the License.
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.constants import DEFAULT_VO
@@ -165,21 +165,33 @@ def update_role(
     }
 
 
-def delete_role(role: str, session: "Session") -> None:
+def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
     """
     Delete an existing role from the system.
+
+    :param role: The role to delete.
+    :param force: Also remove the role from every account it is assigned to and drop its permissions,
+                  instead of refusing to delete a role which is still in use.
+    :param session: The database session.
+    :raises RoleNotFound: If the role does not exist.
+    :raises RoleInUse: If the role is still in use and `force` is not set.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
 
+    if force:
+        _remove_accounts_from_role(role, session=session)
+        session.commit()
+        return
+
     session.delete(role_obj)
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
-        raise RoleInUse("Role '%s' is still assigned to accounts or has permissions defined and cannot be deleted." % role)
+        raise RoleInUse("Role '%s' is still assigned to accounts and cannot be deleted. use --force to automatically remove role '%s' from all its associated accounts." % (role, role))
 
 
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
@@ -654,23 +666,22 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
           % (created, updated, deleted, unchanged, skipped_internal))
 
 
-def _delete_role_with_references(role: str, *, session: "Session") -> tuple[int, int]:
+def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
     """
     Delete a role together with the rows referencing it.
 
     `account_role_map.role` and `role_permission_map.role` reference `roles.role`, so the
     database refuses to delete a role which is still assigned to an account or still carries
     permissions. Those rows are therefore removed first, which keeps the deletion working
-    whatever referential action the foreign keys are declared with, see :func:`_role_delete_rules`.
+    whatever referential action the foreign keys are declared with.
 
     :param role: The role to delete.
     :param session: The database session.
     :returns: The number of permissions and of account assignments removed along with the role.
     """
-    revoked = session.execute(delete(models.RolePermissionAssociation).where(models.RolePermissionAssociation.role == role)).rowcount
     unassigned = session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role == role)).rowcount
     session.execute(delete(models.Roles).where(models.Roles.role == role))
-    return revoked, unassigned
+    return unassigned
 
 
 def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") -> None:
@@ -740,12 +751,11 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
                 print("  Role '%s' is not defined by the policy package but is flagged internal, so it is left untouched." % role)
                 continue
 
-            role_revoked, role_unassigned = _delete_role_with_references(role, session=session)
+            role_unassigned = _remove_accounts_from_role(role, session=session)
             deleted += 1
-            revoked += role_revoked
             unassigned += role_unassigned
-            print("  Role '%s' is not defined by the policy package, so it was deleted with its %d permission(s) and %d account assignment(s)."
-                  % (role, role_revoked, role_unassigned))
+            print("  Role '%s' is not defined by the policy package, so it was deleted with its %d account assignment(s)."
+                  % (role, role_unassigned))
 
         session.commit()
     except Exception:
@@ -810,7 +820,7 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
     # Step 2: Cleaning:
     # A role with assignment_disabled set is skipped at every step below, since an identity
     # provider must not alter who holds it.
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     print()
     print("Step 2: Cleaning, as of %s" % now)
     # a role is only reported the first time it is held back, so that the same role is not
