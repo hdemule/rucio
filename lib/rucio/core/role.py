@@ -197,6 +197,25 @@ def list_account_roles(account: "InternalAccount", session: "Session") -> list[d
     return [{"role": role, "expires_at": expires_at, "description": description} for role, expires_at, description in session.execute(stmt).all()]
 
 
+def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
+    """
+    List the accounts a role is assigned to, together with the expiry date of each assignment.
+
+    An `expires_at` of None means that the assignment does not expire.
+
+    :raises RoleNotFound: If the role does not exist.
+    """
+    if session.execute(select(models.Roles.role).where(models.Roles.role == role)).scalar_one_or_none() is None:
+        raise RoleNotFound("Role '%s' does not exist." % role)
+
+    stmt = (
+        select(models.AccountRoleAssociation.account, models.AccountRoleAssociation.expires_at)
+        .where(models.AccountRoleAssociation.role == role)
+        .order_by(models.AccountRoleAssociation.account)
+    )
+    return [{"account": account, "expires_at": expires_at} for account, expires_at in session.execute(stmt).all()]
+
+
 def _role_assignment_disabled(role: str, session: "Session") -> bool:
     """Tell whether a role has `assignment_disabled` set. False (also) for a role which does not exist."""
     stmt = select(models.Roles.assignment_disabled).where(models.Roles.role == role)
