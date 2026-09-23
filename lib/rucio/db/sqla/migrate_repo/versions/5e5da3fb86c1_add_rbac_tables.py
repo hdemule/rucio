@@ -69,7 +69,7 @@ def upgrade():
                      sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
                      sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
         create_primary_key('ROLE_PERMISSION_MAP_PK', 'role_permission_map', ['role', 'scope_pattern', 'operation'])
-        create_foreign_key('ROLE_PERMISSION_MAP_ROLE_FK', 'role_permission_map', 'roles', ['role'], ['role'], onupdate='CASCADE', ondelete='RESTRICT')
+        create_foreign_key('ROLE_PERMISSION_MAP_ROLE_FK', 'role_permission_map', 'roles', ['role'], ['role'], onupdate='CASCADE', ondelete='CASCADE')
         create_check_constraint('ROLE_PERMISSION_MAP_ROLE_NN', 'role_permission_map', 'role is not null')
         create_check_constraint('ROLE_PERMISSION_MAP_SCOPE_PATTERN_NN', 'role_permission_map', 'scope_pattern is not null')
         create_check_constraint('ROLE_PERMISSION_MAP_OPERATION_NN', 'role_permission_map', 'operation is not null')
