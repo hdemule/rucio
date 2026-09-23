@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 
 import click
@@ -5,6 +6,7 @@ from tabulate import tabulate
 
 from rucio.cli.utils import DatabaseOperationType, format_operations, wrap_table_column
 from rucio.common.exception import Duplicate, RolePermissionNotFound
+from rucio.common.utils import str_to_date
 
 # Shorthands accepted on the command line, mapped to the operation(s) they expand to.
 OPERATION_SHORTHANDS: dict[str, list[DatabaseOperationType]] = {
