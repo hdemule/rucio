@@ -67,8 +67,11 @@ class RoleList(ErrorHandlingMethodView):
         return jsonify({"message": f"Role '{role_name}' successfully updated."}), 200
 
     def delete(self, role_name: str):
+        parameters = json_parameters(optional=True)
+        force = param_get(parameters, 'force', default=False)
+
         try:
-            delete_role(role_name, issuer=request.environ['issuer'], vo=request.environ['vo'])
+            delete_role(role_name, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
