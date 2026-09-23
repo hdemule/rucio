@@ -99,6 +99,27 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
         return result
 
 
+def list_role_accounts(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, Any]]:
+    """
+    List the accounts a role is assigned to.
+
+    :param role: The role to list the accounts of.
+    :param issuer: The account issuing the command.
+    :param vo: The VO of the issuing account.
+    :returns: One entry per account, with its external name and the `expires_at` of the assignment.
+    """
+    with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_role_accounts', kwargs={'role': role}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to list the accounts of role %s.' % (issuer, role))
+
+        return [
+            {**assignment, 'account': assignment['account'].external}
+            for assignment in core_role.list_role_accounts(role=role, session=session)
+            if assignment['account'].vo == vo
+        ]
+
+
 def add_account_role(account: str, role: str, issuer: str, expires_at: Optional[Union[str, "datetime"]] = None, force: bool = False, vo: str = DEFAULT_VO) -> None:
     """
     Assign a role to an account.
