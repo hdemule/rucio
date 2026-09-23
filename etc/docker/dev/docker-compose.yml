@@ -33,7 +33,6 @@ services:
     environment:
       - REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
       - RUCIO_SOURCE_DIR=/rucio_source
-      - PYTHONPATH=/opt/rucio/policy-packages${PYTHONPATH:+:${PYTHONPATH}}
       - RDBMS
 
   rucio:
@@ -68,7 +67,6 @@ services:
     environment:
       - REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
       - RUCIO_SOURCE_DIR=/rucio_source
-      - PYTHONPATH=/opt/rucio/policy-packages${PYTHONPATH:+:${PYTHONPATH}}
       - RDBMS
       - DEV_PROFILES
     depends_on:
