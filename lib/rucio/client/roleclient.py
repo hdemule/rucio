@@ -125,6 +125,27 @@ class RoleClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
         raise exc_cls(exc_msg)
 
+    def list_role_accounts(self, role: str) -> list[dict[str, Any]]:
+        """
+        List the accounts a role is assigned to.
+
+        Parameters
+        ----------
+        role :
+            The role to list the accounts of.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One entry per account, with its `account` name and the `expires_at` of the assignment (None if it does not expire).
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/accounts")
+        response = self._send_request(url, method=HTTPMethod.GET)
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
     def add_role_permission(self, role: str, operation: str, scope_pattern: str) -> None:
         """
         Grant a role a permission on a scope pattern.
