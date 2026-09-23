@@ -436,7 +436,7 @@ class RolePermissionAssociation(BASE, ModelBase):
                                                                   create_constraint=True,
                                                                   values_callable=lambda obj: [e.value for e in obj]))
     _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_PERMISSION_MAP_PK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='RESTRICT'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
                    CheckConstraint('SCOPE_PATTERN IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_PATTERN_NN'),
                    CheckConstraint('OPERATION IS NOT NULL', name='ROLE_PERMISSION_MAP_OPERATION_NN'))
