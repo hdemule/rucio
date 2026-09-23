@@ -66,11 +66,31 @@ def update(ctx: click.Context, role_name: str, description: Optional[str], assig
 @role.command("delete")
 @click.pass_context
 @click.argument("role_name")
-def delete(ctx: click.Context, role_name: str) -> None:
+@click.option("--force", is_flag=True, default=False, help="Also revoke the role from every account it is assigned to and remove its permissions. Asks for confirmation first.")
+def delete(ctx: click.Context, role_name: str, force: bool) -> None:
     """Delete an existing role."""
-    ctx.obj.client.delete_role(role_name)
+    if force and not _confirm_forced_delete(ctx, role_name):
+        click.echo("Aborted, the role was not deleted.")
+        return
+    ctx.obj.client.delete_role(role_name, force=force)
     click.echo(f"Role '{role_name}' deleted.")
 
+
+def _confirm_forced_delete(ctx: click.Context, role_name: str) -> bool:
+    """
+    Show the accounts a forced deletion of a role would revoke it from, and ask for confirmation.
+
+    :returns: True if the caller should proceed, False if the user declined.
+    """
+    accounts = [assignment['account'] for assignment in ctx.obj.client.list_role_accounts(role_name)]
+
+    click.echo(f"Deleting role '{role_name}' would revoke it from the following account(s):")
+    for account in accounts:
+        click.echo(f"  {account}")
+    if not accounts:
+        click.echo("  (none)")
+
+    return click.confirm("Do you confirm role deletion?")
 
 
 @role.group()

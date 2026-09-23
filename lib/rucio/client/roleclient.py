@@ -103,9 +103,21 @@ class RoleClient(BaseClient):
         )
         raise exc_cls(exc_msg)
 
-    def delete_role(self, role: str) -> None:
+    def delete_role(self, role: str, force: bool = False) -> None:
+        """
+        Delete a role.
+
+        Parameters
+        ----------
+        role :
+            The role to delete.
+        force :
+            Also remove the role from every account it is assigned to and drop its permissions,
+            instead of refusing to delete a role which is still in use.
+        """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
-        response = self._send_request(url, method=HTTPMethod.DELETE)
+        data = render_json(force=force) if force else None
+        response = self._send_request(url, method=HTTPMethod.DELETE, data=data)
 
         if response.status_code == codes.ok:
             return
