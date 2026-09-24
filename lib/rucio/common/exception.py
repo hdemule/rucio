@@ -1351,5 +1351,15 @@ class RoleAssignmentDisabled(RucioException):
     """
     def __init__(self, *args):
         super(RoleAssignmentDisabled, self).__init__(*args)
-        self._message = "The role has assignment_disabled set, so it cannot be assigned to, or removed from, an account without forcing it."
+        self._message = "The role is not assignable, so it cannot be assigned to, or removed from, an account."
         self.error_code = 128
+
+
+class RoleProtected(RucioException):
+    """
+    RoleProtected
+    """
+    def __init__(self, *args):
+        super(RoleProtected, self).__init__(*args)
+        self._message = "The role is protected, so it cannot be altered or deleted."
+        self.error_code = 129
