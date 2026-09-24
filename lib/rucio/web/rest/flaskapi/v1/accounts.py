@@ -18,8 +18,23 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 from flask import Flask, Response, jsonify, redirect, request
 
-from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, AccountNotFound, CounterNotFound, Duplicate, IdentityError, InputValidationError, InvalidAccountType, InvalidObject, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleNotFound, RSENotFound, RuleNotFound, ScopeNotFound
+from rucio.common.constants import ISSUER_ACCOUNT_ALIAS, HTTPMethod
+from rucio.common.exception import (
+    AccessDenied,
+    AccountNotFound,
+    CounterNotFound,
+    Duplicate,
+    IdentityError,
+    InputValidationError,
+    InvalidAccountType,
+    InvalidObject,
+    RoleAssignmentDisabled,
+    RoleAssignmentNotFound,
+    RoleNotFound,
+    RSENotFound,
+    RuleNotFound,
+    ScopeNotFound,
+)
 from rucio.common.utils import APIEncoder, render_json
 from rucio.gateway import role as role_gateway
 from rucio.gateway.account import add_account, add_account_attribute, del_account, del_account_attribute, get_account_info, get_usage_history, list_account_attributes, list_accounts, list_identities, update_account
@@ -282,8 +297,11 @@ class Scopes(ErrorHandlingMethodView):
 class Roles(ErrorHandlingMethodView):
     def get(self, account: str) -> 'ResponseReturnValue':
         detail = param_get_bool(request.args, 'detail', default=False)
+        issuer = request.environ['issuer']
+        if account == ISSUER_ACCOUNT_ALIAS:
+            account = issuer
         try:
-            roles = role_gateway.list_account_roles(account=account, issuer=request.environ['issuer'], detail=detail, vo=request.environ['vo'])
+            roles = role_gateway.list_account_roles(account=account, issuer=issuer, detail=detail, vo=request.environ['vo'])
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
         # rendered through the API encoder, so that the expiry date of an assignment is
