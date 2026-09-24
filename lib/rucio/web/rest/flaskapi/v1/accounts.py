@@ -342,6 +342,74 @@ class Roles(ErrorHandlingMethodView):
         return jsonify({"message": f"Role '{role}' successfully removed from account '{account}'."}), 200
 
 
+class RolesSync(ErrorHandlingMethodView):
+    def put(self, account: str) -> 'ResponseReturnValue':
+        """
+        ---
+        summary: Synchronise account roles
+        description: |
+          Synchronise the role assignments of an account with the roles supplied by an identity provider:
+          expired assignments and roles which are not supplied are removed, supplied roles are assigned
+          and their expiry dates updated. Roles which are not assignable are left untouched.
+          With `dry_run`, only report what would be done.
+        tags:
+          - Account
+        parameters:
+        - name: account
+          in: path
+          description: "The account identifier."
+          schema:
+            type: string
+          style: simple
+        requestBody:
+          content:
+            'application/json':
+              schema:
+                type: object
+                required:
+                - roles
+                properties:
+                  roles:
+                    description: "The roles supplied by the IdP: a list of role names and/or of {role, expires_at} objects, or an object mapping role name to expiry date."
+                    oneOf:
+                    - type: array
+                    - type: object
+                  dry_run:
+                    description: "Only report what the synchronisation would do."
+                    type: boolean
+                    default: false
+        responses:
+          200:
+            description: "The report of the synchronisation: what was (or would be) removed, added, updated, left unchanged, held back or ignored, the messages describing each step, and a summary."
+            content:
+              application/json:
+                schema:
+                  type: object
+          400:
+            description: "The roles are not in an accepted form."
+          401:
+            description: "Invalid Auth Token"
+          403:
+            description: "Not allowed to synchronise the roles of this account."
+          404:
+            description: "No account found."
+        """
+        parameters = json_parameters()
+        roles = param_get(parameters, 'roles')
+        dry_run = param_get_bool(parameters, 'dry_run', default=False)
+
+        try:
+            report = role_gateway.sync_account_roles(account=account, roles=roles, issuer=request.environ['issuer'], dry_run=dry_run, vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
+        except AccountNotFound as error:
+            return generate_http_error_flask(404, error)
+        # rendered through the API encoder, so that the dates are reported in Rucio's date format
+        return Response(render_json(**report), content_type='application/json')
+
+
 class AccountParameter(ErrorHandlingMethodView):
     """ create, update, get and disable rucio accounts. """
 
@@ -1310,6 +1378,8 @@ def blueprint(with_doc: bool = False) -> AuthenticatedBlueprint:
     roles_view = Roles.as_view('roles')
     bp.add_url_rule('/<account>/roles', view_func=roles_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/roles/<role>', view_func=roles_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
+    roles_sync_view = RolesSync.as_view('roles_sync')
+    bp.add_url_rule('/<account>/roles', view_func=roles_sync_view, methods=[HTTPMethod.PUT.value])
     local_account_limits_view = LocalAccountLimits.as_view('local_account_limit')
     bp.add_url_rule('/<account>/limits/local', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/limits', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
