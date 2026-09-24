@@ -19,7 +19,7 @@ from urllib.parse import quote_plus
 from requests.status_codes import codes
 
 from rucio.client.baseclient import BaseClient, choice
-from rucio.common.constants import HTTPMethod
+from rucio.common.constants import ISSUER_ACCOUNT_ALIAS, HTTPMethod
 from rucio.common.utils import build_url, render_json
 
 if TYPE_CHECKING:
@@ -138,7 +138,11 @@ class AccountClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=res.headers, status_code=res.status_code, data=res.content)
         raise exc_cls(exc_msg)
 
-    def list_account_roles(self, account: str, detail: bool = False) -> dict[str, Any]:
+    def list_account_roles(self, account: Optional[str] = None, use_issuer_account: bool = False, detail: bool = False) -> dict[str, Any]:
+        # the server replaces the alias with the issuer's account
+        account = ISSUER_ACCOUNT_ALIAS if use_issuer_account else account
+        if not account:
+            raise ValueError('Either an account or use_issuer_account must be given.')
         url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles']))
         response = self._send_request(url, method=HTTPMethod.GET, params={'detail': str(detail).lower()})
         if response.status_code == codes.ok:

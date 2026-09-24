@@ -357,13 +357,18 @@ def role() -> None:
 
 
 @role.command("list")
-@click.argument("account_name")
+@click.argument("account_name", required=False)
 @click.option("--detail", is_flag=True, help="Also list permissions granted by each role.")
+@click.option("--me", is_flag=True, help="List roles for the current account instead of ACCOUNT_NAME.")
 @click.pass_context
-def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
+def role_list(ctx: click.Context, account_name: str, detail: bool, me: bool) -> None:
     """List roles assigned to ACCOUNT_NAME."""
-    rbac = ctx.obj.client.list_account_roles(account_name, detail=detail)
-    click.echo(f"Roles for account {account_name}:")
+
+    if not account_name and not me:
+        raise click.UsageError("Either ACCOUNT_NAME or --me must be given.")
+
+    rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
+    click.echo(f"Roles for account {rbac['account']}:")
     if not detail:
         rows = [[r['role'], r.get('expires_at') or '-'] for r in rbac['roles']]
         headers = ["ROLE", "EXPIRES AT"]
