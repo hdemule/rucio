@@ -52,6 +52,7 @@ def update_role(
         description: Optional[str] = None,
         assignable: Optional[bool] = None,
         protected: Optional[bool] = None,
+        force: bool = False,
         vo: str = DEFAULT_VO) -> dict[str, Any]:
     """
     Update the metadata of an existing role, changing only the parameters explicitly given.
@@ -61,6 +62,7 @@ def update_role(
     :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
     :param assignable: The new assignable state, or None to leave it untouched.
     :param protected: The new protected state, or None to leave it untouched.
+    :param force: Change the description or the assignable state even if the role is protected.
     :param vo: The VO of the issuing account.
     :returns: The role as it is stored after the update.
     """
@@ -78,7 +80,7 @@ def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_V
 
     :param role: The role to delete.
     :param issuer: The account issuing the command.
-    :param force: Also remove the role from every account it is assigned to and drop its permissions.
+    :param force: Also remove the role from every account it is assigned to and drop its permissions, and delete it even if it is protected.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -199,6 +201,7 @@ def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: s
     :param operation: The operation to grant.
     :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted.
     :param issuer: The account issuing the command.
+    :param force: Grant the permission even if the role is protected.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -210,11 +213,12 @@ def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: s
             role=role,
             operation=DatabaseOperationType(operation),
             scope_pattern=scope_pattern,
+            force=force,
             session=session,
         )
 
 
-def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer: str, vo: str = DEFAULT_VO) -> None:
+def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
     """
     Remove a role's permission on a scope pattern.
 
@@ -222,6 +226,7 @@ def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer
     :param operation: The operation to remove.
     :param scope_pattern: The scope pattern to remove the permission from.
     :param issuer: The account issuing the command.
+    :param force: Remove the permission even if the role is protected.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -233,5 +238,6 @@ def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer
             role=role,
             operation=DatabaseOperationType(operation),
             scope_pattern=scope_pattern,
+            force=force,
             session=session,
         )
