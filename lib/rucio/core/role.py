@@ -20,7 +20,7 @@ from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.constants import DEFAULT_VO
-from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound
+from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, RoleProtected
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
@@ -132,9 +132,13 @@ def update_role(
         description: Optional[str] = None,
         assignable: Optional[bool] = None,
         protected: Optional[bool] = None,
+        force: bool = False,
         session: "Session") -> dict[str, Any]:
     """
     Update the metadata of an existing role, changing only the parameters explicitly given.
+
+    A protected role cannot have its description or its assignable state changed, unless `force`
+    is given. Changing `protected` itself is always allowed, so that a role can be unprotected.
 
     :param role: The role to update.
     :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
@@ -144,11 +148,15 @@ def update_role(
     :param session: The database session.
     :returns: The role as it is stored after the update.
     :raises RoleNotFound: If the role does not exist.
+    :raises RoleProtected: If the role is protected, `force` is not given and something besides `protected` is being changed.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
+
+    if description is not None or assignable is not None:
+        _ensure_unprotected(role, force, session)
 
     if description is not None:
         role_obj.description = _normalize_description(description)
@@ -170,17 +178,22 @@ def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
     """
     Delete an existing role from the system.
 
+    A protected role is only deleted if `force` is given.
+
     :param role: The role to delete.
     :param force: Also remove the role from every account it is assigned to and drop its permissions,
-                  instead of refusing to delete a role which is still in use.
+                  instead of refusing to delete a role which is still in use, and delete it even if it is protected.
     :param session: The database session.
     :raises RoleNotFound: If the role does not exist.
+    :raises RoleProtected: If the role is protected and `force` is not set.
     :raises RoleInUse: If the role is still in use and `force` is not set.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
+
+    _ensure_unprotected(role, force, session, action="deleted")
 
     if force:
         _remove_accounts_from_role(role, session=session)
@@ -192,7 +205,7 @@ def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
         session.commit()
     except IntegrityError:
         session.rollback()
-        raise RoleInUse("Role '%s' is still assigned to accounts and cannot be deleted. use --force to automatically remove role '%s' from all its associated accounts." % (role, role))
+        raise RoleInUse("Role '%s' is still assigned to accounts and cannot be deleted." % role)
 
 
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
@@ -229,10 +242,28 @@ def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
     return [{"account": account, "expires_at": expires_at} for account, expires_at in session.execute(stmt).all()]
 
 
-def _role_assignment_disabled(role: str, session: "Session") -> bool:
-    """Tell whether a role has `assignment_disabled` set. False (also) for a role which does not exist."""
-    stmt = select(models.Roles.assignment_disabled).where(models.Roles.role == role)
-    return bool(session.execute(stmt).scalar_one_or_none())
+def _ensure_unprotected(role: str, force: bool, session: "Session", action: str = "altered") -> None:
+    """
+    Refuse to touch a protected role, unless forced. Does nothing for a role which does not exist.
+
+    :param role: The role about to be touched.
+    :param force: Touch the role even if it is protected.
+    :param session: The database session.
+    :param action: What is about to be done to the role, for the error message.
+    :raises RoleProtected: If the role is protected and `force` is not given.
+    """
+    if force:
+        return
+
+    stmt = select(models.Roles.protected).where(models.Roles.role == role)
+    if session.execute(stmt).scalar_one_or_none():
+        raise RoleProtected("Role '%s' is protected, so it cannot be %s." % (role, action))
+
+
+def _role_not_assignable(role: str, session: "Session") -> bool:
+    """Tell whether a role is not assignable. False (also) for a role which does not exist."""
+    stmt = select(models.Roles.assignable).where(models.Roles.role == role)
+    return session.execute(stmt).scalar_one_or_none() is False
 
 
 def add_account_role(account: "InternalAccount", role: str, expires_at: Optional[Union[str, datetime]] = None, force: bool = False, *, session: "Session") -> None:
@@ -370,19 +401,22 @@ def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]
     return [{"operation": permission.operation.value, "scope_pattern": permission.scope_pattern} for permission in session.execute(stmt).scalars()]
 
 
-def add_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", session: "Session") -> None:
+def add_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", force: bool = False, *, session: "Session") -> None:
     """
     Grant a role a permission on a scope pattern.
 
     :param role: The role to grant the permission to.
     :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted, see :func:`_validate_scope_pattern`.
     :param operation: The operation to grant.
+    :param force: Grant the permission even if the role is protected.
     :param session: The database session.
     :raises InputValidationError: If the scope pattern is not a trailing wildcard.
+    :raises RoleProtected: If the role is protected and `force` is not given.
     :raises RoleNotFound: If the role does not exist.
     :raises Duplicate: If the role already has that permission on that scope pattern.
     """
     scope_pattern = _validate_scope_pattern(scope_pattern)
+    _ensure_unprotected(role, force, session)
 
     session.add(models.RolePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
     try:
@@ -396,7 +430,20 @@ def add_role_permission(role: str, scope_pattern: str, operation: "DatabaseOpera
         raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
 
 
-def delete_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", session: "Session") -> None:
+def delete_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", force: bool = False, *, session: "Session") -> None:
+    """
+    Remove a permission from a role.
+
+    :param role: The role to remove the permission from.
+    :param scope_pattern: The scope pattern of the permission.
+    :param operation: The operation of the permission.
+    :param force: Remove the permission even if the role is protected.
+    :param session: The database session.
+    :raises RoleProtected: If the role is protected and `force` is not given.
+    :raises RolePermissionNotFound: If the role does not have that permission.
+    """
+    _ensure_unprotected(role, force, session)
+
     mapping = session.get(models.RolePermissionAssociation, (role, scope_pattern, operation))
     if mapping is None:
         raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
