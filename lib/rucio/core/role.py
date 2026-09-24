@@ -776,6 +776,10 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
     assigned to nor removed from an account here, and its expiry date is left as it is. Only
     Rucio itself can alter who holds such a role.
 
+    Assignments of the account which have expired are removed. A role the IdP supplies with an
+    expiry date which has already passed is ignored, whether the account holds it or not: it is
+    neither assigned nor has its expiry date overwritten with a date in the past.
+
     This is a dry run: it reports what the synchronisation would do and leaves the database
     untouched.
 
@@ -857,6 +861,17 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
         to_remove.append(role)
         print("  2.2 Role '%s' is not supplied by the IdP, so the assignment would be removed." % role)
 
+    # A role the IdP supplies with an expiry date which has already passed is ignored in 2.3 and 2.4:
+    # assigning it, or moving an existing assignment to that date, would only produce an assignment
+    # which is expired from the start and removed again by 2.1 on the next synchronisation. The role
+    # still counts as supplied in 2.2, so an existing assignment which is still valid is kept.
+    ignored_expired: set[str] = set()
+
+    def _supplied_expired(role: str) -> bool:
+        """Tell whether the IdP supplies the role with an expiry date which has already passed."""
+        expires_at = desired[role]
+        return expires_at is not None and expires_at < now
+
     # 2.3 Add roles to the account that are in the list of roles from the IDP but not in the account's current roles (AccountRoleAssociation)
     to_add, unknown = [], []
     for role in sorted(set(desired) - set(remaining)):
@@ -865,6 +880,10 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
             print("  2.3 Role '%s' is supplied by the IdP but does not exist in Rucio, so it cannot be assigned." % role)
             continue
         if _hold_back(role, "  2.3 Role '%s' has assignment_disabled set, so the IdP cannot have it assigned to the account." % role):
+            continue
+        if _supplied_expired(role):
+            ignored_expired.add(role)
+            print("  2.3 Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so it would not be assigned." % (role, desired[role]))
             continue
         to_add.append(role)
         print("  2.3 Role '%s' would be assigned, expiring %s." % (role, _format_expires_at(desired[role])))
@@ -878,10 +897,145 @@ def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], 
         if _hold_back(role, "  2.4 Role '%s' has assignment_disabled set, so its expiry date of %s would be kept instead of %s."
                             % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role]))):
             continue
+        if _supplied_expired(role):
+            ignored_expired.add(role)
+            print("  2.4 Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so the current expiry date of %s would be kept."
+                  % (role, desired[role], _format_expires_at(remaining[role])))
+            continue
         to_update.append(role)
         print("  2.4 Role '%s' would have its expiry date changed from %s to %s."
               % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role])))
 
     print()
-    print("Summary: would remove %d assignment(s) (%d expired, %d no longer supplied), add %d, change the expiry date of %d, leave %d unchanged; %d role(s) held back by assignment_disabled; %d role(s) supplied by the IdP are unknown to Rucio."
-          % (len(expired) + len(to_remove), len(expired), len(to_remove), len(to_add), len(to_update), unchanged, len(held_back), len(unknown)))
+    print("Summary: would remove %d assignment(s) (%d expired, %d no longer supplied), add %d, change the expiry date of %d, leave %d unchanged; "
+          "%d role(s) held back by assignment_disabled; %d role(s) supplied by the IdP with an already expired date ignored; %d role(s) supplied by the IdP are unknown to Rucio."
+          % (len(expired) + len(to_remove), len(expired), len(to_remove), len(to_add), len(to_update), unchanged, len(held_back), len(ignored_expired), len(unknown)))
+
+
+def sync_account_roles_from_idp(account: Union[str, "InternalAccount"], roles: Any, vo: str = DEFAULT_VO, *, session: "Session") -> None:
+    """
+    Synchronize an account's role assignments with roles supplied by an IdP.
+
+    A role with assignment_disabled set is off limits to the identity provider: it is neither
+    assigned to nor removed from an account here, and its expiry date is left as it is. Only
+    Rucio itself can alter who holds such a role.
+
+    Assignments of the account which have expired are removed. A role the IdP supplies with an
+    expiry date which has already passed is ignored, whether the account holds it or not: it is
+    neither assigned nor has its expiry date overwritten with a date in the past.
+
+    The whole synchronisation is a single transaction, so either all of it is applied or none of
+    it is. See :func:`sync_account_roles_from_idp_dry_run` to report the changes instead of
+    applying them.
+
+    :param account: The account whose role assignments are synchronised, as an
+                    InternalAccount or as a plain account name.
+    :param roles: The roles supplied by the IdP, in any of the forms :func:`_parse_idp_roles` accepts.
+    :param vo: The VO the account belongs to, used when the account is given by name.
+    :param session: The database session.
+    :raises AccountNotFound: If the account does not exist.
+    :raises InputValidationError: If the roles supplied by the IdP are not in one of the accepted forms.
+    """
+    if isinstance(account, str):
+        account = InternalAccount(account, vo=vo)
+    print("Syncing the roles of account '%s'..." % account)
+
+    if session.execute(select(models.Account.account).where(models.Account.account == account)).scalar_one_or_none() is None:
+        raise AccountNotFound("Account '%s' does not exist." % account)
+
+    desired = _parse_idp_roles(roles)
+    known_roles = {entry["role"]: entry for entry in list_roles(session=session)}
+    current = {entry["role"]: entry["expires_at"] for entry in list_account_roles(account, session=session)}
+
+    # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    removed_expired, removed_unsupplied, added, updated, unchanged = 0, 0, 0, 0, 0
+    held_back: set[str] = set()
+    ignored_expired: set[str] = set()
+    unknown: set[str] = set()
+
+    def _hold_back(role: str, message: str) -> bool:
+        """Report that assignment_disabled keeps a change from being applied, once per role."""
+        if not _assignment_disabled(role, known_roles):
+            return False
+        if role not in held_back:
+            held_back.add(role)
+            print(message)
+        return True
+
+    def _delete_assignment(role: str) -> None:
+        session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.account == account, models.AccountRoleAssociation.role == role))
+
+    try:
+        # Step 1: Remove the expired roles from the account (expires_at < now)
+        expired: set[str] = set()
+        for role, expires_at in sorted(current.items()):
+            if expires_at is None or expires_at >= now:
+                continue
+            if _hold_back(role, "  Role '%s' expired at %s but has assignment_disabled set, so the assignment is left untouched." % (role, expires_at)):
+                continue
+            _delete_assignment(role)
+            expired.add(role)
+            removed_expired += 1
+            print("  Role '%s' expired at %s, so the assignment was removed." % (role, expires_at))
+
+        remaining = {role: expires_at for role, expires_at in current.items() if role not in expired}
+
+        # Step 2: Remove the roles which the IdP does not supply
+        for role in sorted(set(remaining) - set(desired)):
+            if _hold_back(role, "  Role '%s' is not supplied by the IdP but has assignment_disabled set, so the assignment is kept." % role):
+                continue
+            _delete_assignment(role)
+            removed_unsupplied += 1
+            print("  Role '%s' is not supplied by the IdP, so the assignment was removed." % role)
+
+        # Step 3: Assign the roles which the IdP supplies and the account does not hold
+        for role in sorted(set(desired) - set(remaining)):
+            expires_at = desired[role]
+            if role not in known_roles:
+                unknown.add(role)
+                print("  Role '%s' is supplied by the IdP but does not exist in Rucio, so it cannot be assigned." % role)
+                continue
+            if _hold_back(role, "  Role '%s' has assignment_disabled set, so the IdP cannot have it assigned to the account." % role):
+                continue
+            if expires_at is not None and expires_at < now:
+                ignored_expired.add(role)
+                print("  Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so it was not assigned." % (role, expires_at))
+                continue
+            session.add(models.AccountRoleAssociation(account=account, role=role, expires_at=expires_at))
+            added += 1
+            print("  Role '%s' assigned, expiring %s." % (role, _format_expires_at(expires_at)))
+
+        # Step 4: Update the expiry date of the roles which both the IdP supplies and the account holds
+        for role in sorted(set(desired) & set(remaining)):
+            if desired[role] == remaining[role]:
+                unchanged += 1
+                continue
+            if _hold_back(role, "  Role '%s' has assignment_disabled set, so its expiry date of %s is kept instead of %s."
+                                % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role]))):
+                continue
+            expires_at = desired[role]
+            if expires_at is not None and expires_at < now:
+                ignored_expired.add(role)
+                print("  Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so the current expiry date of %s is kept."
+                      % (role, expires_at, _format_expires_at(remaining[role])))
+                continue
+            session.execute(
+                update(models.AccountRoleAssociation)
+                .where(models.AccountRoleAssociation.account == account, models.AccountRoleAssociation.role == role)
+                .values(expires_at=expires_at)
+            )
+            updated += 1
+            print("  Role '%s' had its expiry date changed from %s to %s." % (role, _format_expires_at(remaining[role]), _format_expires_at(expires_at)))
+
+        session.commit()
+    except Exception:
+        session.rollback()
+        print("  The synchronisation failed, so nothing reported above was applied.")
+        raise
+
+    print()
+    print("Summary: removed %d assignment(s) (%d expired, %d no longer supplied), added %d, changed the expiry date of %d, left %d unchanged; "
+          "%d role(s) held back by assignment_disabled; %d role(s) supplied by the IdP with an already expired date ignored; %d role(s) supplied by the IdP are unknown to Rucio."
+          % (removed_expired + removed_unsupplied, removed_expired, removed_unsupplied, added, updated, unchanged, len(held_back), len(ignored_expired), len(unknown)))
