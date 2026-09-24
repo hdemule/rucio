@@ -406,12 +406,12 @@ class Roles(BASE, ModelBase):
     __tablename__ = 'roles'
     role: Mapped[str] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text)
-    assignment_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    internal_role_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    assignable: Mapped[bool] = mapped_column(Boolean, default=True)
+    protected: Mapped[bool] = mapped_column(Boolean, default=False)
     _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'),
-                   CheckConstraint('ASSIGNMENT_DISABLED IS NOT NULL', name='ROLES_ASSIGNMENT_DISABLED_NN'),
-                   CheckConstraint('INTERNAL_ROLE_FLAG IS NOT NULL', name='ROLES_INTERNAL_ROLE_FLAG_NN'))
+                   CheckConstraint('ASSIGNABLE IS NOT NULL', name='ROLES_ASSIGNABLE_NN'),
+                   CheckConstraint('PROTECTED IS NOT NULL', name='ROLES_PROTECTED_NN'))
 
 
 class AccountRoleAssociation(BASE, ModelBase):
