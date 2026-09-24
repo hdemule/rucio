@@ -185,6 +185,28 @@ def set_account_role_expires_at(account: str, role: str, expires_at: Optional[Un
         return core_role.set_account_role_expires_at(account=InternalAccount(account, vo=vo), role=role, expires_at=expires_at, session=session)
 
 
+def sync_account_roles(account: str, roles: Any, issuer: str, dry_run: bool = False, vo: str = DEFAULT_VO) -> dict[str, Any]:
+    """
+    Synchronize an account's role assignments with the roles supplied by an IdP.
+
+    :param account: The account whose role assignments are synchronised.
+    :param roles: The roles supplied by the IdP, as a list of role names and/or of
+                  {'role': ..., 'expires_at': ...} entries, or as a mapping of role name to expiry date.
+    :param issuer: The account issuing the command.
+    :param dry_run: Only report what the synchronisation would do, without writing to the database.
+    :param vo: The VO of the issuing account.
+    :returns: The report of the synchronisation, see :func:`rucio.core.role._new_sync_report`.
+    """
+    operation = DatabaseOperationType.READ if dry_run else DatabaseOperationType.WRITE
+    with db_session(operation) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='sync_account_roles', kwargs={'account': account}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to synchronise the roles of account %s.' % (issuer, account))
+
+        sync = core_role.sync_account_roles_from_idp_dry_run if dry_run else core_role.sync_account_roles_from_idp
+        return sync(account=InternalAccount(account, vo=vo), roles=roles, session=session)
+
+
 def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, str]]:
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_role_permissions', kwargs={'role': role}, session=session)
