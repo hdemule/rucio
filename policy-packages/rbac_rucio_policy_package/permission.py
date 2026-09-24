@@ -65,6 +65,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'add_account_role': perm_add_account_role,
         'delete_account_role': perm_delete_account_role,
         'set_account_role_expires_at': perm_set_account_role_expires_at,
+        'sync_account_roles': perm_sync_account_roles,
         'list_role_permissions': perm_list_role_permissions,
         'add_role_permission': perm_add_role_permission,
         'delete_role_permission': perm_delete_role_permission,
@@ -493,6 +494,17 @@ def perm_delete_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any
 def perm_set_account_role_expires_at(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can set the expires_at of a role assigned to an account.
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer=issuer) or _is_admin(issuer=issuer, session=session)
+
+
+def perm_sync_account_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can synchronise the roles of an account with the roles supplied by an IdP.
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
