@@ -1,7 +1,7 @@
 from flask import Flask, Response, jsonify, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, Duplicate, InputValidationError, RoleInUse, RoleNotFound, RolePermissionNotFound
+from rucio.common.exception import AccessDenied, Duplicate, InputValidationError, RoleInUse, RoleNotFound, RolePermissionNotFound, RoleProtected
 from rucio.common.utils import render_json
 from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_accounts, list_role_permissions, list_roles, update_role
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
@@ -20,16 +20,16 @@ class RoleList(ErrorHandlingMethodView):
     def post(self, role_name: str):
         parameters = json_parameters(optional=True)
         description = param_get(parameters, 'description', default=None)
-        assignment_disabled = param_get(parameters, 'assignment_disabled', default=False)
-        internal_role_flag = param_get(parameters, 'internal_role_flag', default=False)
+        assignable = param_get(parameters, 'assignable', default=True)
+        protected = param_get(parameters, 'protected', default=False)
 
         try:
             add_role(
                 role_name,
                 issuer=request.environ['issuer'],
                 description=description,
-                assignment_disabled=assignment_disabled,
-                internal_role_flag=internal_role_flag,
+                assignable=assignable,
+                protected=protected,
                 vo=request.environ['vo'],
             )
         except AccessDenied as error:
@@ -45,19 +45,21 @@ class RoleList(ErrorHandlingMethodView):
         """Update a role. Only the parameters given in the request body are changed; an empty description clears it."""
         parameters = json_parameters()
         description = param_get(parameters, 'description', default=None)
-        assignment_disabled = param_get(parameters, 'assignment_disabled', default=None)
-        internal_role_flag = param_get(parameters, 'internal_role_flag', default=None)
+        assignable = param_get(parameters, 'assignable', default=None)
+        protected = param_get(parameters, 'protected', default=None)
+        force = param_get(parameters, 'force', default=False)
 
         try:
             update_role(
                 role=role_name,
                 description=description,
-                assignment_disabled=assignment_disabled,
-                internal_role_flag=internal_role_flag,
+                assignable=assignable,
+                protected=protected,
+                force=force,
                 issuer=request.environ['issuer'],
                 vo=request.environ['vo'],
             )
-        except AccessDenied as error:
+        except (AccessDenied, RoleProtected) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -72,7 +74,7 @@ class RoleList(ErrorHandlingMethodView):
 
         try:
             delete_role(role_name, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except AccessDenied as error:
+        except (AccessDenied, RoleProtected) as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
             return generate_http_error_flask(404, error)
@@ -92,9 +94,12 @@ class RolePermissions(ErrorHandlingMethodView):
         return jsonify(permissions), 200
 
     def post(self, role_name: str, operation: str, scope_pattern: str):
+        parameters = json_parameters(optional=True)
+        force = param_get(parameters, 'force', default=False)
+
         try:
-            add_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], vo=request.environ['vo'])
-        except AccessDenied as error:
+            add_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
+        except (AccessDenied, RoleProtected) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -105,9 +110,12 @@ class RolePermissions(ErrorHandlingMethodView):
         return jsonify({"message": f"Permission '{operation}' on scope pattern '{scope_pattern}' successfully added to role '{role_name}'."}), 201
 
     def delete(self, role_name: str, operation: str, scope_pattern: str):
+        parameters = json_parameters(optional=True)
+        force = param_get(parameters, 'force', default=False)
+
         try:
-            delete_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], vo=request.environ['vo'])
-        except AccessDenied as error:
+            delete_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
+        except (AccessDenied, RoleProtected) as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
             return generate_http_error_flask(404, error)
