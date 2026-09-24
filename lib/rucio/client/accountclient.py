@@ -159,7 +159,7 @@ class AccountClient(BaseClient):
         expires_at :
             An optional date at which the assignment expires. None means that it does not expire.
         force :
-            Assign the role even if it has `assignment_disabled` set.
+            Assign the role even if it is not assignable.
         """
         url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
         data = render_json(expires_at=expires_at, force=force) if expires_at is not None or force else None
@@ -198,7 +198,7 @@ class AccountClient(BaseClient):
         role :
             The role to remove.
         force :
-            Remove the role even if it has `assignment_disabled` set.
+            Remove the role even if it is not assignable.
         """
         url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
         data = render_json(force=force) if force else None

@@ -58,7 +58,7 @@ from rucio.common.exception import (
 from rucio.common.utils import extract_scope, setup_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from rich.style import StyleType
 
@@ -91,6 +91,29 @@ def format_operations(operations: "Iterable[str]") -> str:
         letter if operation.value in granted else '-'
         for operation, letter in OPERATION_LETTERS.items()
     )
+
+
+def format_permission_tree(permissions: "Iterable[Mapping[str, str]]") -> list[str]:
+    """
+    Render the permissions of a role as the branches of a tree, to be listed under the role in a table.
+
+    Each scope pattern is one branch, showing its operations as in :func:`format_operations`.
+
+    :param permissions: The permissions of one role, each with an 'operation' and a 'scope_pattern'.
+    :returns: One line per scope pattern, or a single placeholder line if there is no permission.
+    """
+    ops_by_scope_pattern: dict[str, set[str]] = {}
+    for permission in permissions:
+        ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
+
+    if not ops_by_scope_pattern:
+        return ["    (no permission assigned)"]
+
+    branches = sorted(ops_by_scope_pattern.items())
+    return [
+        f"    {'`-- ' if index == len(branches) - 1 else '|-- '}{format_operations(operations)}  {scope_pattern}"
+        for index, (scope_pattern, operations) in enumerate(branches)
+    ]
 
 
 def wrap_table_column(

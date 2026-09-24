@@ -1,11 +1,13 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
 import click
 from tabulate import tabulate
 
-from rucio.cli.utils import DatabaseOperationType, format_operations, wrap_table_column
-from rucio.common.exception import Duplicate, RolePermissionNotFound
+from rucio.cli.utils import DatabaseOperationType, format_operations, format_permission_tree, wrap_table_column
+from rucio.common.exception import Duplicate, RoleInUse, RolePermissionNotFound, RoleProtected
 from rucio.common.utils import str_to_date
 
 # Shorthands accepted on the command line, mapped to the operation(s) they expand to.
@@ -18,9 +20,21 @@ OPERATION_SHORTHANDS: dict[str, list[DatabaseOperationType]] = {
 }
 
 
+@contextmanager
+def _protection_hint(role_name: str, action: str = "altered") -> Iterator[None]:
+    """Turn a RoleProtected error into one telling the CLI user how to bypass the protection."""
+    try:
+        yield
+    except RoleProtected as error:
+        forced = "--force to delete it anyway (this also revokes it from every account it is assigned to)" if action == "deleted" else "--force to bypass the protection"
+        raise RoleProtected(f"Role '{role_name}' is protected, so it cannot be {action}. Add {forced}, or unprotect it first with `rucio role update {role_name} -p false`.") from error
+
+
 @click.group()
 def role():
-    """Manage role-based access control (RBAC)."""
+    """Manage role-based access control (RBAC). Roles are assignable to accounts (see `rucio account role` for details) and can grant permissions on scopes.
+    A role can be protected which prevents it from being altered (e.g. externally by a policy package).
+    A role can also be assignable or not, which controls whether it can be assigned freely to accounts; this prevents an external identity provider from assigning a role to anyone."""
 
 
 @role.command("list")
@@ -31,21 +45,13 @@ def list_(ctx: click.Context, detail: bool) -> None:
     roles = ctx.obj.client.list_roles()
     rows = []
     for role_entry in roles:
-        rows.append([role_entry['role'], role_entry.get('assignment_disabled'), role_entry.get('internal_role_flag'), role_entry.get('description') or ''])
+        rows.append([role_entry['role'], role_entry.get('assignable'), role_entry.get('protected'), role_entry.get('description') or ''])
         if not detail:
             continue
 
-        ops_by_scope_pattern: dict[str, set[str]] = {}
-        for permission in ctx.obj.client.list_role_permissions(role_entry['role']):
-            ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
-        if not ops_by_scope_pattern:
-            rows.append(["    (no permission assigned)", "", "", ""])
-            continue
-        for index, (scope_pattern, ops) in enumerate(sorted(ops_by_scope_pattern.items())):
-            branch = "`-- " if index == len(ops_by_scope_pattern) - 1 else "|-- "
-            rows.append([f"    {branch}{format_operations(ops)}  {scope_pattern}", "", "", ""])
+        rows.extend([line, "", "", ""] for line in format_permission_tree(ctx.obj.client.list_role_permissions(role_entry['role'])))
 
-    headers = ["ROLE", "ASSIGNMENT DISABLED", "INTERNAL ROLE FLAG", "DESCRIPTION"]
+    headers = ["ROLE", "ASSIGNABLE", "PROTECTED", "DESCRIPTION"]
     click.echo(tabulate(wrap_table_column(rows, headers, column=3), headers=headers, tablefmt=ctx.obj.tablefmt))
 
 
@@ -55,12 +61,11 @@ def list_(ctx: click.Context, detail: bool) -> None:
 @click.option("-d", "--description", help="Set the description of the role.")
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
               help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `account role add`/`remove`.")
-@click.option("-i", "--internal", type=bool, is_flag=False, flag_value="true", default=False, show_default=True,
-              help="Flag (true) or unflag (false) the role as internal, which prevents a policy package from altering or deleting it.")
-def add(ctx: click.Context, role_name: str, description: Optional[str], assignable: bool, internal: bool) -> None:
-    """Add a new role, optionally with a description. Give ROLE_NAME before -a/-i, which take an optional true/false."""
-    # the database stores the opposite of --assignable
-    ctx.obj.client.add_role(role_name, description=description, assignment_disabled=not assignable, internal_role_flag=internal)
+@click.option("-p", "--protected", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
+              help="Protect (true) or not (false) the role. A protected role cannot be altered or deleted, by a policy package or through Rucio, unless internally forced.")
+def add(ctx: click.Context, role_name: str, description: Optional[str], assignable: bool, protected: bool) -> None:
+    """Add a new role, optionally with a description. Give ROLE_NAME before -a/-p, which take an optional true/false."""
+    ctx.obj.client.add_role(role_name, description=description, assignable=assignable, protected=protected)
     click.echo(f"Role '{role_name}' added.")
 
 
@@ -70,30 +75,54 @@ def add(ctx: click.Context, role_name: str, description: Optional[str], assignab
 @click.option("-d", "--description", help='Set the description of the role, overwriting the existing one. Pass an empty string ("") to remove it.')
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=None,
               help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `account role add`/`remove`.")
-@click.option("-i", "--internal", type=bool, is_flag=False, flag_value="true", default=None,
-              help="Flag (true) or unflag (false) the role as internal, which prevents a policy package from altering or deleting it.")
-def update(ctx: click.Context, role_name: str, description: Optional[str], assignable: Optional[bool], internal: Optional[bool]) -> None:
-    """Update metadata of a role. Only the given options are changed; an empty description removes it. Give ROLE_NAME before -a/-i, which take an optional true/false."""
-    if description is None and assignable is None and internal is None:
-        raise click.UsageError("At least one of --description, --assignable or --internal must be given.")
+@click.option("-p", "--protected", type=bool, is_flag=False, flag_value="true", default=None,
+              help="Protect (true) or not (false) the role. A protected role cannot be altered or deleted, by a policy package or through Rucio, unless internally forced.")
+@click.option("--force", is_flag=True, default=False, help="Change the description or the assignable state even if the role is protected.")
+def update(ctx: click.Context, role_name: str, description: Optional[str], assignable: Optional[bool], protected: Optional[bool], force: bool) -> None:
+    """Update properties of a role. Only the given options are changed."""
+    if description is None and assignable is None and protected is None:
+        raise click.UsageError("At least one of --description, --assignable or --protected must be given.")
 
-    # the database stores the opposite of --assignable
-    assignment_disabled = None if assignable is None else not assignable
-    ctx.obj.client.update_role(role_name, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal)
+    if protected is False and not _confirm_unprotect(ctx, role_name):
+        click.echo("Aborted, the role was not updated.")
+        return
+
+    with _protection_hint(role_name):
+        ctx.obj.client.update_role(role_name, description=description, assignable=assignable, protected=protected, force=force)
     click.echo(f"Role '{role_name}' updated.")
 
 
 @role.command("delete")
 @click.pass_context
 @click.argument("role_name")
-@click.option("--force", is_flag=True, default=False, help="Also revoke the role from every account it is assigned to and remove its permissions. Asks for confirmation first.")
+@click.option("--force", is_flag=True, default=False, help="Also revoke the role from every account it is assigned to and remove its permissions, and delete it even if it is protected. Asks for confirmation first.")
 def delete(ctx: click.Context, role_name: str, force: bool) -> None:
     """Delete an existing role."""
     if force and not _confirm_forced_delete(ctx, role_name):
         click.echo("Aborted, the role was not deleted.")
         return
-    ctx.obj.client.delete_role(role_name, force=force)
+    with _protection_hint(role_name, action="deleted"):
+        try:
+            ctx.obj.client.delete_role(role_name, force=force)
+        except RoleInUse as error:
+            raise RoleInUse(f"Role '{role_name}' is still assigned to accounts and cannot be deleted. Add --force to revoke it from every account it is assigned to, drop its permissions and delete it.") from error
     click.echo(f"Role '{role_name}' deleted.")
+
+
+def _confirm_unprotect(ctx: click.Context, role_name: str) -> bool:
+    """
+    Explain what removing the protection of a role implies, and ask for confirmation.
+
+    Always True for a role which is not protected, since there is nothing to remove.
+
+    :returns: True if the caller should proceed, False if the user declined.
+    """
+    if not any(entry['role'] == role_name and entry.get('protected') for entry in ctx.obj.client.list_roles()):
+        return True
+
+    click.echo(f"You are about to remove the protection from role '{role_name}'. This means that its description, assignable state and associated permissions can be changed, and the role deleted (e.g. by a policy package synchronization).")
+
+    return click.confirm(f"Do you really want to remove the protection from role '{role_name}'?")
 
 
 def _confirm_forced_delete(ctx: click.Context, role_name: str) -> bool:
@@ -209,8 +238,9 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
 @click.argument("role_name")
 @click.argument("operation", type=click.Choice(list(OPERATION_SHORTHANDS), case_sensitive=False))
 @click.argument("scope_pattern")
+@click.option("--force", is_flag=True, default=False, help="Add the permission even if the role is protected.")
 @click.pass_context
-def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pattern: str) -> None:
+def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pattern: str, force: bool) -> None:
     """Add OPERATION on SCOPE_PATTERN to ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write' or both ('rw'). SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob."""
     if not _confirm_scope_pattern(ctx, scope_pattern, "add"):
         click.echo("Aborted, no permission was added.")
@@ -218,7 +248,8 @@ def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pat
     added, already_assigned = [], []
     for op in OPERATION_SHORTHANDS[operation.lower()]:
         try:
-            ctx.obj.client.add_role_permission(role_name, op.value, scope_pattern)
+            with _protection_hint(role_name):
+                ctx.obj.client.add_role_permission(role_name, op.value, scope_pattern, force=force)
             added.append(op.value)
         except Duplicate:
             already_assigned.append(op.value)
@@ -233,8 +264,9 @@ def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pat
 @click.argument("role_name")
 @click.argument("operation", type=click.Choice(list(OPERATION_SHORTHANDS), case_sensitive=False))
 @click.argument("scope_pattern")
+@click.option("--force", is_flag=True, default=False, help="Remove the permission even if the role is protected.")
 @click.pass_context
-def permission_remove(ctx: click.Context, role_name: str, operation: str, scope_pattern: str) -> None:
+def permission_remove(ctx: click.Context, role_name: str, operation: str, scope_pattern: str, force: bool) -> None:
     """Remove OPERATION on SCOPE_PATTERN from ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write' or both ('rw')."""
     requested = OPERATION_SHORTHANDS[operation.lower()]
     assigned = {
@@ -253,7 +285,8 @@ def permission_remove(ctx: click.Context, role_name: str, operation: str, scope_
     removed, not_assigned = [], []
     for op in requested:
         try:
-            ctx.obj.client.delete_role_permission(role_name, op.value, scope_pattern)
+            with _protection_hint(role_name):
+                ctx.obj.client.delete_role_permission(role_name, op.value, scope_pattern, force=force)
             removed.append(op.value)
         except RolePermissionNotFound:
             not_assigned.append(op.value)
