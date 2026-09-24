@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -18,9 +20,18 @@ import click
 from rich.text import Text
 from tabulate import tabulate
 
-from rucio.cli.utils import RichCLITheme, RichUtils, format_operations, wrap_table_column
-from rucio.common.exception import InputValidationError
+from rucio.cli.utils import RichCLITheme, RichUtils, format_permission_tree, wrap_table_column
+from rucio.common.exception import InputValidationError, RoleAssignmentDisabled
 from rucio.common.utils import get_bytes_value_from_string, sizefmt
+
+
+@contextmanager
+def _assignable_hint(role_name: str, account_name: str, action: str) -> Iterator[None]:
+    """Turn a RoleAssignmentDisabled error into one telling the CLI user how to bypass it."""
+    try:
+        yield
+    except RoleAssignmentDisabled as error:
+        raise RoleAssignmentDisabled(f"Role '{role_name}' is not assignable, so it cannot be {action} account '{account_name}'. Add --force to bypass this.") from error
 
 
 class OptionalDateTime(click.ParamType):
@@ -358,33 +369,28 @@ def role_list(ctx: click.Context, account_name: str, detail: bool) -> None:
         headers = ["ROLE", "EXPIRES AT"]
         click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
     else:
-        rows = [[r['role'], r.get('expires_at') or '-', r.get('description') or '-'] for r in rbac['roles']]
+        permissions_by_role: dict[str, list[dict[str, str]]] = {}
+        for permission in rbac['permissions']:
+            permissions_by_role.setdefault(permission['role'], []).append(permission)
+
+        rows = []
+        for r in rbac['roles']:
+            rows.append([r['role'], r.get('expires_at') or '-', r.get('description') or '-'])
+            rows.extend([line, "", ""] for line in format_permission_tree(permissions_by_role.get(r['role'], [])))
         headers = ["ROLE", "EXPIRES AT", "DESCRIPTION"]
         click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
-
-        click.echo()
-        click.echo(f"Permissions granted via roles for account {account_name}:")
-
-        ops_by_role_scope_pattern: dict[tuple[str, str], set[str]] = {}
-        for permission in rbac['permissions']:
-            ops_by_role_scope_pattern.setdefault((permission['role'], permission['scope_pattern']), set()).add(permission['operation'])
-
-        permission_rows = [
-            [role_name, scope_pattern, format_operations(operations)]
-            for (role_name, scope_pattern), operations in sorted(ops_by_role_scope_pattern.items())
-        ]
-        click.echo(tabulate(permission_rows, headers=["ROLE", "SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
 @role.command("add")
 @click.argument("role_name")
 @click.argument("account_name")
 @click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, the assignment does not expire.")
-@click.option("--force", is_flag=True, default=False, help="Assign the role even if it has assignment_disabled set.")
+@click.option("--force", is_flag=True, default=False, help="Assign the role even if it is not assignable.")
 @click.pass_context
 def role_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime], force: bool) -> None:
     """Assign ROLE_NAME to ACCOUNT_NAME, optionally until an expiry date."""
-    ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force)
+    with _assignable_hint(role_name, account_name, action="assigned to"):
+        ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force)
     if expires_at:
         click.echo(f"Added role '{role_name}' to account '{account_name}', expiring at {expires_at}.")
     else:
@@ -408,9 +414,10 @@ def role_update(ctx: click.Context, role_name: str, account_name: str, expires_a
 @role.command("remove")
 @click.argument("role_name")
 @click.argument("account_name")
-@click.option("--force", is_flag=True, default=False, help="Remove the role even if it has assignment_disabled set.")
+@click.option("--force", is_flag=True, default=False, help="Remove the role even if it is not assignable.")
 @click.pass_context
 def role_remove(ctx: click.Context, role_name: str, account_name: str, force: bool) -> None:
     """Remove ROLE_NAME from ACCOUNT_NAME."""
-    ctx.obj.client.delete_account_role(account_name, role_name, force=force)
+    with _assignable_hint(role_name, account_name, action="removed from"):
+        ctx.obj.client.delete_account_role(account_name, role_name, force=force)
     click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
