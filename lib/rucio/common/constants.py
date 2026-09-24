@@ -30,6 +30,10 @@ RESERVED_KEYS = ['scope', 'name', 'account', 'did_type', 'is_open', 'monotonic',
 
 DEFAULT_VO = 'def'
 
+# Stands for the issuer's account in REST paths. It cannot collide with an account name,
+# since '@' is not allowed in those.
+ISSUER_ACCOUNT_ALIAS = '@me'
+
 DEFAULT_ACTIVITY = 'User Subscriptions'
 
 KEY_TYPES = ['ALL', 'COLLECTION', 'FILE', 'DERIVED']
