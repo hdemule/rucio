@@ -52,27 +52,34 @@ def list_(ctx: click.Context, detail: bool) -> None:
 @role.command("add")
 @click.pass_context
 @click.argument("role_name")
-@click.option("--description", help="Description of the role")
-@click.option("--assignment-disabled", type=bool, is_flag=False, default=False, help="Prevents this role from being assigned to, or taken away from, an account. Only bypassable with '--force' on `account role add`/`remove`.")
-@click.option("--internal-role-flag", type=bool, is_flag=False, default=False, help="Prevents a policy package from altering the role such as deleting it.")
-def add(ctx: click.Context, role_name: str, description: Optional[str], assignment_disabled: bool, internal_role_flag: bool) -> None:
-    """Add a new role, optionally with a description."""
-    ctx.obj.client.add_role(role_name, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag)
+@click.option("-d", "--description", help="Set the description of the role.")
+@click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
+              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `account role add`/`remove`.")
+@click.option("-i", "--internal", type=bool, is_flag=False, flag_value="true", default=False, show_default=True,
+              help="Flag (true) or unflag (false) the role as internal, which prevents a policy package from altering or deleting it.")
+def add(ctx: click.Context, role_name: str, description: Optional[str], assignable: bool, internal: bool) -> None:
+    """Add a new role, optionally with a description. Give ROLE_NAME before -a/-i, which take an optional true/false."""
+    # the database stores the opposite of --assignable
+    ctx.obj.client.add_role(role_name, description=description, assignment_disabled=not assignable, internal_role_flag=internal)
     click.echo(f"Role '{role_name}' added.")
 
 
 @role.command("update")
 @click.pass_context
 @click.argument("role_name")
-@click.option("--description", help='New description of the role, overwriting the existing one. Pass an empty string ("") to remove the description.')
-@click.option("--assignment-disabled", type=bool, is_flag=False, default=None, help="Prevents (true) or allow (false) this role from being assigned to, or taken away from, an account. Only bypassable with '--force' on `account role add`/`remove`.")
-@click.option("--internal-role-flag", type=bool, is_flag=False, default=None, help="Flags (true) or unflags (false) the role as internal.")
-def update(ctx: click.Context, role_name: str, description: Optional[str], assignment_disabled: Optional[bool], internal_role_flag: Optional[bool]) -> None:
-    """Update metadata of a role. Only the given options are changed; an empty description removes it."""
-    if description is None and assignment_disabled is None and internal_role_flag is None:
-        raise click.UsageError("At least one of --description, --assignment-disabled or --internal-role-flag must be given.")
+@click.option("-d", "--description", help='Set the description of the role, overwriting the existing one. Pass an empty string ("") to remove it.')
+@click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=None,
+              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `account role add`/`remove`.")
+@click.option("-i", "--internal", type=bool, is_flag=False, flag_value="true", default=None,
+              help="Flag (true) or unflag (false) the role as internal, which prevents a policy package from altering or deleting it.")
+def update(ctx: click.Context, role_name: str, description: Optional[str], assignable: Optional[bool], internal: Optional[bool]) -> None:
+    """Update metadata of a role. Only the given options are changed; an empty description removes it. Give ROLE_NAME before -a/-i, which take an optional true/false."""
+    if description is None and assignable is None and internal is None:
+        raise click.UsageError("At least one of --description, --assignable or --internal must be given.")
 
-    ctx.obj.client.update_role(role_name, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag)
+    # the database stores the opposite of --assignable
+    assignment_disabled = None if assignable is None else not assignable
+    ctx.obj.client.update_role(role_name, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal)
     click.echo(f"Role '{role_name}' updated.")
 
 
