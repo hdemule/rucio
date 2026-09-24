@@ -25,8 +25,8 @@ def add_role(
         role: str,
         issuer: str,
         description: Optional[str] = None,
-        assignment_disabled: bool = False,
-        internal_role_flag: bool = False,
+        assignable: bool = True,
+        protected: bool = False,
         vo: str = DEFAULT_VO) -> None:
     """
     Add a new role.
@@ -34,8 +34,8 @@ def add_role(
     :param role: The name of the role to add.
     :param issuer: The account issuing the command.
     :param description: An optional description of the role. An empty description is stored as NULL.
-    :param assignment_disabled: Whether an identity provider is barred from assigning this role to, or taking it away from, an account.
-    :param internal_role_flag: Whether the role is flagged as internal.
+    :param assignable: Whether an identity provider may assign this role to, or take it away from, an account.
+    :param protected: Whether the role is protected, which prevents a policy package from altering or deleting it.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -43,15 +43,15 @@ def add_role(
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to add role.' % issuer)
 
-        core_role.add_role(role=role, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag, session=session)
+        core_role.add_role(role=role, description=description, assignable=assignable, protected=protected, session=session)
 
 
 def update_role(
         role: str,
         issuer: str,
         description: Optional[str] = None,
-        assignment_disabled: Optional[bool] = None,
-        internal_role_flag: Optional[bool] = None,
+        assignable: Optional[bool] = None,
+        protected: Optional[bool] = None,
         vo: str = DEFAULT_VO) -> dict[str, Any]:
     """
     Update the metadata of an existing role, changing only the parameters explicitly given.
@@ -59,8 +59,8 @@ def update_role(
     :param role: The role to update.
     :param issuer: The account issuing the command.
     :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
-    :param assignment_disabled: The new assignment_disabled state, or None to leave it untouched.
-    :param internal_role_flag: The new internal_role_flag state, or None to leave it untouched.
+    :param assignable: The new assignable state, or None to leave it untouched.
+    :param protected: The new protected state, or None to leave it untouched.
     :param vo: The VO of the issuing account.
     :returns: The role as it is stored after the update.
     """
@@ -69,7 +69,7 @@ def update_role(
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to update role %s.' % (issuer, role))
 
-        return core_role.update_role(role=role, description=description, assignment_disabled=assignment_disabled, internal_role_flag=internal_role_flag, session=session)
+        return core_role.update_role(role=role, description=description, assignable=assignable, protected=protected, force=force, session=session)
 
 
 def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
@@ -136,7 +136,7 @@ def add_account_role(account: str, role: str, issuer: str, expires_at: Optional[
     :param role: The role to assign.
     :param issuer: The account issuing the command.
     :param expires_at: An optional date at which the assignment expires. None means that it does not expire.
-    :param force: Assign the role even if it has `assignment_disabled` set.
+    :param force: Assign the role even if it is not assignable.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -154,7 +154,7 @@ def delete_account_role(account: str, role: str, issuer: str, force: bool = Fals
     :param account: The account to remove the role from.
     :param role: The role to remove.
     :param issuer: The account issuing the command.
-    :param force: Remove the role even if it has `assignment_disabled` set.
+    :param force: Remove the role even if it is not assignable.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -191,7 +191,7 @@ def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[
         return core_role.list_role_permissions(role=role, session=session)
 
 
-def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: str, vo: str = DEFAULT_VO) -> None:
+def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
     """
     Grant a role a permission on a scope pattern.
 
