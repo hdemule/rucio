@@ -91,7 +91,7 @@ def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_V
         core_role.delete_role(role=role, force=force, session=session)
 
 
-def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str = DEFAULT_VO) -> dict[str, Union[list[dict[str, Any]], list[dict[str, str]]]]:
+def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str = DEFAULT_VO) -> dict[str, Any]:
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_account_roles', kwargs={'account': account}, session=session)
         if not auth_result.allowed:
@@ -99,13 +99,14 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
 
         internal_account = InternalAccount(account, vo=vo)
         roles = core_role.list_account_roles(account=internal_account, session=session)
-        result: dict[str, Union[list[dict[str, Any]], list[dict[str, str]]]] = {'roles': roles}
+        result: dict[str, Any] = {'roles': roles}
         if detail:
             result['permissions'] = [
                 {'role': role['role'], **permission}
                 for role in roles
                 for permission in core_role.list_role_permissions(role=role['role'], session=session)
             ]
+        result['account'] = account
         return result
 
 
