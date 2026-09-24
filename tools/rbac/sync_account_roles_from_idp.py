@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Report what synchronising the roles of an account with the ones of an IdP would do.
+"""Synchronise the roles of an account with the ones of an IdP, or report what that would do.
 
 The roles an identity provider supplies are given on the command line, so that the
 synchronisation can be tried out without an IdP at hand:
 
+    python tools/rbac/sync_account_roles_from_idp.py alice data-scientist admin=2028-01-31 --dry-run
     python tools/rbac/sync_account_roles_from_idp.py alice data-scientist admin=2028-01-31
 
-The core function is a dry run: it only reads the roles of the account and of the database,
-and prints the changes it would apply. Nothing is written, which is why the session below is
-opened for reading.
+With --dry-run the core function only reads the roles of the account and of the database, and
+prints the changes it would apply. Without it, the changes are applied in a single transaction.
 """
 
 import argparse
@@ -37,22 +37,34 @@ from rucio.db.sqla.constants import DatabaseOperationType  # noqa: E402
 from rucio.db.sqla.session import db_session  # noqa: E402
 
 
-def sync_account_roles_from_idp(account: str, roles: dict, vo: str = DEFAULT_VO) -> None:
+def sync_account_roles_from_idp_dry_run(account: str, roles: dict, vo: str = DEFAULT_VO) -> None:
     """Open a database session and run the synchronisation through it."""
     print("Syncing account roles from IDP...")
-    # once the synchronisation stops being a dry run, this has to become
-    # DatabaseOperationType.WRITE, otherwise the session refuses to write
+    # the dry run only reads, so its session is opened for reading
     with db_session(DatabaseOperationType.READ) as session:
         role_core.sync_account_roles_from_idp_dry_run(account=account, roles=roles, vo=vo, session=session)
 
 
+def sync_account_roles_from_idp(account: str, roles: dict, vo: str = DEFAULT_VO) -> None:
+    """Open a database session for writing and apply the synchronisation through it."""
+    print("Syncing account roles from IDP...")
+    with db_session(DatabaseOperationType.WRITE) as session:
+        role_core.sync_account_roles_from_idp(account=account, roles=roles, vo=vo, session=session)
+
+
 def main() -> None:
     """Entry point of the script."""
-    parser = argparse.ArgumentParser(description='Report what synchronising the roles of an account with the ones of an IdP would do.')
+    parser = argparse.ArgumentParser(
+        description='Synchronise the roles of an account with the ones of an IdP, or with --dry-run only report what that would do.'
+    )
     parser.add_argument('account', help='the account whose roles would be synchronised')
     parser.add_argument('roles', nargs='*', metavar='ROLE[=EXPIRES_AT]',
-                        help="a role the IdP supplies, optionally with the date at which the assignment expires, e.g. 'admin=2028-01-31'")
+                        help="a role the IdP supplies, optionally with the date at which the assignment expires. "
+                        "Examples: one role without expiration => alice data-scientist; "
+                        "multiple roles without expiration => alice data-scientist admin; "
+                        "mixed expirations => alice data-scientist admin=2028-01-31 analyst")
     parser.add_argument('--vo', default=DEFAULT_VO, help='the VO the account belongs to (default: %(default)s)')
+    parser.add_argument('--dry-run', action='store_true', help='do not write anything to the database, only report what would be done (default: %(default)s)')
     args = parser.parse_args()
 
     # the roles of the IdP as a mapping of role name to expiry date, None meaning that the
@@ -62,7 +74,10 @@ def main() -> None:
         role, _, expires_at = entry.partition('=')
         roles[role] = expires_at or None
 
-    sync_account_roles_from_idp(args.account, roles, vo=args.vo)
+    if args.dry_run:
+        sync_account_roles_from_idp_dry_run(args.account, roles, vo=args.vo)
+    else:
+        sync_account_roles_from_idp(args.account, roles, vo=args.vo)
 
 
 if __name__ == "__main__":
