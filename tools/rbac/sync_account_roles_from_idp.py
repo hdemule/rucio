@@ -42,14 +42,16 @@ def sync_account_roles_from_idp_dry_run(account: str, roles: dict, vo: str = DEF
     print("Syncing account roles from IDP...")
     # the dry run only reads, so its session is opened for reading
     with db_session(DatabaseOperationType.READ) as session:
-        role_core.sync_account_roles_from_idp_dry_run(account=account, roles=roles, vo=vo, session=session)
+        report = role_core.sync_account_roles_from_idp_dry_run(account=account, roles=roles, vo=vo, session=session)
+    print("\n".join(report["messages"]))
 
 
 def sync_account_roles_from_idp(account: str, roles: dict, vo: str = DEFAULT_VO) -> None:
     """Open a database session for writing and apply the synchronisation through it."""
     print("Syncing account roles from IDP...")
     with db_session(DatabaseOperationType.WRITE) as session:
-        role_core.sync_account_roles_from_idp(account=account, roles=roles, vo=vo, session=session)
+        report = role_core.sync_account_roles_from_idp(account=account, roles=roles, vo=vo, session=session)
+    print("\n".join(report["messages"]))
 
 
 def main() -> None:
