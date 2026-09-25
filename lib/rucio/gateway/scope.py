@@ -29,10 +29,13 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
-def list_scopes(filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> list[Optional[str]]:
+def list_scopes(issuer: str, filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> list[Optional[str]]:
     """
-    Lists all scopes.
+    Lists all scopes the issuer can read.
 
+    The scopes the issuer cannot read are left out, so that their existence is not disclosed.
+
+    :param issuer: The issuer account.
     :param filter_: Dictionary of attributes by which the input data should be filtered
     :param vo: The VO to act on.
 
@@ -47,7 +50,8 @@ def list_scopes(filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) 
         filter_['scope'] = InternalScope(scope='*', vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        return [scope.external for scope in core_scope.list_scopes(filter_=filter_, session=session)]
+        can_access = role.scope_access_checker(account=InternalAccount(issuer, vo=vo), session=session)
+        return [scope.external for scope in core_scope.list_scopes(filter_=filter_, session=session) if can_access(scope)]
 
 
 def list_scopes_with_account(account: str, filter_: Optional[dict[str, Any]] = None, vo: str = DEFAULT_VO) -> 'Generator[dict[str, Any]]':
@@ -105,12 +109,14 @@ def add_scope(
 
 def get_scopes(
     account: str,
+    issuer: str,
     vo: str = DEFAULT_VO,
 ) -> list[Optional[str]]:
     """
-    Gets a list of all scopes for an account.
+    Gets a list of all scopes for an account, restricted to the scopes the issuer can read.
 
     :param account: The account name.
+    :param issuer: The issuer account.
     :param vo: The VO to act on.
 
     :returns: A list containing the names of all scopes for this account.
@@ -119,7 +125,8 @@ def get_scopes(
     internal_account = InternalAccount(account, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        return [scope.external for scope in core_scope.get_scopes(internal_account, session=session)]
+        can_access = role.scope_access_checker(account=InternalAccount(issuer, vo=vo), session=session)
+        return [scope.external for scope in core_scope.get_scopes(internal_account, session=session) if can_access(scope)]
 
 
 def update_scope(
