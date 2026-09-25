@@ -19,7 +19,7 @@ import flask
 from flask import Flask, Response
 
 from rucio.common.constants import HTTPMethod, TransferLimitDirection
-from rucio.common.exception import AccessDenied, RequestNotFound
+from rucio.common.exception import AccessDenied, RequestNotFound, RSENotFound
 from rucio.common.utils import APIEncoder, render_json
 from rucio.core.rse import get_rses_with_attribute_value
 from rucio.db.sqla.constants import RequestState
@@ -192,6 +192,8 @@ class RequestGet(ErrorHandlingMethodView):
             return Response(json.dumps(request_data, cls=APIEncoder), content_type='application/json')
         except RequestNotFound as error:
             return generate_http_error_flask(404, error.__class__.__name__, f'No request found for DID {scope}:{name} at RSE {rse}')
+        except RSENotFound as error:
+            return generate_http_error_flask(404, error)
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
 
@@ -357,6 +359,10 @@ class RequestHistoryGet(ErrorHandlingMethodView):
             return Response(json.dumps(request_data, cls=APIEncoder), content_type='application/json')
         except RequestNotFound as error:
             return generate_http_error_flask(404, error.__class__.__name__, f'No request found for DID {scope}:{name} at RSE {rse}')
+        except RSENotFound as error:
+            return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class RequestList(ErrorHandlingMethodView):
