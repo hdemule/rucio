@@ -250,7 +250,7 @@ class AllRule(ErrorHandlingMethodView):
         """
         try:
             def generate(filters, vo):
-                for rule in list_replication_rules(filters=filters, vo=vo):
+                for rule in list_replication_rules(issuer=request.environ['issuer'], filters=filters, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
             return try_stream(generate(filters=dict(request.args.items(multi=False)), vo=request.environ['vo']))
@@ -688,7 +688,12 @@ class RuleHistory(ErrorHandlingMethodView):
             for history in list_replication_rule_history(rule_id, issuer=issuer, vo=vo):
                 yield render_json(**history) + '\n'
 
-        return try_stream(generate(issuer=request.environ['issuer'], vo=request.environ['vo']))
+        try:
+            return try_stream(generate(issuer=request.environ['issuer'], vo=request.environ['vo']))
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RuleNotFound as error:
+            return generate_http_error_flask(404, error)
 
 
 class RuleHistoryFull(ErrorHandlingMethodView):
