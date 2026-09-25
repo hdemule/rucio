@@ -110,7 +110,7 @@ class LockByRSE(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for lock in get_dataset_locks_by_rse(rse, vo=vo):
+                for lock in get_dataset_locks_by_rse(issuer=request.environ['issuer'], rse=rse, vo=vo):
                     yield render_json(**lock) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
