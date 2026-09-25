@@ -1084,7 +1084,7 @@ class SuspiciousReplicas(ErrorHandlingMethodView):
             if 'nattempts' in params:
                 nattempts = int(params['nattempts'][0])
 
-        result = get_suspicious_files(rse_expression=rse_expression, younger_than=younger_than, nattempts=nattempts, vo=request.environ['vo'])
+        result = get_suspicious_files(issuer=request.environ['issuer'], rse_expression=rse_expression, younger_than=younger_than, nattempts=nattempts, vo=request.environ['vo'])
         return Response(render_json(result), 200, content_type='application/json')
 
 
@@ -1617,7 +1617,7 @@ class ReplicasRSE(ErrorHandlingMethodView):
         """
 
         def generate(vo):
-            for row in list_datasets_per_rse(rse=rse, vo=vo):
+            for row in list_datasets_per_rse(issuer=request.environ['issuer'], rse=rse, vo=vo):
                 yield dumps(row, cls=APIEncoder) + '\n'
 
         return try_stream(generate(vo=request.environ['vo']))
