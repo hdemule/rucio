@@ -47,6 +47,8 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'get_users_following_did': perm_get_users_following_did,
         'add_did_to_followed': perm_add_did_to_followed,
         'delete_metadata': perm_delete_metadata,
+        'get_request_by_did': perm_get_request_by_did,
+        'get_request_history_by_did': perm_get_request_by_did,  # The request history of a DID is as sensitive as its current request
         'list_replication_rule_full_history': perm_list_replication_rule_full_history,
         'get_replication_rule': perm_get_replication_rule,
         'examine_replication_rule': perm_examine_replication_rule,
@@ -300,6 +302,18 @@ def perm_delete_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], sess
     :returns: True if account is allowed, otherwise False
     """
     return _can_write_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
+
+
+def perm_get_request_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can get the transfer request of a DID.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
 
 
 def perm_list_replication_rule_full_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
