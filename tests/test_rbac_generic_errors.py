@@ -17,13 +17,18 @@
 import re
 from typing import Any, Optional
 from urllib.parse import quote_plus
+from uuid import uuid4
 
 import pytest
 import requests
 
 from rucio.common.config import config_get
+from rucio.common.exception import AccessDenied
 from rucio.common.types import InternalScope
 from rucio.core.rule import list_rules
+from rucio.gateway import rule as gateway_rule
+
+from .rbac_common import RBACTestData, create_rbac_test_data
 
 FORBIDDEN = 403
 
@@ -100,6 +105,10 @@ def _post(path: str, account: str, **kwargs: Any) -> requests.Response:
     return _request('POST', path, account, **kwargs)
 
 
+def _delete(path: str, account: str, **kwargs: Any) -> requests.Response:
+    return _request('DELETE', path, account, **kwargs)
+
+
 def _scope_name_path(resource: str, did: str, *suffix: str) -> str:
     scope, name = did.split(':', 1)
     return '/'.join(['', resource, quote_plus(scope), quote_plus(name), *suffix])
@@ -114,6 +123,16 @@ def _get_rule_id(name: str, vo: str, user: str = 'alice') -> str:
     rules = list(list_rules(filters={'scope': scope, 'name': name}))
     assert rules, f'No replication rule found for {user}:{name}'
     return rules[0]['id']
+
+
+def _name(did: str) -> str:
+    return did.split(':', 1)[1]
+
+
+@pytest.fixture(scope='module')
+def rbac_data(vo) -> RBACTestData:
+    """Data crossing the 'alice' and 'root' scopes, see `tests/rbac_common.py`."""
+    return create_rbac_test_data(vo)
 
 
 def _context_placeholders(response: requests.Response) -> dict[str, Optional[str]]:
@@ -183,10 +202,26 @@ def _did_scope_from_request_context(response: requests.Response) -> tuple[Option
     if not isinstance(path, str):
         return None, None
 
-    did_endpoint_match = re.match(r'^/dids/([^/]+)/([^/]+)/(status|rules|meta|dids|files|parents|associated_rules|history)$', path)
+    did_endpoint_match = re.match(r'^/dids/([^/]+)/([^/]+)/(status|rules|meta|dids|files|parents|associated_rules|history|follow)$', path)
     if did_endpoint_match:
         scope = did_endpoint_match.group(1)
         name = did_endpoint_match.group(2)
+        return f'{scope}:{name}', scope
+
+    scope_endpoint_match = re.match(r'^/dids/([^/]+)/$', path)
+    if scope_endpoint_match:
+        return None, scope_endpoint_match.group(1)
+
+    archive_match = re.match(r'^/archives/([^/]+)/([^/]+)/files$', path)
+    if archive_match:
+        scope = archive_match.group(1)
+        name = archive_match.group(2)
+        return f'{scope}:{name}', scope
+
+    request_match = re.match(r'^/requests/(?:history/)?([^/]+)/([^/]+)/[^/]+$', path)
+    if request_match:
+        scope = request_match.group(1)
+        name = request_match.group(2)
         return f'{scope}:{name}', scope
 
     lock_replica_match = re.match(r'^/(locks|replicas)/([^/]+)/([^/]+)(?:/|$)', path)
@@ -419,6 +454,29 @@ def _assert_generic_error_chain(responses: list[tuple[requests.Response, str]], 
         print(f'{_ANSI_GREEN}{"-" * 96}{_ANSI_RESET}')
 
 
+def _assert_same_filtered_response(responses: list[tuple[requests.Response, str]], summary_label: str) -> None:
+    """
+    For endpoints which filter their response instead of denying the request: an item hidden by the
+    RBAC must be indistinguishable from an item which does not exist, so every response must succeed
+    with the very same body.
+    """
+    assert len(responses) >= 2, 'Need at least two requests for pairwise comparison'
+    reference_response, reference_description = responses[0]
+    for response, description in responses:
+        if response.status_code != 200 or response.text != reference_response.text:
+            pytest.fail(
+                f'Filtered response mismatch.\n'
+                f'  Request 1: {reference_description} -> HTTP {reference_response.status_code}: {reference_response.text!r}\n'
+                f'  Request 2: {description} -> HTTP {response.status_code}: {response.text!r}\n'
+                f'{_format_request_context_pair(reference_response, response)}'
+            )
+
+    print(f'{_ANSI_GREEN}PASS summary [{summary_label}]{_ANSI_RESET}')
+    for response, description in responses:
+        context = _request_context_values(response)
+        print(f'{_ANSI_GREEN}  - {description}: {context["method"]} {context["path"]} -> {context["status_code"]} {response.text!r}{_ANSI_RESET}')
+
+
 class TestDID:
     def test_bulk_list_files(self):
         cases = [
@@ -484,11 +542,76 @@ class TestDID:
         ]
         _assert_generic_error_chain(responses, 'TestDID.test_get_metadata_bulk')
 
-    def test_get_users_following_did(self):
-        pytest.skip("Filtering Test: query followers of a DID owned by alice and verify root/alice access, bob denial, and the response for an unknown scope or DID.")
+    def test_get_users_following_did(self, rbac_data):
+        cases = [
+            ('other account', 'alice:alice_ds', 'bob'),
+            ('unauthorized scope', rbac_data.dataset_r, 'alice'),
+            ('bad scope', 'non_existing_scope:alice_ds', 'alice'),
+            ('bad scope other account', 'non_existing_scope:alice_ds', 'bob'),
+            ('missing DID other account', 'alice:non_existing_ds', 'bob'),
+        ]
+        responses = [
+            (_get(_did_path(did, 'follow'), account), f'followers [{case_id}] for {did} as {account}')
+            for case_id, did, account in cases
+        ]
+        _assert_generic_error_chain(responses, 'TestDID.test_get_users_following_did')
 
-    def test_list_archive_content(self):
-        pytest.skip("Filtering Test: list the files in an archive by scope and name, verifying results are filtered for an unauthorized scope and covering unknown scope/DID behavior.")
+    def test_add_did_to_followed(self, rbac_data):
+        cases = [
+            ('other account', 'alice:alice_ds', 'bob'),
+            ('unauthorized scope', rbac_data.dataset_r, 'alice'),
+            ('bad scope', 'non_existing_scope:alice_ds', 'alice'),
+            ('bad scope other account', 'non_existing_scope:alice_ds', 'bob'),
+            ('missing DID other account', 'alice:non_existing_ds', 'bob'),
+        ]
+        responses = [
+            (_post(_did_path(did, 'follow'), account, json={'account': account}), f'follow [{case_id}] {did} as {account}')
+            for case_id, did, account in cases
+        ]
+        _assert_generic_error_chain(responses, 'TestDID.test_add_did_to_followed')
+
+    def test_delete_metadata(self, rbac_data):
+        cases = [
+            ('other account', rbac_data.dataset_a, 'bob'),
+            ('unauthorized scope', rbac_data.dataset_r, 'alice'),
+            ('bad scope', 'non_existing_scope:alice_ds', 'alice'),
+            ('bad scope other account', 'non_existing_scope:alice_ds', 'bob'),
+            ('missing DID other account', 'alice:non_existing_ds', 'bob'),
+        ]
+        responses = [
+            (_delete(_did_path(did, 'meta'), account, params={'key': 'rbac_test_key'}), f'delete metadata [{case_id}] of {did} as {account}')
+            for case_id, did, account in cases
+        ]
+        _assert_generic_error_chain(responses, 'TestDID.test_delete_metadata')
+
+    def test_create_did_sample(self, rbac_data):
+        # the output scope is readable and writable by alice in every case, only the sampled collection varies
+        cases = [
+            ('unauthorized scope', rbac_data.dataset_r),
+            ('bad scope', 'non_existing_scope:%s' % _name(rbac_data.dataset_r)),
+            ('missing DID in unauthorized scope', 'root:non_existing_ds'),
+        ]
+        responses = []
+        for case_id, did in cases:
+            input_scope, input_name = did.split(':', 1)
+            payload = {'input_scope': input_scope, 'input_name': input_name, 'output_scope': 'alice',
+                       'output_name': 'rbac_sample_%s' % uuid4().hex[:12], 'nbfiles': 1}
+            responses.append((_post('/dids/sample', 'alice', json=payload), f'sample [{case_id}] of {did} as alice'))
+        _assert_generic_error_chain(responses, 'TestDID.test_create_did_sample')
+
+    def test_list_archive_content(self, rbac_data):
+        cases = [
+            ('other account', rbac_data.archive, 'bob'),
+            ('unauthorized scope', 'root:%s' % _name(rbac_data.archive), 'alice'),
+            ('bad scope', 'non_existing_scope:%s' % _name(rbac_data.archive), 'alice'),
+            ('bad scope other account', 'non_existing_scope:%s' % _name(rbac_data.archive), 'bob'),
+            ('missing archive other account', 'alice:non_existing_archive.zip', 'bob'),
+        ]
+        responses = [
+            (_get(_scope_name_path('archives', did, 'files'), account), f'archive content [{case_id}] for {did} as {account}')
+            for case_id, did, account in cases
+        ]
+        _assert_generic_error_chain(responses, 'TestDID.test_list_archive_content')
 
     def test_list_content(self):
         cases = [
@@ -542,7 +665,7 @@ class TestDID:
         _assert_generic_error_chain(responses, 'TestDID.test_list_files')
 
     def test_list_new_dids(self):
-        pytest.skip("Filtering Test: list newly created DIDs and verify that returned DIDs are filtered according to each account's readable scopes.")
+        pytest.skip("No request to compare: GET /dids/new takes no scope and only filters its response, see test_rbac_restapi.py::TestDID::test_list_new_dids.")
 
     def test_list_parent_dids(self):
         cases = [
@@ -558,7 +681,30 @@ class TestDID:
         _assert_generic_error_chain(responses, 'TestDID.test_list_parent_dids')
 
     def test_scope_list(self):
-        pytest.skip("Filtering Test: retrieve a DID by scope and verify results for readable and unreadable scopes; cover an unknown scope and DID.")
+        cases = [
+            ('other account', 'alice', 'bob'),
+            ('unauthorized scope', 'root', 'alice'),
+            ('bad scope', 'non_existing_scope', 'alice'),
+            ('bad scope other account', 'non_existing_scope', 'bob'),
+        ]
+        responses = [
+            (_get(f'/dids/{scope}/', account), f'scope list [{case_id}] for {scope} as {account}')
+            for case_id, scope, account in cases
+        ]
+        _assert_generic_error_chain(responses, 'TestDID.test_scope_list')
+
+    def test_scope_list_by_name(self, rbac_data):
+        cases = [
+            ('other account', 'alice', _name(rbac_data.dataset_a), 'bob'),
+            ('unauthorized scope', 'root', _name(rbac_data.dataset_r), 'alice'),
+            ('bad scope', 'non_existing_scope', _name(rbac_data.dataset_a), 'alice'),
+            ('missing DID other account', 'alice', 'non_existing_ds', 'bob'),
+        ]
+        responses = [
+            (_get(f'/dids/{scope}/', account, params={'name': name}), f'scope list [{case_id}] for {scope}:{name} as {account}')
+            for case_id, scope, name, account in cases
+        ]
+        _assert_generic_error_chain(responses, 'TestDID.test_scope_list_by_name')
 
 
 class TestLOCK:
@@ -588,7 +734,7 @@ class TestLOCK:
         _assert_generic_error_chain(responses, 'TestLOCK.test_get_dataset_locks_bulk')
 
     def test_get_dataset_locks_by_rse(self):
-        pytest.skip("Filtering Test: list locks at an RSE and verify that lock records for DIDs in unreadable scopes are filtered.")
+        pytest.skip("No request to compare: GET /locks/<rse> takes no scope and only filters its response, see test_rbac_restapi.py::TestLOCK::test_get_dataset_locks_by_rse.")
 
     def test_get_dataset_locks_for_rule_id(self, vo):
         cases = [
@@ -612,13 +758,13 @@ class TestREPLICA:
         pytest.skip("Filtering Test: list the bad-replica summary and verify that bad replicas from unauthorized scopes are filtered from regular-account results.")
 
     def test_get_did_from_pfns(self):
-        pytest.skip("Filtering Test: resolve PFNs to DIDs and verify that returned DIDs are filtered according to the caller's readable scopes.")
+        pytest.skip("No request to compare: POST /replicas/dids takes no scope and only filters its response, see test_rbac_restapi.py::TestREPLICA::test_get_did_from_pfns.")
 
     def test_get_suspicious_files(self):
-        pytest.skip("Filtering Test: list suspicious files and verify filtering of files belonging to unauthorized scopes, with root retaining access to all results.")
+        pytest.skip("No request to compare: GET /replicas/suspicious takes no scope and only filters its response, see test_rbac_restapi.py::TestREPLICA::test_get_suspicious_files.")
 
     def test_list_bad_replicas_status(self):
-        pytest.skip("Filtering Test: list bad-replica states and verify filtering of replicas belonging to scopes the caller cannot read.")
+        pytest.skip("No request to compare: GET /replicas/bad/states takes no scope and only filters its response, see test_rbac_restapi.py::TestREPLICA::test_list_bad_replicas_status.")
 
     def test_list_dataset_replicas(self):
         cases = [
@@ -659,7 +805,7 @@ class TestREPLICA:
         _assert_generic_error_chain(responses, 'TestREPLICA.test_list_dataset_replicas_vp')
 
     def test_list_datasets_per_rse(self):
-        pytest.skip("Filtering Test: list datasets at an RSE and verify that datasets from unauthorized scopes are filtered for a regular account.")
+        pytest.skip("No request to compare: GET /replicas/rse/<rse> takes no scope and only filters its response, see test_rbac_restapi.py::TestREPLICA::test_list_datasets_per_rse.")
 
     def test_list_replicas(self):
         cases = [
@@ -728,11 +874,41 @@ class TestRULE:
         ]
         _assert_generic_error_chain(responses, 'TestRULE.test_list_replication_rule_full_history')
 
-    def test_list_replication_rule_history(self):
-        pytest.skip("Permission Test: retrieve a rule's history by rule_id and verify access based on the rule's DID scope, including a rule visible only to root and an unknown rule.")
+    def test_list_replication_rule_history(self, vo, rbac_data):
+        # GET /rules/<rule_id>/history is shadowed by the DID history route GET /rules/<scope>/<name>/history,
+        # so the gateway is called directly and the errors it raises are compared instead of HTTP responses
+        cases = [
+            ('alice-readable rule bob', rbac_data.rule_a, 'bob'),
+            ('root-owned rule alice', rbac_data.rule_r, 'alice'),
+            ('root-owned rule bob', rbac_data.rule_r, 'bob'),
+            ('nonexistent rule alice', 'non-existent-rule-id', 'alice'),
+            ('nonexistent rule bob', 'non-existent-rule-id', 'bob'),
+        ]
+        signatures = {}
+        for case_id, rule_id, account in cases:
+            try:
+                list(gateway_rule.list_replication_rule_history(rule_id, issuer=account, vo=vo))
+                pytest.fail(f'rule history [{case_id}] as {account} was allowed, expected AccessDenied.')
+            except AccessDenied as error:
+                message = str(error).replace(rule_id, '{rule_id}').replace('Account %s ' % account, 'Account {account} ')
+                signatures[case_id] = (type(error).__name__, message)
+        if len(set(signatures.values())) != 1:
+            pytest.fail('Rule history errors differ between cases:\n' + '\n'.join(f'  {case_id}: {signature}' for case_id, signature in signatures.items()))
 
-    def test_list_replication_rules(self):
-        pytest.skip("Filtering Test: list replication rules by account, DID, or subscription and verify filtering of rules associated with unreadable scopes.")
+    def test_list_replication_rules(self, rbac_data):
+        # the rules on an unreadable DID are hidden: listing them answers like listing the rules of a DID which does not exist
+        cases = [
+            ('unauthorized scope', {'scope': 'root', 'name': _name(rbac_data.dataset_r)}, 'alice'),
+            ('unauthorized scope other account', {'scope': 'root', 'name': _name(rbac_data.dataset_r)}, 'bob'),
+            ('other account', {'scope': 'alice', 'name': _name(rbac_data.dataset_a)}, 'bob'),
+            ('bad scope', {'scope': 'non_existing_scope', 'name': _name(rbac_data.dataset_r)}, 'alice'),
+            ('missing DID', {'scope': 'alice', 'name': 'non_existing_ds'}, 'alice'),
+        ]
+        responses = [
+            (_get('/rules/', account, params=filters), f'list rules [{case_id}] as {account}')
+            for case_id, filters, account in cases
+        ]
+        _assert_same_filtered_response(responses, 'TestRULE.test_list_replication_rules')
 
 
 class TestOPENDATA:
@@ -744,11 +920,20 @@ class TestOPENDATA:
 
 
 class TestREQUEST:
-    def test_get_request_by_did(self):
-        pytest.skip("Permission Test: retrieve a transfer request for a DID as root, the owning account, and an unauthorized account.")
-
-    def test_get_request_history_by_did(self):
-        pytest.skip("Permission Test: retrieve request history for a DID at an RSE as root, the owning account, and an unauthorized account.")
+    @pytest.mark.parametrize('prefix', ['/requests', '/requests/history'], ids=['request', 'request history'])
+    def test_get_request_by_did(self, prefix):
+        cases = [
+            ('other account', 'alice:file1.png', 'MOCK-POSIX', 'bob'),
+            ('bad scope', 'non_existing_scope:file1.png', 'MOCK-POSIX', 'alice'),
+            ('bad scope other account', 'non_existing_scope:file1.png', 'MOCK-POSIX', 'bob'),
+            ('missing DID other account', 'alice:non_existing_file.png', 'MOCK-POSIX', 'bob'),
+            ('missing RSE other account', 'alice:file1.png', 'NON_EXISTING_RSE', 'bob'),
+        ]
+        responses = []
+        for case_id, did, rse, account in cases:
+            scope, name = did.split(':', 1)
+            responses.append((_get(f'{prefix}/{scope}/{name}/{rse}', account), f'get request [{case_id}] for {did} at {rse} as {account}'))
+        _assert_generic_error_chain(responses, f'TestREQUEST.test_get_request_by_did[{prefix}]')
 
     def test_list_requests(self):
         pytest.skip("Ambiguous: list transfer requests and determine whether records for unreadable DID scopes are filtered or access is denied.")
@@ -759,13 +944,18 @@ class TestREQUEST:
 
 class TestSCOPE:
     def test_get_scopes(self):
-        pytest.skip("Filtering Test: list scopes owned by an account and verify that a regular account sees only permitted scope records.")
+        # an account whose scopes are all unreadable answers like an account which owns no scope
+        responses = [(_get(f'/scopes/{owner}/scopes', 'bob'), f'scopes of {owner} as bob') for owner in ('alice', 'root')]
+        for response, description in responses:
+            if response.status_code != 404:
+                pytest.fail(f'{description} returned HTTP {response.status_code}, expected 404.\n{_format_request_context(response)}')
+        _assert_same_generic_error(*responses[0], *responses[1])
 
     def test_list_scopes(self):
-        pytest.skip("Filtering Test: list all scopes and verify that results for a regular account contain only readable scopes.")
+        pytest.skip("No request to compare: GET /scopes/ takes no scope and only filters its response, see test_rbac_restapi.py::TestSCOPE::test_list_scopes.")
 
     def test_list_scopes_with_account(self):
-        pytest.skip("Filtering Test: list scopes together with their owning accounts and verify filtering of scopes unavailable to the caller.")
+        pytest.skip("No request to compare: GET /scopes/owner/ takes no scope and only filters its response, see test_rbac_restapi.py::TestSCOPE::test_list_scopes_with_account.")
 
 
 class TestSUBSCRIPTION:
@@ -777,3 +967,34 @@ class TestSUBSCRIPTION:
 
     def test_list_subscriptions(self):
         pytest.skip("Filtering Test: list subscriptions and verify filtering based on the scopes in each subscription's DID filter and generated rules.")
+
+
+class TestLIFETIMEEXCEPTION:
+    def test_add_exception(self, rbac_data):
+        cases = [
+            ('other account', rbac_data.dataset_a, 'bob'),
+            ('unauthorized scope', rbac_data.dataset_r, 'alice'),
+            ('bad scope', 'non_existing_scope:alice_ds', 'alice'),
+            ('bad scope other account', 'non_existing_scope:alice_ds', 'bob'),
+            ('missing DID other account', 'alice:non_existing_ds', 'bob'),
+        ]
+        responses = []
+        for case_id, did, account in cases:
+            scope, name = did.split(':', 1)
+            payload = {'dids': [{'scope': scope, 'name': name}], 'pattern': None, 'comments': 'RBAC test', 'expires_at': None}
+            responses.append((_post('/lifetime_exceptions/', account, json=payload), f'add lifetime exception [{case_id}] for {did} as {account}'))
+        _assert_generic_error_chain(responses, 'TestLIFETIMEEXCEPTION.test_add_exception')
+
+    def test_get_exception(self, rbac_data):
+        # the exception of an unreadable DID is hidden: getting it answers like getting an exception which does not exist
+        cases = [
+            ('unauthorized scope', rbac_data.exception_r, 'alice'),
+            ('unauthorized scope other account', rbac_data.exception_r, 'bob'),
+            ('other account', rbac_data.exception_a, 'bob'),
+            ('missing exception', str(uuid4()), 'alice'),
+        ]
+        responses = [
+            (_get(f'/lifetime_exceptions/{exception_id}', account), f'get lifetime exception [{case_id}] as {account}')
+            for case_id, exception_id, account in cases
+        ]
+        _assert_same_filtered_response(responses, 'TestLIFETIMEEXCEPTION.test_get_exception')

@@ -31,19 +31,28 @@
 # DIDs:
 #   'alice:alice_ds', 'alice:alice_ds2', 'alice:file1.png', 'alice:file2.png' and 'root:file1' exist,
 #   with replication rules registered for some of them (see `_get_rule_id`).
+# The response filtering tests additionally rely on the cross-scope data of the `rbac_data` fixture,
+# which is created once for this module (see `tests/rbac_common.py`).
 
 import json
 import shutil
 from typing import Any
 from urllib.parse import quote_plus
+from uuid import uuid4
 
 import pytest
 import requests
 
 from rucio.common.config import config_get
-from rucio.common.types import InternalScope
+from rucio.common.exception import AccessDenied, RuleNotFound
+from rucio.common.types import InternalAccount, InternalScope
+from rucio.core.did import remove_did_from_followed
 from rucio.core.rule import list_rules
+from rucio.gateway import replica as gateway_replica
+from rucio.gateway import rule as gateway_rule
 from rucio.gateway.did import list_files
+
+from .rbac_common import RBACTestData, create_rbac_test_data
 
 # HTTP status code the REST API returns
 OK = 200
@@ -170,6 +179,32 @@ def _get_file_guid(name, scope='alice', user='alice') -> str:
     return files[0]['guid']
 
 
+def _stream(response: requests.Response) -> list[Any]:
+    """Decode a response body holding one JSON document per line (application/x-json-stream)."""
+    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
+
+
+def _dids(items: list[Any]) -> set[str]:
+    """The 'scope:name' of every item of a response."""
+    return {'%s:%s' % (item['scope'], item['name']) for item in items}
+
+
+def _name(did: str) -> str:
+    return did.split(':', 1)[1]
+
+
+def _assert_visible(response: requests.Response, expected: set[str], decode=_stream, key=_dids) -> None:
+    """Assert that the response succeeded and returned exactly the `expected` items, e.g. the `expected` 'scope:name' DIDs."""
+    assert response.status_code == OK, response.text
+    assert key(decode(response)) == expected
+
+
+@pytest.fixture(scope='module')
+def rbac_data(vo) -> RBACTestData:
+    """Data crossing the 'alice' and 'root' scopes, to observe the RBAC response filtering (see `tests/rbac_common.py`)."""
+    return create_rbac_test_data(vo)
+
+
 class TestDID:
 
     @pytest.mark.parametrize(
@@ -249,11 +284,70 @@ class TestDID:
             post = _post(path, account, json=payload)
             assert post.status_code == expected_status and (len(post.text) == 0) == empty_response  # equivalent to NOT_FOUND
 
-    def test_get_users_following_did(self):
-        pytest.skip("Filtering Test: query followers of a DID owned by alice and verify root/alice access, bob denial, and the response for an unknown scope or DID.")
+    @pytest.mark.parametrize(
+        ('did', 'expected_statuses', 'empty_accounts'),
+        [
+            ('alice:alice_ds', [OK, OK, FORBIDDEN], []),
+            ('non_existing_scope:alice_ds', [OK, FORBIDDEN, FORBIDDEN], ['root']),
+            ('alice:non_existing_ds', [OK, OK, FORBIDDEN], ['root', 'alice']),
+        ],
+        ids=['normal case', 'non-existing scope', 'non-existing DID'],
+    )
+    def test_get_users_following_did(self, did, expected_statuses, empty_accounts):
+        """RBAC(USER): GET /dids/<scope>/<name>/follow is restricted by scope, an unknown DID simply has no follower"""
+        path = _did_path(did, 'follow')
+        for account, expected_status in zip(['root', 'alice', 'bob'], expected_statuses):
+            response = _get(path, account)
+            assert response.status_code == expected_status
+            if account in empty_accounts:
+                assert len(response.text) == 0  # equivalent to NOT_FOUND
 
-    def test_list_archive_content(self):
-        pytest.skip("Filtering Test: list the files in an archive by scope and name, verifying results are filtered for an unauthorized scope and covering unknown scope/DID behavior.")
+    def test_add_did_to_followed(self, vo, rbac_data):
+        """RBAC(USER): POST /dids/<scope>/<name>/follow requires read access on the scope of the followed DID"""
+        cases = [
+            ('bob', rbac_data.dataset_a, FORBIDDEN),
+            ('alice', rbac_data.dataset_r, FORBIDDEN),
+            ('alice', 'non_existing_scope:%s' % _name(rbac_data.dataset_a), FORBIDDEN),
+            ('alice', rbac_data.dataset_a, CREATED),
+            ('root', rbac_data.dataset_r, CREATED),
+        ]
+        try:
+            for account, did, expected_status in cases:
+                assert _post(_did_path(did, 'follow'), account, json={'account': account}).status_code == expected_status
+
+            # the followers are then only listed to the accounts which can read the DID
+            _assert_visible(_get(_did_path(rbac_data.dataset_a, 'follow'), 'root'), {'alice'}, key=lambda users: {user['user'] for user in users})
+            _assert_visible(_get(_did_path(rbac_data.dataset_a, 'follow'), 'alice'), {'alice'}, key=lambda users: {user['user'] for user in users})
+            assert _get(_did_path(rbac_data.dataset_a, 'follow'), 'bob').status_code == FORBIDDEN
+            assert _get(_did_path(rbac_data.dataset_r, 'follow'), 'alice').status_code == FORBIDDEN
+        finally:
+            for account, did in (('alice', rbac_data.dataset_a), ('root', rbac_data.dataset_r)):
+                scope, name = did.split(':', 1)
+                remove_did_from_followed(scope=InternalScope(scope, vo=vo), name=name, account=InternalAccount(account, vo=vo))
+
+    def test_list_archive_content(self, rbac_data):
+        """RBAC(USER): GET /archives/<scope>/<name>/files is restricted by scope, and constituents in unreadable scopes are filtered out"""
+        path = _scope_name_path('archives', rbac_data.archive, 'files')
+        _assert_visible(_get(path, 'root'), {rbac_data.constituent_a, rbac_data.constituent_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.constituent_a})
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+    @pytest.mark.parametrize(
+        ('did', 'expected_statuses', 'empty_accounts'),
+        [
+            ('non_existing_scope:archive.zip', [OK, FORBIDDEN, FORBIDDEN], ['root']),
+            ('alice:non_existing_archive.zip', [OK, OK, FORBIDDEN], ['root', 'alice']),
+        ],
+        ids=['non-existing scope', 'non-existing archive'],
+    )
+    def test_list_archive_content_unknown(self, did, expected_statuses, empty_accounts):
+        """RBAC(USER): GET /archives/<scope>/<name>/files of an unknown archive is empty for whom may read the scope, denied otherwise"""
+        path = _scope_name_path('archives', did, 'files')
+        for account, expected_status in zip(['root', 'alice', 'bob'], expected_statuses):
+            response = _get(path, account)
+            assert response.status_code == expected_status
+            if account in empty_accounts:
+                assert len(response.text) == 0  # equivalent to NOT_FOUND
 
     @pytest.mark.parametrize(
         ('did', 'accounts', 'expected_statuses'),
@@ -318,8 +412,16 @@ class TestDID:
         for account, expected_status in zip(['root', 'alice', 'bob'], expected_statuses):
             assert _get(path, account).status_code == expected_status
 
-    def test_list_new_dids(self):
-        pytest.skip("Filtering Test: list newly created DIDs and verify that returned DIDs are filtered according to each account's readable scopes.")
+    def test_list_new_dids(self, rbac_data):
+        """RBAC(USER): GET /dids/new only returns the new DIDs in scopes the caller can read"""
+        assert _get('/dids/new', 'root').status_code == OK
+        for account in ('alice', 'bob'):
+            # the scopes an account can read, by ownership or through its roles, are the ones GET /scopes/ lists to it (see TestSCOPE)
+            readable_scopes = set(_get('/scopes/', account).json())
+            assert 'root' not in readable_scopes
+            response = _get('/dids/new', account)
+            assert response.status_code == OK
+            assert {did['scope'] for did in _stream(response)} <= readable_scopes
 
     @pytest.mark.parametrize(
         ('did', 'expected_statuses', 'empty_accounts'),
@@ -338,8 +440,107 @@ class TestDID:
             if account in empty_accounts:
                 assert len(response.text) == 0  # equivalent to NOT_FOUND
 
-    def test_scope_list(self):
-        pytest.skip("Filtering Test: retrieve a DID by scope and verify results for readable and unreadable scopes; cover an unknown scope and DID.")
+    @pytest.mark.parametrize(
+        ('scope', 'expected_statuses', 'empty_root'),
+        [
+            ('alice', [OK, OK, FORBIDDEN], False),
+            ('non_existing_scope', [OK, FORBIDDEN, FORBIDDEN], True),
+        ],
+        ids=['normal case', 'non-existing scope'],
+    )
+    def test_scope_list(self, scope, expected_statuses, empty_root):
+        """RBAC(USER): GET /dids/<scope>/ is restricted by scope"""
+        for account, expected_status in zip(['root', 'alice', 'bob'], expected_statuses):
+            response = _get(f'/dids/{scope}/', account)
+            assert response.status_code == expected_status
+            if account == 'root' and empty_root:
+                assert len(response.text) == 0  # equivalent to NOT_FOUND
+
+    def test_scope_list_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /dids/<scope>/?name=<name> filters out the content of the DID which lives in unreadable scopes"""
+        path = '/dids/alice/'
+        params = {'name': _name(rbac_data.dataset_a)}
+        _assert_visible(_get(path, 'root', params=params), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_get(path, 'alice', params=params), {rbac_data.file_a})
+        assert _get(path, 'bob', params=params).status_code == FORBIDDEN
+
+    def test_scope_list_unknown_did(self):
+        """RBAC(USER): GET /dids/<scope>/?name=<name> of an unknown DID is only reported as such to whom may read the scope"""
+        params = {'name': 'non_existing_ds'}
+        for account, expected_status in zip(['root', 'alice', 'bob'], [NOT_FOUND, NOT_FOUND, FORBIDDEN]):
+            assert _get('/dids/alice/', account, params=params).status_code == expected_status
+
+    def test_list_content_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /dids/<scope>/<name>/dids filters out the content which lives in unreadable scopes"""
+        path = _did_path(rbac_data.dataset_a, 'dids')
+        _assert_visible(_get(path, 'root'), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.file_a})
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+    def test_list_content_history_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /dids/<scope>/<name>/dids/history filters out the former content which lives in unreadable scopes"""
+        path = _did_path(rbac_data.history_dataset, 'dids', 'history')
+        _assert_visible(_get(path, 'root'), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.file_a})
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+    @pytest.mark.parametrize('long', [False, True], ids=['short format', 'long format'])
+    def test_list_dids_recursive_filters_other_scopes(self, rbac_data, long):
+        """RBAC(USER): GET /dids/<scope>/dids/search?recursive=True does not descend into the content which lives in unreadable scopes"""
+        path = '/dids/alice/dids/search'
+        params = {'name': _name(rbac_data.dataset_a), 'type': 'all', 'recursive': True, 'long': long}
+        # the short format only yields names, the long format yields the scope along with the name
+        key = _dids if long else set
+        expected = {
+            'root': {rbac_data.dataset_a, rbac_data.file_a, rbac_data.file_r},
+            'alice': {rbac_data.dataset_a, rbac_data.file_a},
+        }
+        for account, dids in expected.items():
+            _assert_visible(_get(path, account, params=params), dids if long else {_name(did) for did in dids}, key=key)
+        assert _get(path, 'bob', params=params).status_code == FORBIDDEN
+
+    def test_list_files_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /dids/<scope>/<name>/files filters out the files which live in unreadable scopes"""
+        path = _did_path(rbac_data.dataset_a, 'files')
+        _assert_visible(_get(path, 'root'), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.file_a})
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+    def test_bulk_list_files_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): POST /dids/bulkfiles filters out the files which live in unreadable scopes"""
+        scope, name = rbac_data.dataset_a.split(':', 1)
+        payload = {'dids': [{'scope': scope, 'name': name}]}
+        _assert_visible(_post('/dids/bulkfiles', 'root', json=payload), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_post('/dids/bulkfiles', 'alice', json=payload), {rbac_data.file_a})
+        assert _post('/dids/bulkfiles', 'bob', json=payload).status_code == FORBIDDEN
+
+    def test_list_parent_dids_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /dids/<scope>/<name>/parents filters out the parents which live in unreadable scopes"""
+        path = _did_path(rbac_data.file_a, 'parents')
+        _assert_visible(_get(path, 'root'), {rbac_data.dataset_a, rbac_data.dataset_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.dataset_a})
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
+    def test_delete_metadata(self, rbac_data):
+        """RBAC(USER): DELETE /dids/<scope>/<name>/meta requires write access on the scope of the DID"""
+        params = {'key': 'rbac_test_key'}
+        for account, did in (('bob', rbac_data.dataset_a), ('alice', rbac_data.dataset_r), ('alice', 'non_existing_scope:%s' % _name(rbac_data.dataset_a))):
+            assert _delete(_did_path(did, 'meta'), account, params=params).status_code == FORBIDDEN
+        # the key does not exist, and not every metadata plugin supports deleting a key: anything but a denial will do
+        for account, did in (('alice', rbac_data.dataset_a), ('root', rbac_data.dataset_r)):
+            assert _delete(_did_path(did, 'meta'), account, params=params).status_code != FORBIDDEN
+
+    def test_create_did_sample(self, rbac_data):
+        """RBAC(USER): POST /dids/sample requires read access on the scope of the sampled collection"""
+        def payload(input_did: str, output_scope: str) -> dict[str, Any]:
+            input_scope, input_name = input_did.split(':', 1)
+            return {'input_scope': input_scope, 'input_name': input_name, 'output_scope': output_scope,
+                    'output_name': 'rbac_sample_%s' % uuid4().hex[:12], 'nbfiles': 1}
+
+        assert _post('/dids/sample', 'alice', json=payload(rbac_data.dataset_r, 'alice')).status_code == FORBIDDEN
+        assert _post('/dids/sample', 'alice', json=payload('non_existing_scope:%s' % _name(rbac_data.dataset_r), 'alice')).status_code == FORBIDDEN
+        assert _post('/dids/sample', 'bob', json=payload(rbac_data.dataset_a, 'alice')).status_code == FORBIDDEN
+        assert _post('/dids/sample', 'alice', json=payload(rbac_data.dataset_a, 'alice')).status_code == CREATED
 
 
 class TestLOCK:
@@ -378,8 +579,20 @@ class TestLOCK:
             if account in empty_accounts:
                 assert len(response.text) == 0  # equivalent to NOT_FOUND
 
-    def test_get_dataset_locks_by_rse(self):
-        pytest.skip("Filtering Test: list locks at an RSE and verify that lock records for DIDs in unreadable scopes are filtered.")
+    def test_get_dataset_locks_by_rse(self, rbac_data):
+        """RBAC(USER): GET /locks/<rse> filters out the dataset locks of DIDs which live in unreadable scopes"""
+        path = f'/locks/{rbac_data.rse}'
+        params = {'did_type': 'dataset'}
+        _assert_visible(_get(path, 'root', params=params), {rbac_data.dataset_a, rbac_data.dataset_r})
+        _assert_visible(_get(path, 'alice', params=params), {rbac_data.dataset_a})
+        _assert_visible(_get(path, 'bob', params=params), set())
+
+    def test_get_replica_locks_for_rule_id_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /rules/<rule_id>/locks filters out the locks of files which live in unreadable scopes"""
+        path = f'/rules/{rbac_data.rule_a}/locks'
+        _assert_visible(_get(path, 'root'), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.file_a})
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
     @pytest.mark.parametrize(
         ('rule_owner', 'expected_statuses'),
@@ -412,14 +625,43 @@ class TestREPLICA:
     def test_get_bad_replicas_summary(self):
         pytest.skip("Filtering Test: list the bad-replica summary and verify that bad replicas from unauthorized scopes are filtered from regular-account results.")
 
-    def test_get_did_from_pfns(self):
-        pytest.skip("Filtering Test: resolve PFNs to DIDs and verify that returned DIDs are filtered according to the caller's readable scopes.")
+    def test_get_did_from_pfns(self, vo, rbac_data, monkeypatch):
+        """RBAC(USER): the DIDs a list of PFNs resolves to are filtered according to the caller's readable scopes
 
-    def test_get_suspicious_files(self):
-        pytest.skip("Filtering Test: list suspicious files and verify filtering of files belonging to unauthorized scopes, with root retaining access to all results.")
+        POST /replicas/dids resolves the PFNs with the SRM protocol only (https://github.com/rucio/rucio/issues/8567),
+        which the test RSE does not provide, so the gateway is called directly with the PFN resolution mocked.
+        """
+        def resolved_pfns(**kwargs: Any):
+            for pfn, did in ((rbac_data.pfn_a, rbac_data.file_a), (rbac_data.pfn_r, rbac_data.file_r)):
+                scope, name = did.split(':', 1)
+                yield {pfn: {'scope': InternalScope(scope, vo=vo), 'name': name}}
 
-    def test_list_bad_replicas_status(self):
-        pytest.skip("Filtering Test: list bad-replica states and verify filtering of replicas belonging to scopes the caller cannot read.")
+        monkeypatch.setattr(gateway_replica.replica, 'get_did_from_pfns', resolved_pfns)
+        expected = {'root': {rbac_data.pfn_a, rbac_data.pfn_r}, 'alice': {rbac_data.pfn_a}, 'bob': set()}
+        for account, pfns in expected.items():
+            results = gateway_replica.get_did_from_pfns(issuer=account, pfns=[rbac_data.pfn_a, rbac_data.pfn_r], rse=rbac_data.rse, vo=vo)
+            assert {pfn for result in results for pfn in result} == pfns
+
+    def test_get_suspicious_files(self, rbac_data):
+        """RBAC(USER): GET /replicas/suspicious filters out the suspicious files which live in unreadable scopes"""
+        params = {'rse_expression': rbac_data.rse}
+        _assert_visible(_get('/replicas/suspicious', 'root', params=params), {rbac_data.file_a, rbac_data.file_r}, decode=requests.Response.json)
+        _assert_visible(_get('/replicas/suspicious', 'alice', params=params), {rbac_data.file_a}, decode=requests.Response.json)
+        _assert_visible(_get('/replicas/suspicious', 'bob', params=params), set(), decode=requests.Response.json)
+
+    def test_list_bad_replicas_status(self, rbac_data):
+        """RBAC(USER): GET /replicas/bad/states filters out the bad replicas which live in unreadable scopes"""
+        params = {'state': 'S', 'rse': rbac_data.rse}
+        _assert_visible(_get('/replicas/bad/states', 'root', params=params), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_get('/replicas/bad/states', 'alice', params=params), {rbac_data.file_a})
+        _assert_visible(_get('/replicas/bad/states', 'bob', params=params), set())
+
+    def test_list_bad_replicas_status_pfns(self, rbac_data):
+        """RBAC(USER): GET /replicas/bad/states?list_pfns=True does not disclose the PFNs, which embed scope and name, of unreadable bad replicas"""
+        params = {'state': 'S', 'rse': rbac_data.rse, 'list_pfns': True}
+        _assert_visible(_get('/replicas/bad/states', 'root', params=params), {rbac_data.pfn_a, rbac_data.pfn_r}, key=set)
+        _assert_visible(_get('/replicas/bad/states', 'alice', params=params), {rbac_data.pfn_a}, key=set)
+        _assert_visible(_get('/replicas/bad/states', 'bob', params=params), set(), key=set)
 
     @pytest.mark.parametrize(
         ('did', 'expected_statuses', 'empty_accounts'),
@@ -472,8 +714,31 @@ class TestREPLICA:
             if account in empty_accounts:
                 assert len(response.text) == 0  # equivalent to NOT_FOUND
 
-    def test_list_datasets_per_rse(self):
-        pytest.skip("Filtering Test: list datasets at an RSE and verify that datasets from unauthorized scopes are filtered for a regular account.")
+    def test_list_datasets_per_rse(self, rbac_data):
+        """RBAC(USER): GET /replicas/rse/<rse> filters out the dataset replicas of datasets which live in unreadable scopes"""
+        path = f'/replicas/rse/{rbac_data.rse}'
+        _assert_visible(_get(path, 'root'), {rbac_data.dataset_a, rbac_data.dataset_r})
+        _assert_visible(_get(path, 'alice'), {rbac_data.dataset_a})
+        _assert_visible(_get(path, 'bob'), set())
+
+    def test_list_replicas_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): POST /replicas/list filters out the replicas of the files of a collection which live in unreadable scopes"""
+        scope, name = rbac_data.dataset_a.split(':', 1)
+        payload = {'dids': [{'scope': scope, 'name': name}]}
+        _assert_visible(_post('/replicas/list', 'root', json=payload), {rbac_data.file_a, rbac_data.file_r})
+        _assert_visible(_post('/replicas/list', 'alice', json=payload), {rbac_data.file_a})
+        assert _post('/replicas/list', 'bob', json=payload).status_code == FORBIDDEN
+
+    def test_list_replicas_resolve_parents_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): POST /replicas/list with resolve_parents does not disclose the parents which live in unreadable scopes"""
+        scope, name = rbac_data.file_a.split(':', 1)
+        payload = {'dids': [{'scope': scope, 'name': name}], 'resolve_parents': True}
+
+        def parents(replicas: list[Any]) -> set[str]:
+            return {parent for replica in replicas for parent in replica['parents']}
+
+        _assert_visible(_post('/replicas/list', 'root', json=payload), {rbac_data.dataset_a, rbac_data.dataset_r}, key=parents)
+        _assert_visible(_post('/replicas/list', 'alice', json=payload), {rbac_data.dataset_a}, key=parents)
 
     @pytest.mark.parametrize(
         ('payload', 'expected_statuses', 'empty_accounts'),
@@ -596,23 +861,111 @@ class TestRULE:
             if account in empty_accounts:
                 assert len(response.text) == 0  # equivalent to NOT_FOUND
 
-    def test_list_replication_rule_history(self):
-        pytest.skip("Permission Test: retrieve a rule's history by rule_id and verify access based on the rule's DID scope, including a rule visible only to root and an unknown rule.")
+    @pytest.mark.parametrize(
+        ('rule', 'expected_statuses'),
+        [
+            ('rule_a', [OK, OK, FORBIDDEN]),
+            ('rule_r', [OK, FORBIDDEN, FORBIDDEN]),
+            (None, [NOT_FOUND, FORBIDDEN, FORBIDDEN]),
+        ],
+        ids=['owner-readable rule', 'root-only rule', 'non-existing rule'],
+    )
+    def test_list_replication_rule_history(self, vo, rbac_data, rule, expected_statuses):
+        """RBAC(USER): the history of a rule is restricted by the scope of the DID of the rule
 
-    def test_list_replication_rules(self):
-        pytest.skip("Filtering Test: list replication rules by account, DID, or subscription and verify filtering of rules associated with unreadable scopes.")
+        GET /rules/<rule_id>/history is shadowed by the DID history route GET /rules/<scope>/<name>/history,
+        which answers 400 as it cannot parse a rule id into a scope and a name, so the gateway is called directly.
+        """
+        rule_id = getattr(rbac_data, rule) if rule else 'non-existent-rule-id'
+        for account, expected_status in zip(['root', 'alice', 'bob'], expected_statuses):
+            try:
+                list(gateway_rule.list_replication_rule_history(rule_id, issuer=account, vo=vo))
+                status = OK
+            except AccessDenied:
+                status = FORBIDDEN
+            except RuleNotFound:
+                status = NOT_FOUND
+            assert status == expected_status, f'{account} got {status} for rule {rule_id}'
+
+    def test_list_replication_rules(self, rbac_data):
+        """RBAC(USER): GET /rules/ filters out the rules on DIDs which live in unreadable scopes"""
+        params = {'rse_expression': rbac_data.rse}
+
+        def ids(rules: list[Any]) -> set[str]:
+            return {rule['id'] for rule in rules}
+
+        _assert_visible(_get('/rules/', 'root', params=params), {rbac_data.rule_a, rbac_data.rule_r}, key=ids)
+        _assert_visible(_get('/rules/', 'alice', params=params), {rbac_data.rule_a}, key=ids)
+        _assert_visible(_get('/rules/', 'bob', params=params), set(), key=ids)
+
+        # filtering on an unreadable scope answers like filtering on a scope which does not exist
+        for scope in ('root', 'non_existing_scope'):
+            _assert_visible(_get('/rules/', 'alice', params={'scope': scope, 'name': _name(rbac_data.dataset_r)}), set(), key=ids)
+
+    def test_list_replication_rules_of_account(self, rbac_data):
+        """RBAC(USER): GET /accounts/<account>/rules filters out the rules on DIDs which live in unreadable scopes"""
+        params = {'rse_expression': rbac_data.rse}
+
+        def ids(rules: list[Any]) -> set[str]:
+            return {rule['id'] for rule in rules}
+
+        _assert_visible(_get('/accounts/root/rules', 'root', params=params), {rbac_data.rule_r}, key=ids)
+        _assert_visible(_get('/accounts/root/rules', 'alice', params=params), set(), key=ids)
+
+    def test_list_associated_replication_rules_filters_other_scopes(self, rbac_data):
+        """RBAC(USER): GET /dids/<scope>/<name>/associated_rules filters out the rules set on parents which live in unreadable scopes"""
+        path = _did_path(rbac_data.file_a, 'associated_rules')
+
+        def ids(rules: list[Any]) -> set[str]:
+            return {rule['id'] for rule in rules}
+
+        _assert_visible(_get(path, 'root'), {rbac_data.rule_a, rbac_data.rule_r}, key=ids)
+        _assert_visible(_get(path, 'alice'), {rbac_data.rule_a}, key=ids)
+        assert _get(path, 'bob').status_code == FORBIDDEN
 
 
 class TestSCOPE:
-    def test_get_scopes(self):
-        pytest.skip("Filtering Test: list scopes owned by an account and verify that a regular account sees only permitted scope records.")
+    @pytest.mark.parametrize('path', ['/scopes/{account}/scopes', '/accounts/{account}/scopes/'], ids=['scopes endpoint', 'accounts endpoint'])
+    def test_get_scopes(self, path):
+        """RBAC(USER): the scopes of an account are only listed to the callers which can read them"""
+        for account in ('root', 'alice'):
+            response = _get(path.format(account=account), account)
+            assert response.status_code == OK
+            assert account in response.json()
+
+        # an account whose scopes are all unreadable looks like an account without any scope
+        for caller, owner in (('alice', 'root'), ('bob', 'alice'), ('bob', 'root')):
+            response = _get(path.format(account=owner), caller)
+            assert response.status_code in (OK, NOT_FOUND)
+            if response.status_code == OK:
+                assert owner not in response.json()
 
     def test_list_scopes(self):
-        pytest.skip("Filtering Test: list all scopes and verify that results for a regular account contain only readable scopes.")
+        """RBAC(USER): GET /scopes/ only lists the scopes the caller can read"""
+        scopes = {account: set(_get('/scopes/', account).json()) for account in ('root', 'alice', 'bob')}
+        assert {'root', 'alice'} <= scopes['root']
+        assert 'alice' in scopes['alice'] and 'root' not in scopes['alice']
+        assert not {'root', 'alice'} & scopes['bob']
 
     def test_list_scopes_with_account(self):
-        pytest.skip("Filtering Test: list scopes together with their owning accounts and verify filtering of scopes unavailable to the caller.")
+        """RBAC(USER): GET /scopes/owner/ only lists the scopes the caller can read, along with their owner"""
+        scopes = {account: {entry['scope'] for entry in _get('/scopes/owner/', account).json()} for account in ('root', 'alice', 'bob')}
+        assert {'root', 'alice'} <= scopes['root']
+        assert 'alice' in scopes['alice'] and 'root' not in scopes['alice']
+        assert not {'root', 'alice'} & scopes['bob']
 
+
+class TestLIFETIMEEXCEPTION:
+    pytestmark = pytest.mark.skip(reason="Temporarily skipped")
+
+    def test_add_exception(self, rbac_data):
+        pass
+
+    def test_list_exceptions(self, rbac_data):
+        pass
+
+    def test_get_exception(self, rbac_data):
+        pass
 
 class TestSUBSCRIPTION:
     def test_get_subscription_by_id(self):
@@ -633,24 +986,27 @@ class TestROLE:
     # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
 
     def test_list_roles(self):
-        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description and locked state"""
+        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description, assignable and protected state"""
         response = _get('/roles/', 'root')
         assert response.status_code == OK
         roles = response.json()
         assert 'data-scientist' in [role['role'] for role in roles]
-        # every entry carries a description, which is null for roles without one, and a locked state
-        assert all({'description', 'locked'} <= set(role) for role in roles)
+        # every entry carries a description, which is null for roles without one, and its assignable and protected states
+        assert all({'description', 'assignable', 'protected'} <= set(role) for role in roles)
         for account in ('alice', 'bob'):
             assert _get('/roles/', account).status_code == FORBIDDEN
 
     def test_list_role_permissions(self):
         """RBAC(ADMIN/USER): GET /roles/<role>/permissions is visible to root/admin and to accounts holding that role"""
+        def covers_atlas(scope_pattern: str) -> bool:
+            # a scope pattern is either a scope, or a prefix closed by the '*' wildcard
+            return scope_pattern == 'atlas' or (scope_pattern.endswith('*') and 'atlas'.startswith(scope_pattern[:-1]))
+
         for account in ('root', 'alice'):
             response = _get(_role_path('data-scientist', 'permissions'), account)
             assert response.status_code == OK
-            granted = {(perm['scope'], perm['operation']) for perm in response.json()}
-            assert ('atlas', 'read') in granted
-            assert ('atlas', 'write') in granted
+            granted = {perm['operation'] for perm in response.json() if covers_atlas(perm['scope_pattern'])}
+            assert {'read', 'write'} <= granted
         assert _get(_role_path('data-scientist', 'permissions'), 'bob').status_code == FORBIDDEN
 
     def test_list_role_accounts(self):
@@ -678,23 +1034,24 @@ class TestROLE:
     # --- write operations are refused for every non-admin caller, whatever their own roles ----
 
     @pytest.mark.parametrize(
-        ('method', 'path'),
+        ('method', 'path', 'payload'),
         [
-            ('POST', _role_path('tmp_probe')),
-            ('DELETE', _role_path('data-scientist')),
-            ('POST', _role_path('data-scientist', 'permissions', 'read', 'atlas')),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas')),
-            ('POST', _account_roles_path('bob', 'data-scientist')),
-            ('DELETE', _account_roles_path('alice', 'data-scientist')),
-            ('POST', _role_path('data-scientist', 'lock')),
-            ('POST', _role_path('data-scientist', 'unlock')),
+            ('POST', _role_path('tmp_probe'), None),
+            ('DELETE', _role_path('data-scientist'), None),
+            ('POST', _role_path('data-scientist', 'permissions', 'read', 'atlas'), None),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas'), None),
+            ('POST', _account_roles_path('bob', 'data-scientist'), None),
+            ('DELETE', _account_roles_path('alice', 'data-scientist'), None),
+            ('PUT', _role_path('data-scientist'), {'protected': True}),
+            ('PUT', _role_path('data-scientist'), {'assignable': False}),
         ],
-        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'lock role', 'unlock role'],
+        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'protect role', 'make role unassignable'],
     )
-    def test_non_admin_cannot_write_role_data(self, method, path):
+    def test_non_admin_cannot_write_role_data(self, method, path, payload):
         """RBAC(USER): role management write operations are restricted to root/admin regardless of the caller's own RBAC assignments"""
+        kwargs = {'json': payload} if payload is not None else {}
         for account in ('alice', 'bob'):
-            assert _request(method, path, account).status_code == FORBIDDEN
+            assert _request(method, path, account, **kwargs).status_code == FORBIDDEN
 
     # --- lifecycle & error-code scenarios, run by root -----------------------------------
 
@@ -721,18 +1078,20 @@ class TestROLE:
             _delete(_account_roles_path('alice', role_name), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
-    def test_delete_role_refused_while_it_has_permissions(self):
-        """RBAC(ADMIN): a role that still has permissions defined cannot be deleted until they are removed"""
+    def test_delete_role_drops_its_permissions(self):
+        """RBAC(ADMIN): the permissions of a role do not keep it from being deleted, they are deleted along with it"""
         role_name = 'tmp'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
             assert _post(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == CREATED
-            assert _delete(_role_path(role_name), 'root').status_code == CONFLICT
-            assert _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == OK
-        finally:
-            # the permission has to go first: a role that still has permissions cannot be deleted
-            _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root')
             assert _delete(_role_path(role_name), 'root').status_code == OK
+            assert _get(_role_path(role_name, 'permissions'), 'root').status_code == NOT_FOUND
+
+            # a role created again under the same name does not inherit the permissions of the deleted one
+            assert _post(_role_path(role_name), 'root').status_code == CREATED
+            assert _get(_role_path(role_name, 'permissions'), 'root').json() == []
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
 
     def test_force_delete_role_in_use(self):
         """RBAC(ADMIN): a forced deletion removes a role still assigned to accounts and carrying permissions, along with those references"""
@@ -757,43 +1116,44 @@ class TestROLE:
         for account in ('alice', 'bob'):
             assert _delete(_role_path('data-scientist'), account, json={'force': True}).status_code == FORBIDDEN
 
-    def test_lock_and_unlock_role(self):
-        """RBAC(ADMIN): a role is unlocked on creation, locking and unlocking toggles the flag, repeating it succeeds with a warning"""
-        role_name = 'tmp'
+    def _role_state(self, role_name: str) -> dict[str, Any]:
+        """Read the listing entry of `role_name` back from GET /roles/."""
+        roles = _get('/roles/', 'root').json()
+        return [role for role in roles if role['role'] == role_name][0]
 
-        def _locked() -> bool:
-            roles = _get('/roles/', 'root').json()
-            return [role['locked'] for role in roles if role['role'] == role_name][0]
-
+    def test_protect_and_unprotect_role(self):
+        """RBAC(ADMIN): a role is created assignable and unprotected, and a protected role is only altered or deleted when forced"""
+        role_name = 'tmp_protected'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            # a new role is not locked, so that an external entity (e.g. an identity
-            # provider) may still alter it
-            assert _locked() is False
+            state = self._role_state(role_name)
+            assert state['assignable'] is True and state['protected'] is False
 
-            response = _post(_role_path(role_name, 'lock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' not in response.json()
-            assert _locked() is True
+            assert _request('PUT', _role_path(role_name), 'root', json={'protected': True}).status_code == OK
+            assert self._role_state(role_name)['protected'] is True
 
-            # locking an already locked role is a warning, not an error
-            response = _post(_role_path(role_name, 'lock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' in response.json()
-            assert _locked() is True
+            # a protected role can neither be altered nor deleted unless forced
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': 'nope'}).status_code == FORBIDDEN
+            assert _delete(_role_path(role_name), 'root').status_code == FORBIDDEN
+            assert _request('PUT', _role_path(role_name), 'root', json={'description': 'forced', 'force': True}).status_code == OK
+            assert self._role_state(role_name)['description'] == 'forced'
 
-            response = _post(_role_path(role_name, 'unlock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' not in response.json()
-            assert _locked() is False
-
-            # unlocking an already unlocked role is a warning, not an error
-            response = _post(_role_path(role_name, 'unlock'), 'root')
-            assert response.status_code == OK
-            assert 'warning' in response.json()
-            assert _locked() is False
+            # changing the protected state itself is always allowed, so that a role can be unprotected
+            assert _request('PUT', _role_path(role_name), 'root', json={'protected': False}).status_code == OK
+            assert self._role_state(role_name)['protected'] is False
         finally:
-            assert _delete(_role_path(role_name), 'root').status_code == OK
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    def test_role_assignable_state(self):
+        """RBAC(ADMIN): the assignable state of a role can be toggled via PUT"""
+        role_name = 'tmp_assignable'
+        assert _post(_role_path(role_name), 'root', json={'assignable': False}).status_code == CREATED
+        try:
+            assert self._role_state(role_name)['assignable'] is False
+            assert _request('PUT', _role_path(role_name), 'root', json={'assignable': True}).status_code == OK
+            assert self._role_state(role_name)['assignable'] is True
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
 
     # --- expiry date of a role assigned to an account -----------------------------------
 
@@ -940,12 +1300,12 @@ class TestROLE:
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_invalid_role_description_is_rejected(self):
-        """RBAC(ADMIN): a missing or non-string description is refused with 400"""
+        """RBAC(ADMIN): a non-string description is refused with 400, while a PUT without any field leaves the role untouched"""
         role_name = 'tmp_invalid_description'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            # 'description' is mandatory on PUT, so that clearing it has to be explicit
-            assert _request('PUT', _role_path(role_name), 'root', json={}).status_code == BAD_REQUEST
+            # PUT only changes the fields it is given, so that clearing the description has to be explicit
+            assert _request('PUT', _role_path(role_name), 'root', json={}).status_code == OK
             assert _request('PUT', _role_path(role_name), 'root', json={'description': 42}).status_code == BAD_REQUEST
             assert self._role_description(role_name) is None
         finally:
@@ -978,10 +1338,7 @@ class TestROLE:
             ('POST', _account_roles_path('non_existing_account', 'data-scientist')),
             ('DELETE', _account_roles_path('bob', 'data-scientist')),
             ('POST', _role_path('non_existing_role', 'permissions', 'read', 'atlas')),
-            ('POST', _role_path('data-scientist', 'permissions', 'read', 'non_existing_scope')),
             ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'root')),
-            ('POST', _role_path('non_existing_role', 'lock')),
-            ('POST', _role_path('non_existing_role', 'unlock')),
         ],
         ids=[
             'delete non-existing role',
@@ -989,15 +1346,29 @@ class TestROLE:
             'assign role to non-existing account',
             'unassign role not assigned to account',
             'add permission to non-existing role',
-            'add permission on non-existing scope',
             'remove permission not granted to role',
-            'lock non-existing role',
-            'unlock non-existing role',
         ],
     )
     def test_operations_on_nonexistent_targets_return_not_found(self, method, path):
-        """RBAC(ADMIN): referencing a non-existing role, account, scope or assignment returns 404"""
+        """RBAC(ADMIN): referencing a non-existing role, account or assignment returns 404"""
         assert _request(method, path, 'root').status_code == NOT_FOUND
+
+    def test_permission_on_scope_pattern_without_existing_scope(self):
+        """RBAC(ADMIN): a scope pattern is not checked against the existing scopes, so that it also covers scopes created later"""
+        role_name = 'tmp_future_scope'
+        scope_pattern = 'rbac_future_%s' % uuid4().hex[:12]
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'read', scope_pattern), 'root').status_code == CREATED
+            permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
+            assert [(perm['operation'], perm['scope_pattern']) for perm in permissions] == [('read', scope_pattern)]
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    @pytest.mark.parametrize('scope_pattern', ['*atlas', 'at*las', 'at**'], ids=['leading wildcard', 'embedded wildcard', 'several wildcards'])
+    def test_invalid_scope_pattern_is_rejected(self, scope_pattern):
+        """RBAC(ADMIN): a '*' is only accepted on its own or closing a scope pattern"""
+        assert _post(_role_path('data-scientist', 'permissions', 'read', quote_plus(scope_pattern)), 'root').status_code == BAD_REQUEST
 
     @pytest.mark.parametrize(
         'path',
