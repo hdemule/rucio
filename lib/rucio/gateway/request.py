@@ -54,7 +54,7 @@ def get_request_by_did(
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'scope': scope, 'name': name, 'rse': rse, 'rse_id': rse_id, 'issuer': issuer}
+        kwargs = {'scope': scope, 'name': name, 'rse': rse, 'issuer': issuer}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='get_request_by_did', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied(f'{issuer} cannot retrieve the request DID {scope}:{name} to RSE {rse}. {auth_result.message}')
@@ -85,7 +85,7 @@ def get_request_history_by_did(
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'scope': scope, 'name': name, 'rse': rse, 'rse_id': rse_id, 'issuer': issuer}
+        kwargs = {'scope': scope, 'name': name, 'rse': rse, 'issuer': issuer}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='get_request_history_by_did', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied(f'{issuer} cannot retrieve the request DID {scope}:{name} to RSE {rse}. {auth_result.message}')
