@@ -234,7 +234,7 @@ class Scopes(ErrorHandlingMethodView):
             description: "Not acceptable"
         """
         try:
-            scopes = get_scopes(account, vo=request.environ['vo'])
+            scopes = get_scopes(account, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except AccountNotFound as error:
             return generate_http_error_flask(404, error)
 
