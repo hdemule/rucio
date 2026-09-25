@@ -70,11 +70,21 @@ def list_dids(
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope))
 
+        # A recursive listing descends into the content of the collections, which may live in other scopes.
+        # The short format only yields bare names, so a recursive listing is always done in the long format
+        # to be able to filter it by scope, and brought back to bare names afterwards if needed.
         result = did.list_dids(scope=internal_scope, filters=filters, did_type=did_type, ignore_case=ignore_case,
-                               limit=limit, offset=offset, long=long, recursive=recursive, session=session)
+                               limit=limit, offset=offset, long=long or recursive, recursive=recursive, session=session)
+
+        if recursive:
+            internal_issuer = InternalAccount(issuer, vo=vo)
+            result = role.filter_iterable_by_scope_access(result, account=internal_issuer, session=session)
 
         for d in result:
-            yield gateway_update_return_dict(d, session=session)
+            if recursive and not long:
+                yield d['name']
+            else:
+                yield gateway_update_return_dict(d, session=session)
 
 
 def add_did(
@@ -479,6 +489,7 @@ def list_files(
 
 
 def scope_list(
+    issuer: str,
     scope: str,
     name: Optional[str] = None,
     recursive: bool = False,
@@ -487,6 +498,7 @@ def scope_list(
     """
     List data identifiers in a scope.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param recursive: boolean, True or False.
@@ -494,11 +506,21 @@ def scope_list(
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='scope_list', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope))
+
+        can_access = role.scope_access_checker(account=internal_issuer, session=session)
         dids = did.scope_list(internal_scope, name=name, recursive=recursive, session=session)
 
         for d in dids:
+            # the content of a DID may live in other scopes, and so may the parent it was reached through
+            if not can_access(d['scope']) or (d['parent'] is not None and not can_access(d['parent']['scope'])):
+                continue
+
             ret_did = deepcopy(d)
             ret_did['scope'] = ret_did['scope'].external
             if ret_did['parent'] is not None:
@@ -820,6 +842,11 @@ def create_did_sample(
         if not auth_result.allowed:
             raise AccessDenied('Account %s can not bulk add data identifier. %s' % (issuer, auth_result.message))
 
+        # the sample is made of the files of the input collection, so they must be readable
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': input_scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s cannot create a sample of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, input_scope, input_name))
+
         input_internal_scope = InternalScope(input_scope, vo=vo)
         output_internal_scope = InternalScope(output_scope, vo=vo)
 
@@ -883,6 +910,7 @@ def list_archive_content(
 
 
 def add_did_to_followed(
+    issuer: str,
     scope: str,
     name: str,
     account: str,
@@ -891,6 +919,7 @@ def add_did_to_followed(
     """
     Mark a DID as followed by the given account
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param account: The account owner.
@@ -898,10 +927,15 @@ def add_did_to_followed(
     internal_scope = InternalScope(scope, vo=vo)
     internal_account = InternalAccount(account, vo=vo)
     with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='add_did_to_followed', kwargs={'scope': scope, 'name': name, 'account': account}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s cannot follow data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
+
         return did.add_did_to_followed(scope=internal_scope, name=name, account=internal_account, session=session)
 
 
 def add_dids_to_followed(
+    issuer: str,
     dids: 'Iterable[Mapping[str, Any]]',
     account: str,
     vo: str = DEFAULT_VO
@@ -909,11 +943,18 @@ def add_dids_to_followed(
     """
     Bulk mark datasets as followed
 
+    :param issuer: The issuer account.
     :param dids: A list of DIDs.
     :param account: The account owner.
     """
+    dids = list(dids)  # Convert to list to allow multiple iterations
     internal_account = InternalAccount(account, vo=vo)
     with db_session(DatabaseOperationType.WRITE) as session:
+        for entry in dids:
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='add_did_to_followed', kwargs={'scope': str(entry['scope']), 'name': entry['name'], 'account': account}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot follow data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, entry['scope'], entry['name']))
+
         return did.add_dids_to_followed(dids=dids, account=internal_account, session=session)
 
 
