@@ -2736,10 +2736,13 @@ def add_dids_to_followed(
                 and_(models.DataIdentifier.scope == did['scope'],
                      models.DataIdentifier.name == did['name'])
             )
-            did = session.execute(stmt).scalar_one()
+            try:
+                followed_did = session.execute(stmt).scalar_one()
+            except NoResultFound as error:
+                raise exception.DataIdentifierNotFound("Data identifier '%s:%s' not found" % (did['scope'], did['name'])) from error
             # Add the queried to the followed table.
-            new_did_followed = models.DidFollowed(scope=did.scope, name=did.name, account=account,
-                                                  did_type=did.did_type)
+            new_did_followed = models.DidFollowed(scope=followed_did.scope, name=followed_did.name, account=account,
+                                                  did_type=followed_did.did_type)
 
             new_did_followed.save(session=session, flush=False)
 
