@@ -1184,7 +1184,7 @@ class Rules(ErrorHandlingMethodView):
         filters.update(request.args)
         try:
             def generate(vo: str) -> "Iterator[str]":
-                for rule in list_replication_rules(filters=filters, vo=vo):
+                for rule in list_replication_rules(issuer=request.environ['issuer'], filters=filters, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
