@@ -146,7 +146,7 @@ class Scope(ErrorHandlingMethodView):
         """
         try:
             def generate(name, recursive, vo):
-                for did in scope_list(scope=scope, name=name, recursive=recursive, vo=vo):
+                for did in scope_list(issuer=request.environ['issuer'], scope=scope, name=name, recursive=recursive, vo=vo):
                     yield render_json(**did) + '\n'
 
             recursive = param_get_bool(request.args, 'recursive', default=False)
@@ -158,6 +158,8 @@ class Scope(ErrorHandlingMethodView):
                     vo=request.environ['vo']
                 )
             )
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1988,7 +1990,7 @@ class Rules(ErrorHandlingMethodView):
 
             def generate(vo):
                 get_did(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo)
-                for rule in list_replication_rules({'scope': scope, 'name': name}, vo=vo):
+                for rule in list_replication_rules(issuer=request.environ['issuer'], filters={'scope': scope, 'name': name}, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
@@ -2201,7 +2203,7 @@ class SampleLegacy(ErrorHandlingMethodView):
         except (DuplicateContent, DataIdentifierAlreadyExists, UnsupportedOperation) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
         return 'Created', 201
 
@@ -2276,7 +2278,7 @@ class Sample(ErrorHandlingMethodView):
         except (DuplicateContent, DataIdentifierAlreadyExists, UnsupportedOperation) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
         return 'Created', 201
 
@@ -2490,11 +2492,13 @@ class Follow(ErrorHandlingMethodView):
         account = param_get(parameters, 'account')
 
         try:
-            add_did_to_followed(scope=scope, name=name, account=account, vo=request.environ['vo'])
+            add_did_to_followed(issuer=request.environ['issuer'], scope=scope, name=name, account=account, vo=request.environ['vo'])
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
+
+        return 'Created', 201
 
     def delete(self, scope_name):
         """
