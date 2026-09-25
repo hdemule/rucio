@@ -20,7 +20,7 @@ from rucio.common.exception import AccessDenied, RucioException, RuleNotFound
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import gateway_update_return_dict
-from rucio.core import rule
+from rucio.core import role, rule
 from rucio.db.sqla.constants import DatabaseOperationType
 from rucio.db.sqla.session import db_session
 from rucio.gateway.permission import has_permission
@@ -178,12 +178,17 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
 
 
 def list_replication_rules(
+    issuer: str,
     filters: Optional[dict[str, Any]] = None,
     vo: str = DEFAULT_VO,
 ) -> "Iterator[dict[str, Any]]":
     """
     Lists replication rules based on a filter.
 
+    Only the rules on DIDs in scopes the issuer can read are returned. Filtering on a scope
+    the issuer cannot read thus returns nothing, as filtering on a scope which does not exist would.
+
+    :param issuer: The issuing account of this operation.
     :param filters: dictionary of attributes by which the results should be filtered.
     :param vo: The VO to act on.
     """
@@ -201,10 +206,11 @@ def list_replication_rules(
     else:
         account = '*'
     filters['account'] = InternalAccount(account=account, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         rules = rule.list_rules(filters, session=session)
-        for r in rules:
+        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -226,6 +232,21 @@ def list_replication_rule_history(
             auth_result = has_permission(issuer=issuer, vo=vo, action='access_rule_vo', kwargs=kwargs, session=session)
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not access rules at other VOs. %s' % (issuer, auth_result.message))
+
+        # the history outlives the rule, so the scope is also looked up in the rule history
+        try:
+            scope = rule.get_rule_scope(rule_id, session=session)
+        except (RuleNotFound, RucioException):  # TODO: RucioException comes from badly formatted rule_id, so we should probably handle that differently.
+            session.rollback()
+            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
+                raise RuleNotFound('Rule %s not found' % rule_id)
+            else:
+                raise AccessDenied(_access_denied_message(rule_id, issuer))
+
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_history', kwargs={'scope': str(scope)}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied(_access_denied_message(rule_id, issuer))
+
         return rule.list_rule_history(rule_id, session=session)
 
 
@@ -267,13 +288,15 @@ def list_associated_replication_rules_for_file(
     :param vo: The VO to act on.
     """
     scope_internal = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot retrieve associated replication rules of data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
+        # the rules protecting a file may be set on its parent collections, which may live in other scopes
         rules = rule.list_associated_rules_for_file(scope=scope_internal, name=name, session=session)
-        for r in rules:
+        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session):
             yield gateway_update_return_dict(r, session=session)
 
 
