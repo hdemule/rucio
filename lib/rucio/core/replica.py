@@ -250,6 +250,7 @@ def list_bad_replicas_status(
     list_pfns: Optional[bool] = False,
     vo: str = DEFAULT_VO,
     *,
+    account: Optional[InternalAccount] = None,
     session: "Session"
 ) -> list[dict[str, Any]]:
     """
@@ -260,6 +261,8 @@ def list_bad_replicas_status(
     :param older_than:  datetime object to select bad replicas older than this date.
     :param limit: The maximum number of replicas returned.
     :param vo: The VO to find replicas from.
+    :param account: If given, only the replicas in scopes this account may read are returned.
+                    The filtering happens before the PFNs are resolved, since a PFN embeds the scope and name of the replica.
     :param session: The database session in use.
     """
     result = []
@@ -288,6 +291,9 @@ def list_bad_replicas_status(
                 result.append({'scope': badfile.scope, 'name': badfile.name, 'type': DIDType.FILE})
             else:
                 result.append({'scope': badfile.scope, 'name': badfile.name, 'rse': get_rse_name(rse_id=badfile.rse_id, session=session), 'rse_id': badfile.rse_id, 'state': badfile.state, 'created_at': badfile.created_at, 'updated_at': badfile.updated_at})
+    if account is not None:
+        from rucio.core.role import filter_iterable_by_scope_access
+        result = list(filter_iterable_by_scope_access(result, account=account, session=session))
     if list_pfns:
         reps = []
         for rep in list_replicas(result, schemes=None, unavailable=False, request_id=None, ignore_availability=True, all_states=True, session=session):
