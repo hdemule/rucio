@@ -29,7 +29,7 @@ from rucio.db.sqla import models
 from rucio.db.sqla.constants import DatabaseOperationType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from sqlalchemy.orm import Session
 
@@ -528,6 +528,43 @@ def has_scope_access(
     )
 
 
+def scope_access_checker(
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: "DatabaseOperationType" = DatabaseOperationType.READ,
+) -> "Callable[[Optional[InternalScope]], bool]":
+    """
+    Build a callable telling whether the account may access a given scope in terms of RBAC, ownership and admin/root privileges.
+
+    Access decisions are cached for the lifetime of the returned callable, so each
+    distinct scope is checked at most once. This is meant for responses where the
+    scope is not stored under a single dictionary key (e.g. 'scope:name' strings or
+    nested dictionaries), for which :func:`filter_iterable_by_scope_access` does not fit.
+
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused.
+    """
+    access_by_scope: dict["InternalScope", bool] = {}
+
+    def _can_access(scope: "Optional[InternalScope]") -> bool:
+        if scope is None or not isinstance(scope, InternalScope):
+            return False
+
+        if scope not in access_by_scope:
+            access_by_scope[scope] = has_scope_access(
+                account=account,
+                scope=scope,
+                operation=operation,
+                session=session,
+            )
+        return access_by_scope[scope]
+
+    return _can_access
+
+
 def filter_iterable_by_scope_access(
     items: "Iterable[dict[str, Any]]",
     *,
@@ -549,21 +586,10 @@ def filter_iterable_by_scope_access(
     :param scope_keyword: The key in the item dictionaries that contains the associated scope.
     :returns: An iterator over the items that the account has access to.
     """
-    access_by_scope: dict["InternalScope", bool] = {}
+    can_access = scope_access_checker(account=account, session=session, operation=operation)
 
     for item in items:
-        scope = item.get(scope_keyword)
-        if scope is None or not isinstance(scope, InternalScope):
-            continue
-
-        if scope not in access_by_scope:
-            access_by_scope[scope] = has_scope_access(
-                account=account,
-                scope=scope,
-                operation=operation,
-                session=session,
-            )
-        if access_by_scope[scope]:
+        if can_access(item.get(scope_keyword)):
             yield item
 
 
