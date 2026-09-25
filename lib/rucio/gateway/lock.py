@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING, Any
 
 from rucio.common.constants import DEFAULT_VO
 from rucio.common.exception import AccessDenied, RucioException, RuleNotFound
-from rucio.common.types import InternalScope
+from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import gateway_update_return_dict
-from rucio.core import lock
+from rucio.core import lock, role
 from rucio.core import rule as core_rule
 from rucio.core.rse import get_rse_id
 from rucio.db.sqla.constants import DatabaseOperationType, DIDType
@@ -115,22 +115,25 @@ def get_dataset_locks_bulk(
 
 
 def get_dataset_locks_by_rse(
+    issuer: str,
     rse: str,
     vo: str = DEFAULT_VO,
 ) -> 'Iterator[dict[str, Any]]':
     """
     Get the dataset locks of an RSE.
 
+    :param issuer:         The account issuing the request.
     :param rse:            RSE name.
     :param vo:             The VO to act on.
     :return:               List of dicts {'rse_id': ..., 'state': ...}
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
         locks = lock.get_dataset_locks_by_rse_id(rse_id=rse_id, session=session)
 
-        for lock_object in locks:
+        for lock_object in role.filter_iterable_by_scope_access(locks, account=internal_issuer, session=session):
             yield gateway_update_return_dict(lock_object, session=session)
 
 
@@ -164,9 +167,10 @@ def get_replica_locks_for_rule_id(
         if not auth_result.allowed:
             raise AccessDenied(access_denied_message())
 
+        # a rule on a collection locks its files, which may live in other scopes than the collection
         locks = lock.get_replica_locks_for_rule_id(rule_id=rule_id, session=session)
 
-        for lock_object in locks:
+        for lock_object in role.filter_iterable_by_scope_access(locks, account=InternalAccount(issuer, vo=vo), session=session):
             if lock_object['scope'].vo != vo:  # rule is on a different VO, so don't return any locks
                 LOGGER.debug('rule id %s is not present on VO %s' % (rule_id, vo))
                 break
