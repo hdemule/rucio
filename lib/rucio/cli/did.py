@@ -18,7 +18,7 @@ import click
 from rich.text import Text
 from tabulate import tabulate
 
-from rucio.cli.utils import RichCLITheme, RichUtils, get_scope, scope_exists
+from rucio.cli.utils import RichCLITheme, RichUtils, get_scope
 from rucio.common.config import config_get
 from rucio.common.exception import InputValidationError, InvalidObject, RucioException
 from rucio.common.utils import chunks, parse_did_filter_from_string_fe
@@ -81,8 +81,6 @@ def list_(ctx: click.Context, did_pattern: str, recursive: bool, filter_: str, s
         except InvalidObject:
             scope = did_pattern
             name = '*'
-
-        scope_exists(ctx.obj.client, scope)
 
         if recursive and '*' in name:
             raise InputValidationError('Option recursive cannot be used with wildcards.')
