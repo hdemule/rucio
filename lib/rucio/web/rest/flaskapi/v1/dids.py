@@ -1623,9 +1623,11 @@ class Meta(ErrorHandlingMethodView):
 
         delete_key = request.args['key']
         try:
-            delete_metadata(scope=scope, name=name, key=delete_key, vo=vo)
+            delete_metadata(issuer=request.environ['issuer'], scope=scope, name=name, key=delete_key, vo=vo)
         except (KeyNotFound, DataIdentifierNotFound) as error:
             return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
         except NotImplementedError as error:
             return generate_http_error_flask(409, error, 'Feature not in current database')
 
@@ -2323,7 +2325,7 @@ class NewDIDs(ErrorHandlingMethodView):
             description: "Not acceptable"
         """
         def generate(_type, vo):
-            for did in list_new_dids(did_type=_type, vo=vo):
+            for did in list_new_dids(issuer=request.environ['issuer'], did_type=_type, vo=vo):
                 yield dumps(did, cls=APIEncoder) + '\n'
 
         type_param = request.args.get('type', default=None)
@@ -2431,12 +2433,14 @@ class Follow(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for user in get_users_following_did(scope=scope, name=name, vo=vo):
+                for user in get_users_following_did(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**user) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']), content_type='application/json')
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 

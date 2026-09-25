@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from flask import Flask, Response, request
 
 from rucio.common.constants import DEFAULT_VO, HTTPMethod
+from rucio.common.exception import AccessDenied
 from rucio.gateway.did import list_archive_content
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
 from rucio.web.rest.flaskapi.v1.common import ErrorHandlingMethodView, check_accept_header_wrapper_flask, generate_http_error_flask, parse_scope_name, response_headers, try_stream
@@ -78,12 +79,14 @@ class Archive(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ.get('vo'))
 
             def generate(vo: str) -> 'Iterator[str]':
-                for file in list_archive_content(scope=scope, name=name, vo=vo):
+                for file in list_archive_content(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield dumps(file) + '\n'
 
             return try_stream(generate(vo=request.environ.get('vo', DEFAULT_VO)))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 def blueprint() -> AuthenticatedBlueprint:
