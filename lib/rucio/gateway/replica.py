@@ -20,7 +20,7 @@ from rucio.common.constants import DEFAULT_VO, SuspiciousAvailability
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope, IPDict, ReplicaDict
 from rucio.common.utils import gateway_update_return_dict, invert_dict
-from rucio.core import replica, replica_sorter
+from rucio.core import replica, replica_sorter, role
 from rucio.core.did import find_files_with_missing_dids
 from rucio.core.rse import get_rse_id, get_rse_name
 from rucio.db.sqla.constants import BadFilesStatus, DatabaseOperationType
@@ -524,8 +524,9 @@ def list_dataset_replicas_vp(
             yield gateway_update_return_dict(r, session=session)
 
 
-def list_datasets_per_rse(rse: str, filters: Optional[dict[str, Any]] = None, limit: Optional[int] = None, vo: str = DEFAULT_VO) -> 'Iterator[dict[str, Any]]':
+def list_datasets_per_rse(issuer: str, rse: str, filters: Optional[dict[str, Any]] = None, limit: Optional[int] = None, vo: str = DEFAULT_VO) -> 'Iterator[dict[str, Any]]':
     """
+    :param issuer: The issuer account.
     :param scope: The scope of the dataset.
     :param name: The name of the dataset.
     :param filters: dictionary of attributes by which the results should be filtered.
@@ -536,12 +537,14 @@ def list_datasets_per_rse(rse: str, filters: Optional[dict[str, Any]] = None, li
     """
 
     filters = filters or {}
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
         if 'scope' in filters:
             filters['scope'] = InternalScope(filters['scope'], vo=vo)
-        for r in replica.list_datasets_per_rse(rse_id, filters=filters, limit=limit, session=session):
+        datasets = replica.list_datasets_per_rse(rse_id, filters=filters, limit=limit, session=session)
+        for r in role.filter_iterable_by_scope_access(datasets, account=internal_issuer, session=session):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -616,6 +619,7 @@ def add_bad_dids(
 
 
 def get_suspicious_files(
+        issuer: str,
         rse_expression: Optional[str],
         younger_than: Optional[datetime.datetime] = None,
         nattempts: Optional[int] = None,
@@ -623,16 +627,18 @@ def get_suspicious_files(
 ) -> list[dict[str, Any]]:
     """
     List the list of suspicious files on a list of RSEs
+    :param issuer: The issuer account.
     :param rse_expression: The RSE expression where the suspicious files are located
     :param younger_than: datetime object to select the suspicious replicas younger than this date.
     :param nattempts: The number of time the replicas have been declared suspicious
     :param vo: The VO to act on.
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         replicas = replica.get_suspicious_files(rse_expression=rse_expression, available_elsewhere=SuspiciousAvailability["ALL"].value,
                                                 younger_than=younger_than, nattempts=nattempts, filter_={'vo': vo}, session=session)
-        return [gateway_update_return_dict(r, session=session) for r in replicas]
+        return [gateway_update_return_dict(r, session=session) for r in role.filter_iterable_by_scope_access(replicas, account=internal_issuer, session=session)]
 
 
 def set_tombstone(
