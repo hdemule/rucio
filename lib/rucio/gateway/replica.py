@@ -50,6 +50,7 @@ def get_bad_replicas_summary(
 
 
 def list_bad_replicas_status(
+        issuer: str,
         state: Optional[BadFilesStatus] = BadFilesStatus.BAD,
         rse: Optional[str] = None,
         younger_than: Optional[datetime.datetime] = None,
@@ -59,6 +60,7 @@ def list_bad_replicas_status(
         vo: str = DEFAULT_VO):
     """
     List the bad file replicas history states. Method used by the rucio-ui.
+    :param issuer: The issuer account.
     :param state: The state of the file (SUSPICIOUS or BAD).
     :param rse: The RSE name.
     :param younger_than: datetime object to select bad replicas younger than this date.
@@ -67,13 +69,16 @@ def list_bad_replicas_status(
     :param vo: The VO to act on.
     """
     rse_id = None
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         if rse is not None:
             rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
+        # the replicas are filtered by scope in the core, before their PFNs are resolved when list_pfns is set
         replicas = replica.list_bad_replicas_status(state=state, rse_id=rse_id, younger_than=younger_than,
-                                                    older_than=older_than, limit=limit, list_pfns=list_pfns, vo=vo, session=session)
+                                                    older_than=older_than, limit=limit, list_pfns=list_pfns, vo=vo,
+                                                    account=internal_issuer, session=session)
         return [gateway_update_return_dict(r, session=session) for r in replicas]
 
 
@@ -205,6 +210,7 @@ def declare_suspicious_file_replicas(
 
 
 def get_did_from_pfns(
+        issuer: str,
         pfns: "Iterable[str]",
         rse: str,
         vo: str = DEFAULT_VO
@@ -212,16 +218,23 @@ def get_did_from_pfns(
     """
     Get the DIDs associated to a PFN on one given RSE
 
+    :param issuer: The issuer account.
     :param pfns: The list of PFNs.
     :param rse: The RSE name.
     :param vo: The VO to act on.
     :returns: A dictionary {pfn: {'scope': scope, 'name': name}}
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
+
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
+        can_access = role.scope_access_checker(account=internal_issuer, session=session)
         replicas = replica.get_did_from_pfns(pfns=pfns, rse_id=rse_id, vo=vo, session=session)
 
         for r in replicas:
+            # each item maps a single PFN to its DID, drop it if the DID is in a scope the issuer cannot read
+            if not all(can_access(did_['scope']) for did_ in r.values()):
+                continue
             for k in r.keys():
                 r[k]['scope'] = r[k]['scope'].external
             yield r
@@ -289,14 +302,22 @@ def list_replicas(
                                          resolve_archives=resolve_archives, resolve_parents=resolve_parents,
                                          nrandom=nrandom, updated_after=updated_after, by_rse_name=True, session=session)
 
+        # the requested collections may contain files, and the files may have parents, in other scopes
+        can_access = role.scope_access_checker(account=InternalAccount(issuer, vo=vo), session=session)
+
         for rep in replicas:
+            if not can_access(rep['scope']):
+                continue
+
             rep['scope'] = rep['scope'].external
             if 'parents' in rep:
                 new_parents = []
                 for p in rep['parents']:
                     scope, name = p.split(':')
-                    scope = InternalScope(scope, from_external=False).external
-                    new_parents.append('{}:{}'.format(scope, name))
+                    internal_parent_scope = InternalScope(scope, from_external=False)
+                    if not can_access(internal_parent_scope):
+                        continue
+                    new_parents.append('{}:{}'.format(internal_parent_scope.external, name))
                 rep['parents'] = new_parents
 
             yield rep
