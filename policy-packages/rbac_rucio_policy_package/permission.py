@@ -42,6 +42,9 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_content': perm_list_content,
         'list_content_history': perm_list_content_history,
         'list_files': perm_list_files,
+        'list_archive_content': perm_list_archive_content,
+        'get_users_following_did': perm_get_users_following_did,
+        'delete_metadata': perm_delete_metadata,
         'list_replication_rule_full_history': perm_list_replication_rule_full_history,
         'get_replication_rule': perm_get_replication_rule,
         'examine_replication_rule': perm_examine_replication_rule,
@@ -232,6 +235,43 @@ def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     :returns: True if account is allowed, otherwise False
     """
     return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
+
+
+def perm_list_archive_content(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the constituents of an archive.
+    ! Note: The constituents may live in other scopes, so the response is filtered as well.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
+
+
+def perm_get_users_following_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the accounts following a DID.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
+
+
+def perm_delete_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can delete a metadata key of a DID.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_write_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
 
 
 def perm_list_replication_rule_full_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
