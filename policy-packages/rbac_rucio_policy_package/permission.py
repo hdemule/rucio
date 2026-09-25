@@ -42,8 +42,10 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
         'list_content': perm_list_content,
         'list_content_history': perm_list_content_history,
         'list_files': perm_list_files,
+        'scope_list': perm_scope_list,
         'list_archive_content': perm_list_archive_content,
         'get_users_following_did': perm_get_users_following_did,
+        'add_did_to_followed': perm_add_did_to_followed,
         'delete_metadata': perm_delete_metadata,
         'list_replication_rule_full_history': perm_list_replication_rule_full_history,
         'get_replication_rule': perm_get_replication_rule,
@@ -237,6 +239,19 @@ def perm_list_files(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
 
 
+def perm_scope_list(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the DIDs (and their content) of a scope.
+    ! Note: The content of the DIDs may live in other scopes, so the response is filtered as well.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
+
+
 def perm_list_archive_content(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can list the constituents of an archive.
@@ -253,6 +268,19 @@ def perm_list_archive_content(issuer: "InternalAccount", kwargs: dict[str, Any],
 def perm_get_users_following_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can list the accounts following a DID.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _can_read_in_scope(issuer=issuer, scope=kwargs.get('scope'), session=session)
+
+
+def perm_add_did_to_followed(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can follow a DID. Following a DID sends its updates to the follower,
+    so it requires being able to read the scope of the DID.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
