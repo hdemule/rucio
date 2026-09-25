@@ -370,19 +370,6 @@ class JSONType(click.ParamType):
             self.fail(f"Invalid JSON: {e}", param, ctx)
 
 
-def scope_exists(client: 'Client', scope: str) -> None:
-    possible_scopes = client.list_scopes()
-    if not len(list(possible_scopes)):
-        raise ScopeNotFound
-    if isinstance(list(possible_scopes)[0], str):  # TODO Backwards Compat - Remove in future releases - #8125
-        scopes = possible_scopes
-    else:
-        scopes = [s['scope'] for s in possible_scopes]  # type: ignore
-
-    if scope not in scopes:  # type: ignore - handled by the if isinstance
-        raise ScopeNotFound
-
-
 def get_scope(did: str, client: Client) -> tuple[str, str]:
     try:
         scope, name = extract_scope(did)
