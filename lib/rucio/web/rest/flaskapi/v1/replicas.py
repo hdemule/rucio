@@ -822,7 +822,7 @@ class ReplicasDIDs(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for pfn in get_did_from_pfns(pfns, rse, vo=vo):
+                for pfn in get_did_from_pfns(issuer=request.environ['issuer'], pfns=pfns, rse=rse, vo=vo):
                     yield dumps(pfn) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
@@ -1207,7 +1207,7 @@ class BadReplicasStates(ErrorHandlingMethodView):
                 list_pfns = bool(params['list_pfns'][0])
 
         def generate(vo):
-            for row in list_bad_replicas_status(state=state, rse=rse, younger_than=younger_than,
+            for row in list_bad_replicas_status(issuer=request.environ['issuer'], state=state, rse=rse, younger_than=younger_than,
                                                 older_than=older_than, limit=limit, list_pfns=list_pfns,
                                                 vo=vo):
                 yield dumps(row, cls=APIEncoder) + '\n'
