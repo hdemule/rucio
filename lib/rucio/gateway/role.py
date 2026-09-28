@@ -4,7 +4,7 @@ from rucio.common.constants import DEFAULT_VO
 from rucio.common.exception import AccessDenied
 from rucio.common.types import InternalAccount
 from rucio.core import role as core_role
-from rucio.db.sqla.constants import DatabaseOperationType
+from rucio.db.sqla.constants import DatabaseOperationType, RoleOperationType
 from rucio.db.sqla.session import db_session
 from rucio.gateway.permission import has_permission
 
@@ -26,7 +26,7 @@ def add_role(
         issuer: str,
         description: Optional[str] = None,
         assignable: bool = True,
-        protected: bool = False,
+        locked: bool = False,
         vo: str = DEFAULT_VO) -> None:
     """
     Add a new role.
@@ -35,7 +35,7 @@ def add_role(
     :param issuer: The account issuing the command.
     :param description: An optional description of the role. An empty description is stored as NULL.
     :param assignable: Whether an identity provider may assign this role to, or take it away from, an account.
-    :param protected: Whether the role is protected, which prevents a policy package from altering or deleting it.
+    :param locked: Whether the role is locked, which prevents a policy package from altering or deleting it.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -43,7 +43,7 @@ def add_role(
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to add role.' % issuer)
 
-        core_role.add_role(role=role, description=description, assignable=assignable, protected=protected, session=session)
+        core_role.add_role(role=role, description=description, assignable=assignable, locked=locked, session=session)
 
 
 def update_role(
@@ -51,7 +51,7 @@ def update_role(
         issuer: str,
         description: Optional[str] = None,
         assignable: Optional[bool] = None,
-        protected: Optional[bool] = None,
+        locked: Optional[bool] = None,
         force: bool = False,
         vo: str = DEFAULT_VO) -> dict[str, Any]:
     """
@@ -61,8 +61,8 @@ def update_role(
     :param issuer: The account issuing the command.
     :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
     :param assignable: The new assignable state, or None to leave it untouched.
-    :param protected: The new protected state, or None to leave it untouched.
-    :param force: Change the description or the assignable state even if the role is protected.
+    :param locked: The new locked state, or None to leave it untouched.
+    :param force: Change the description or the assignable state even if the role is locked.
     :param vo: The VO of the issuing account.
     :returns: The role as it is stored after the update.
     """
@@ -71,7 +71,7 @@ def update_role(
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to update role %s.' % (issuer, role))
 
-        return core_role.update_role(role=role, description=description, assignable=assignable, protected=protected, force=force, session=session)
+        return core_role.update_role(role=role, description=description, assignable=assignable, locked=locked, force=force, session=session)
 
 
 def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
@@ -80,7 +80,7 @@ def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_V
 
     :param role: The role to delete.
     :param issuer: The account issuing the command.
-    :param force: Also remove the role from every account it is assigned to and drop its permissions, and delete it even if it is protected.
+    :param force: Also remove the role from every account it is assigned to and drop its permissions, and delete it even if it is locked.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -224,7 +224,7 @@ def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: s
     :param operation: The operation to grant.
     :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted.
     :param issuer: The account issuing the command.
-    :param force: Grant the permission even if the role is protected.
+    :param force: Grant the permission even if the role is locked.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -234,7 +234,7 @@ def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: s
 
         core_role.add_role_permission(
             role=role,
-            operation=DatabaseOperationType(operation),
+            operation=RoleOperationType(operation),
             scope_pattern=scope_pattern,
             force=force,
             session=session,
@@ -249,7 +249,7 @@ def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer
     :param operation: The operation to remove.
     :param scope_pattern: The scope pattern to remove the permission from.
     :param issuer: The account issuing the command.
-    :param force: Remove the permission even if the role is protected.
+    :param force: Remove the permission even if the role is locked.
     :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -259,7 +259,7 @@ def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer
 
         core_role.delete_role_permission(
             role=role,
-            operation=DatabaseOperationType(operation),
+            operation=RoleOperationType(operation),
             scope_pattern=scope_pattern,
             force=force,
             session=session,
