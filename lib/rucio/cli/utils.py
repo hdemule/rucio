@@ -66,24 +66,26 @@ SUCCESS = 0
 FAILURE = 1
 
 
-# Client-side representation of database operation types.
-class DatabaseOperationType(Enum):
+# Client-side representation of the operations a role permission can grant.
+class RoleOperationType(Enum):
     READ = 'read'
     WRITE = 'write'
+    DELETE = 'delete'
 
 
 # The letter shown for each operation, in the order the operations are rendered.
-OPERATION_LETTERS: dict[DatabaseOperationType, str] = {
-    DatabaseOperationType.READ: 'r',
-    DatabaseOperationType.WRITE: 'w',
+OPERATION_LETTERS: dict[RoleOperationType, str] = {
+    RoleOperationType.READ: 'r',
+    RoleOperationType.WRITE: 'w',
+    RoleOperationType.DELETE: 'd',
 }
 
 
 def format_operations(operations: "Iterable[str]") -> str:
     """
-    Render the operations granted on a scope compactly, e.g. 'rw' for read and write, 'r-' for read only.
+    Render the operations granted on a scope compactly, e.g. 'rw-' for read and write, 'r--' for read only.
 
-    :param operations: The operation values that are granted, e.g. 'read' and/or 'write'.
+    :param operations: The operation values that are granted, e.g. 'read', 'write' and/or 'delete'.
     :returns: One character per known operation, with '-' where the operation is not granted.
     """
     granted = set(operations)
