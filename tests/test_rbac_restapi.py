@@ -986,13 +986,13 @@ class TestROLE:
     # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
 
     def test_list_roles(self):
-        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description, assignable and protected state"""
+        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description, assignable and locked state"""
         response = _get('/roles/', 'root')
         assert response.status_code == OK
         roles = response.json()
         assert 'data-scientist' in [role['role'] for role in roles]
-        # every entry carries a description, which is null for roles without one, and its assignable and protected states
-        assert all({'description', 'assignable', 'protected'} <= set(role) for role in roles)
+        # every entry carries a description, which is null for roles without one, and its assignable and locked states
+        assert all({'description', 'assignable', 'locked'} <= set(role) for role in roles)
         for account in ('alice', 'bob'):
             assert _get('/roles/', account).status_code == FORBIDDEN
 
@@ -1042,10 +1042,10 @@ class TestROLE:
             ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas'), None),
             ('POST', _account_roles_path('bob', 'data-scientist'), None),
             ('DELETE', _account_roles_path('alice', 'data-scientist'), None),
-            ('PUT', _role_path('data-scientist'), {'protected': True}),
+            ('PUT', _role_path('data-scientist'), {'locked': True}),
             ('PUT', _role_path('data-scientist'), {'assignable': False}),
         ],
-        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'protect role', 'make role unassignable'],
+        ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'lock role', 'make role unassignable'],
     )
     def test_non_admin_cannot_write_role_data(self, method, path, payload):
         """RBAC(USER): role management write operations are restricted to root/admin regardless of the caller's own RBAC assignments"""
@@ -1121,26 +1121,26 @@ class TestROLE:
         roles = _get('/roles/', 'root').json()
         return [role for role in roles if role['role'] == role_name][0]
 
-    def test_protect_and_unprotect_role(self):
-        """RBAC(ADMIN): a role is created assignable and unprotected, and a protected role is only altered or deleted when forced"""
-        role_name = 'tmp_protected'
+    def test_lock_and_unlock_role(self):
+        """RBAC(ADMIN): a role is created assignable and unlocked, and a locked role is only altered or deleted when forced"""
+        role_name = 'tmp_locked'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
             state = self._role_state(role_name)
-            assert state['assignable'] is True and state['protected'] is False
+            assert state['assignable'] is True and state['locked'] is False
 
-            assert _request('PUT', _role_path(role_name), 'root', json={'protected': True}).status_code == OK
-            assert self._role_state(role_name)['protected'] is True
+            assert _request('PUT', _role_path(role_name), 'root', json={'locked': True}).status_code == OK
+            assert self._role_state(role_name)['locked'] is True
 
-            # a protected role can neither be altered nor deleted unless forced
+            # a locked role can neither be altered nor deleted unless forced
             assert _request('PUT', _role_path(role_name), 'root', json={'description': 'nope'}).status_code == FORBIDDEN
             assert _delete(_role_path(role_name), 'root').status_code == FORBIDDEN
             assert _request('PUT', _role_path(role_name), 'root', json={'description': 'forced', 'force': True}).status_code == OK
             assert self._role_state(role_name)['description'] == 'forced'
 
-            # changing the protected state itself is always allowed, so that a role can be unprotected
-            assert _request('PUT', _role_path(role_name), 'root', json={'protected': False}).status_code == OK
-            assert self._role_state(role_name)['protected'] is False
+            # changing the locked state itself is always allowed, so that a role can be unlocked
+            assert _request('PUT', _role_path(role_name), 'root', json={'locked': False}).status_code == OK
+            assert self._role_state(role_name)['locked'] is False
         finally:
             _delete(_role_path(role_name), 'root', json={'force': True})
 
