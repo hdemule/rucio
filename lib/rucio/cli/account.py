@@ -11,51 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from collections.abc import Iterator
-from contextlib import contextmanager
-from datetime import datetime
 from typing import Literal, Optional
 
 import click
 from rich.text import Text
 from tabulate import tabulate
 
-from rucio.cli.utils import RichCLITheme, RichUtils, format_permission_tree, wrap_table_column
-from rucio.common.exception import InputValidationError, RoleAssignmentDisabled
+from rucio.cli.utils import RichCLITheme, RichUtils
+from rucio.common.exception import InputValidationError
 from rucio.common.utils import get_bytes_value_from_string, sizefmt
-
-
-@contextmanager
-def _assignable_hint(role_name: str, account_name: str, action: str) -> Iterator[None]:
-    """Turn a RoleAssignmentDisabled error into one telling the CLI user how to bypass it."""
-    try:
-        yield
-    except RoleAssignmentDisabled as error:
-        raise RoleAssignmentDisabled(f"Role '{role_name}' is not assignable, so it cannot be {action} account '{account_name}'. Add --force to bypass this.") from error
-
-
-class OptionalDateTime(click.ParamType):
-    """A date, or None when the given value is empty."""
-
-    name = "date"
-    FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
-
-    def convert(self, value, param, ctx) -> Optional[datetime]:
-        """Turn a command line value into a datetime, or None if it is empty."""
-        if value is None or isinstance(value, datetime):
-            return value
-        if not value.strip():
-            return None
-        for date_format in self.FORMATS:
-            try:
-                return datetime.strptime(value.strip(), date_format)
-            except ValueError:
-                continue
-        self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)}", param, ctx)
-
-
-OPTIONAL_DATE = OptionalDateTime()
-DATE_EXAMPLE = "2012-02-29 or 2012-02-29T16:33:30"
 
 
 @click.group()
@@ -349,80 +313,3 @@ def identity_remove(ctx: click.Context, account_name: str, type_: str, id: str):
     """Revoke a given ID's access from an account"""
     ctx.obj.client.del_identity(account_name, id, authtype=type_)
     print('Deleted identity: %s' % id)
-
-
-@account.group()
-def role() -> None:
-    """Manage roles assigned to an account."""
-
-
-@role.command("list")
-@click.argument("account_name", required=False)
-@click.option("--detail", is_flag=True, help="Also list permissions granted by each role.")
-@click.option("--me", is_flag=True, help="List roles for the current account instead of ACCOUNT_NAME.")
-@click.pass_context
-def role_list(ctx: click.Context, account_name: str, detail: bool, me: bool) -> None:
-    """List roles assigned to ACCOUNT_NAME."""
-
-    if not account_name and not me:
-        raise click.UsageError("Either ACCOUNT_NAME or --me must be given.")
-
-    rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
-    click.echo(f"Roles for account {rbac['account']}:")
-    if not detail:
-        rows = [[r['role'], r.get('expires_at') or '-'] for r in rbac['roles']]
-        headers = ["ROLE", "EXPIRES AT"]
-        click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
-    else:
-        permissions_by_role: dict[str, list[dict[str, str]]] = {}
-        for permission in rbac['permissions']:
-            permissions_by_role.setdefault(permission['role'], []).append(permission)
-
-        rows = []
-        for r in rbac['roles']:
-            rows.append([r['role'], r.get('expires_at') or '-', r.get('description') or '-'])
-            rows.extend([line, "", ""] for line in format_permission_tree(permissions_by_role.get(r['role'], [])))
-        headers = ["ROLE", "EXPIRES AT", "DESCRIPTION"]
-        click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
-
-
-@role.command("add")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, the assignment does not expire.")
-@click.option("--force", is_flag=True, default=False, help="Assign the role even if it is not assignable.")
-@click.pass_context
-def role_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime], force: bool) -> None:
-    """Assign ROLE_NAME to ACCOUNT_NAME, optionally until an expiry date."""
-    with _assignable_hint(role_name, account_name, action="assigned to"):
-        ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force)
-    if expires_at:
-        click.echo(f"Added role '{role_name}' to account '{account_name}', expiring at {expires_at}.")
-    else:
-        click.echo(f"Added role '{role_name}' to account '{account_name}'.")
-
-
-@role.command("update")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.option("--expires-at", type=OPTIONAL_DATE, required=True, help=f'New date at which the assignment expires, e.g. {DATE_EXAMPLE}, overwriting the existing one. Pass an empty string ("") so that the assignment does not expire.')
-@click.pass_context
-def role_update(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime]) -> None:
-    """Update the expiry date of ROLE_NAME for ACCOUNT_NAME. The given date overwrites the existing one; an empty date removes it."""
-    ctx.obj.client.set_account_role_expires_at(account_name, role_name, expires_at)
-    if expires_at:
-        click.echo(f"Role '{role_name}' for account '{account_name}' now expires at {expires_at}.")
-    else:
-        click.echo(f"Role '{role_name}' for account '{account_name}' does not expire any more.")
-
-
-@role.command("remove")
-@click.argument("role_name")
-@click.argument("account_name")
-@click.option("--force", is_flag=True, default=False, help="Remove the role even if it is not assignable.")
-@click.pass_context
-def role_remove(ctx: click.Context, role_name: str, account_name: str, force: bool) -> None:
-    """Remove ROLE_NAME from ACCOUNT_NAME."""
-    with _assignable_hint(role_name, account_name, action="removed from"):
-        ctx.obj.client.delete_account_role(account_name, role_name, force=force)
-    click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
