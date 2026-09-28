@@ -5,7 +5,7 @@ from rucio.common.types import InternalAccount
 from rucio.core import role as role_core
 from rucio.core import scope as scope_core
 from rucio.core.account import has_account_attribute
-from rucio.db.sqla.constants import DatabaseOperationType
+from rucio.db.sqla.constants import RoleOperationType
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -123,7 +123,7 @@ def _can_read_in_scope(issuer: "InternalAccount", scope: "InternalScope | None",
     return role_core.has_role_scope_access(
         account=issuer,
         scope=scope,
-        operation=DatabaseOperationType.READ,
+        operation=RoleOperationType.READ,
         session=session,
     )
 
@@ -149,7 +149,7 @@ def _can_write_in_scope(issuer: "InternalAccount", scope: "InternalScope | None"
     return role_core.has_role_scope_access(
         account=issuer,
         scope=scope,
-        operation=DatabaseOperationType.WRITE,
+        operation=RoleOperationType.WRITE,
         session=session,
     )
 
