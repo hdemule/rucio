@@ -1355,11 +1355,11 @@ class RoleAssignmentDisabled(RucioException):
         self.error_code = 128
 
 
-class RoleProtected(RucioException):
+class RoleLocked(RucioException):
     """
-    RoleProtected
+    RoleLocked
     """
     def __init__(self, *args):
-        super(RoleProtected, self).__init__(*args)
-        self._message = "The role is protected, so it cannot be altered or deleted."
+        super(RoleLocked, self).__init__(*args)
+        self._message = "The role is locked, so it cannot be altered or deleted."
         self.error_code = 129
