@@ -1,14 +1,16 @@
-from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
+from typing import TYPE_CHECKING, Optional
 
 import click
 from tabulate import tabulate
 
-from rucio.cli.utils import RoleOperationType, format_operations, format_permission_tree, wrap_table_column
-from rucio.common.exception import Duplicate, RoleInUse, RoleLocked, RolePermissionNotFound
-from rucio.common.utils import str_to_date
+from rucio.cli.utils import OptionalDateTime, RoleOperationType, format_operations, format_permission_tree, wrap_table_column
+from rucio.common.exception import Duplicate, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
 
 # Shorthands accepted on the command line, mapped to the operation(s) they expand to.
 OPERATION_SHORTHANDS: dict[str, list[RoleOperationType]] = {
@@ -22,9 +24,21 @@ OPERATION_SHORTHANDS: dict[str, list[RoleOperationType]] = {
     'rwd': [RoleOperationType.READ, RoleOperationType.WRITE, RoleOperationType.DELETE],
 }
 
+OPTIONAL_DATE = OptionalDateTime()
+DATE_EXAMPLE = "2012-02-29 or 2012-02-29T16:33:30"
+
 
 @contextmanager
-def _lock_hint(role_name: str, action: str = "altered") -> Iterator[None]:
+def _assignable_hint(role_name: str, account_name: str, action: str) -> 'Generator[None, None, None]':
+    """Turn a RoleAssignmentDisabled error into one telling the CLI user how to bypass it."""
+    try:
+        yield
+    except RoleAssignmentDisabled as error:
+        raise RoleAssignmentDisabled(f"Role '{role_name}' is not assignable, so it cannot be {action} account '{account_name}'. Add --force to bypass this.") from error
+
+
+@contextmanager
+def _lock_hint(role_name: str, action: str = "altered") -> 'Generator[None, None, None]':
     """Turn a RoleLocked error into one telling the CLI user how to bypass the lock."""
     try:
         yield
@@ -35,13 +49,11 @@ def _lock_hint(role_name: str, action: str = "altered") -> Iterator[None]:
 
 @click.group()
 def role():
-    """Manage role-based access control (RBAC). Roles are assignable to accounts (see `rucio account role` for details) and can grant permissions on scopes.
-    A role can be locked which prevents it from being altered (e.g. externally by a policy package).
-    A role can also be assignable or not, which controls whether it can be assigned freely to accounts; this prevents an external identity provider from assigning a role to anyone."""
+    """Manage role-based access control."""
 
 
 @role.command("list")
-@click.option("--detail", is_flag=True, help="Show the permissions assigned to each role. Use `role permission list --detail` to also expand their scope patterns.")
+@click.option("--detail", is_flag=True, help="Show the permissions associated with each role. Use `role permission list --detail` to also expand their scope patterns.")
 @click.pass_context
 def list_(ctx: click.Context, detail: bool) -> None:
     """List all roles."""
@@ -63,11 +75,11 @@ def list_(ctx: click.Context, detail: bool) -> None:
 @click.argument("role_name")
 @click.option("-d", "--description", help="Set the description of the role.")
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
-              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `account role add`/`remove`.")
+              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `role account add`/`remove`.")
 @click.option("-l", "--locked", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
               help="Lock (true) or not (false) the role. A locked role cannot be altered or deleted, by a policy package or through Rucio, unless internally forced.")
 def add(ctx: click.Context, role_name: str, description: Optional[str], assignable: bool, locked: bool) -> None:
-    """Add a new role, optionally with a description. Give ROLE_NAME before -a/-l, which take an optional true/false."""
+    """Create a new role."""
     ctx.obj.client.add_role(role_name, description=description, assignable=assignable, locked=locked)
     click.echo(f"Role '{role_name}' added.")
 
@@ -77,7 +89,7 @@ def add(ctx: click.Context, role_name: str, description: Optional[str], assignab
 @click.argument("role_name")
 @click.option("-d", "--description", help='Set the description of the role, overwriting the existing one. Pass an empty string ("") to remove it.')
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=None,
-              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `account role add`/`remove`.")
+              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `role account add`/`remove`.")
 @click.option("-l", "--locked", type=bool, is_flag=False, flag_value="true", default=None,
               help="Lock (true) or not (false) the role. A locked role cannot be altered or deleted, by a policy package or through Rucio, unless internally forced.")
 @click.option("--force", is_flag=True, default=False, help="Change the description or the assignable state even if the role is locked.")
@@ -95,12 +107,12 @@ def update(ctx: click.Context, role_name: str, description: Optional[str], assig
     click.echo(f"Role '{role_name}' updated.")
 
 
-@role.command("delete")
+@role.command("remove")
 @click.pass_context
 @click.argument("role_name")
-@click.option("--force", is_flag=True, default=False, help="Also revoke the role from every account it is assigned to and remove its permissions, and delete it even if it is locked. Asks for confirmation first.")
+@click.option("--force", is_flag=True, default=False, help="Delete the role even if it is locked. This automatically revokes the role from every account it is assigned to and removes its permissions.")
 def delete(ctx: click.Context, role_name: str, force: bool) -> None:
-    """Delete an existing role."""
+    """Remove a role."""
     if force and not _confirm_forced_delete(ctx, role_name):
         click.echo("Aborted, the role was not deleted.")
         return
@@ -147,28 +159,96 @@ def _confirm_forced_delete(ctx: click.Context, role_name: str) -> bool:
 
 @role.group()
 def account() -> None:
-    """Show the accounts a role is assigned to."""
+    """Manage account role assignments."""
 
 
 @account.command("list")
-@click.argument("role_name")
-@click.option("--active", is_flag=True, help="Hide the accounts whose assignment has already expired.")
+@click.option("-a", "--account", "account_name", metavar="ACCOUNT", help="List the roles assigned to ACCOUNT.")
+@click.option("-r", "--role", "role_name", metavar="ROLE", help="List the accounts ROLE is assigned to.")
+@click.option("--me", is_flag=True, help="List the roles assigned to your own account.")
+@click.option("--detail", is_flag=True, help="Also list the permissions granted by each role. To be used with -a/--account or --me.")
 @click.pass_context
-def account_list(ctx: click.Context, role_name: str, active: bool) -> None:
-    """List the accounts ROLE_NAME is assigned to, with the expiry date of each assignment."""
-    assignments = ctx.obj.client.list_role_accounts(role_name)
-    if active:
-        # expiry dates are stored as naive UTC datetimes
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        assignments = [assignment for assignment in assignments if not assignment.get('expires_at') or str_to_date(assignment['expires_at']) > now]
+def account_list(ctx: click.Context, account_name: Optional[str], role_name: Optional[str], me: bool, detail: bool) -> None:
+    """
+    List role assignments.
 
-    rows = [[assignment['account'], assignment.get('expires_at') or '-'] for assignment in assignments]
-    click.echo(tabulate(rows, headers=["ACCOUNT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
+    Exactly one of -a/--account, -r/--role or --me must be given.
+    """
+    if sum([account_name is not None, role_name is not None, me]) != 1:
+        raise click.UsageError("Exactly one of -a/--account, -r/--role or --me must be given.")
+    if detail and role_name is not None:
+        raise click.UsageError("--detail can only be used with -a/--account or --me.")
+
+    if role_name is not None:
+        assignments = ctx.obj.client.list_role_accounts(role_name)
+        click.echo(f"Accounts assigned to role {role_name}:")
+        rows = [[assignment['account'], assignment.get('expires_at') or '-'] for assignment in assignments]
+        click.echo(tabulate(rows, headers=["ACCOUNT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
+    else:
+        rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
+        click.echo(f"Roles for account {rbac['account']}:")
+        if not detail:
+            rows = [[entry['role'], entry.get('expires_at') or '-'] for entry in rbac['roles']]
+            headers = ["ROLE", "EXPIRES AT"]
+            click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
+        else:
+            permissions_by_role: dict[str, list[dict[str, str]]] = {}
+            for permission in rbac['permissions']:
+                permissions_by_role.setdefault(permission['role'], []).append(permission)
+
+            rows = []
+            for entry in rbac['roles']:
+                rows.append([entry['role'], entry.get('expires_at') or '-', entry.get('description') or '-'])
+                rows.extend([line, "", ""] for line in format_permission_tree(permissions_by_role.get(entry['role'], [])))
+            headers = ["ROLE", "EXPIRES AT", "DESCRIPTION"]
+            click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
+
+
+@account.command("add")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, the assignment does not expire.")
+@click.option("--force", is_flag=True, default=False, help="Assign the role even if it is not assignable.")
+@click.pass_context
+def account_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime], force: bool) -> None:
+    """Assign ROLE_NAME to ACCOUNT_NAME, optionally until an expiry date."""
+    with _assignable_hint(role_name, account_name, action="assigned to"):
+        ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force)
+    if expires_at:
+        click.echo(f"Added role '{role_name}' to account '{account_name}', expiring at {expires_at}.")
+    else:
+        click.echo(f"Added role '{role_name}' to account '{account_name}'.")
+
+
+@account.command("update")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.option("--expires-at", type=OPTIONAL_DATE, required=True, help=f'New date at which the assignment expires, e.g. {DATE_EXAMPLE}, overwriting the existing one. Pass an empty string ("") so that the assignment does not expire.')
+@click.pass_context
+def account_update(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime]) -> None:
+    """Update the expiry date of ROLE_NAME for ACCOUNT_NAME. The given date overwrites the existing one; an empty date removes it."""
+    ctx.obj.client.set_account_role_expires_at(account_name, role_name, expires_at)
+    if expires_at:
+        click.echo(f"Role '{role_name}' for account '{account_name}' now expires at {expires_at}.")
+    else:
+        click.echo(f"Role '{role_name}' for account '{account_name}' does not expire any more.")
+
+
+@account.command("remove")
+@click.argument("role_name")
+@click.argument("account_name")
+@click.option("--force", is_flag=True, default=False, help="Remove the role even if it is not assignable.")
+@click.pass_context
+def account_remove(ctx: click.Context, role_name: str, account_name: str, force: bool) -> None:
+    """Remove ROLE_NAME from ACCOUNT_NAME."""
+    with _assignable_hint(role_name, account_name, action="removed from"):
+        ctx.obj.client.delete_account_role(account_name, role_name, force=force)
+    click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
 
 
 @role.group()
 def permission() -> None:
-    """Manage permissions assigned to a role."""
+    """Manage permissions of a role."""
 
 
 def _matching_scopes(scope_pattern: str, known_scopes: list[str]) -> list[str]:
@@ -244,7 +324,8 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
 @click.option("--force", is_flag=True, default=False, help="Add the permission even if the role is locked.")
 @click.pass_context
 def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pattern: str, force: bool) -> None:
-    """Add OPERATION on SCOPE_PATTERN to ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write', 'd'/'delete', or a combination ('rw', 'rwd'). SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob."""
+    """Add OPERATION on SCOPE_PATTERN to ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write', 'd'/'delete', or a combination ('rw', 'rwd').
+    SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob."""
     if not _confirm_scope_pattern(ctx, scope_pattern, "add"):
         click.echo("Aborted, no permission was added.")
         return

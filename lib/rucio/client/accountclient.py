@@ -13,18 +13,17 @@
 # limitations under the License.
 
 from json import dumps
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional
 from urllib.parse import quote_plus
 
 from requests.status_codes import codes
 
 from rucio.client.baseclient import BaseClient, choice
-from rucio.common.constants import ISSUER_ACCOUNT_ALIAS, HTTPMethod
-from rucio.common.utils import build_url, render_json
+from rucio.common.constants import HTTPMethod
+from rucio.common.utils import build_url
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from datetime import datetime
 
 
 class AccountClient(BaseClient):
@@ -136,109 +135,6 @@ class AccountClient(BaseClient):
         if res.status_code == codes.ok:
             return True
         exc_cls, exc_msg = self._get_exception(headers=res.headers, status_code=res.status_code, data=res.content)
-        raise exc_cls(exc_msg)
-
-    def list_account_roles(self, account: Optional[str] = None, use_issuer_account: bool = False, detail: bool = False) -> dict[str, Any]:
-        # the server replaces the alias with the issuer's account
-        account = ISSUER_ACCOUNT_ALIAS if use_issuer_account else account
-        if not account:
-            raise ValueError('Either an account or use_issuer_account must be given.')
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles']))
-        response = self._send_request(url, method=HTTPMethod.GET, params={'detail': str(detail).lower()})
-        if response.status_code == codes.ok:
-            return response.json()
-        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-        raise exc_cls(exc_msg)
-
-    def add_account_role(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]] = None, force: bool = False) -> None:
-        """
-        Assign a role to an account.
-
-        Parameters
-        ----------
-        account :
-            The account to assign the role to.
-        role :
-            The role to assign.
-        expires_at :
-            An optional date at which the assignment expires. None means that it does not expire.
-        force :
-            Assign the role even if it is not assignable.
-        """
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
-        data = render_json(expires_at=expires_at, force=force) if expires_at is not None or force else None
-        response = self._send_request(url, method=HTTPMethod.POST, data=data)
-        if response.status_code != codes.created:
-            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-            raise exc_cls(exc_msg)
-
-    def set_account_role_expires_at(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]]) -> None:
-        """
-        Overwrite the expiry date of a role assigned to an account.
-
-        Parameters
-        ----------
-        account :
-            The account the role is assigned to.
-        role :
-            The role to set the `expires_at` of.
-        expires_at :
-            The new date. None clears it, so that the assignment does not expire.
-        """
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
-        response = self._send_request(url, method=HTTPMethod.PUT, data=render_json(expires_at=expires_at))
-        if response.status_code != codes.ok:
-            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-            raise exc_cls(exc_msg)
-
-    def delete_account_role(self, account: str, role: str, force: bool = False) -> None:
-        """
-        Remove a role from an account.
-
-        Parameters
-        ----------
-        account :
-            The account to remove the role from.
-        role :
-            The role to remove.
-        force :
-            Remove the role even if it is not assignable.
-        """
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles', quote_plus(role)]))
-        data = render_json(force=force) if force else None
-        response = self._send_request(url, method=HTTPMethod.DELETE, data=data)
-        if response.status_code != codes.ok:
-            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-            raise exc_cls(exc_msg)
-
-    def sync_account_roles(self, account: str, roles: Any, dry_run: bool = False) -> dict[str, Any]:
-        """
-        Synchronize the role assignments of an account with the roles supplied by an identity provider.
-
-        Expired assignments and roles which are not supplied are removed, supplied roles are assigned
-        and their expiry dates updated. Roles which are not assignable are left untouched.
-
-        Parameters
-        ----------
-        account :
-            The account whose role assignments are synchronised.
-        roles :
-            The roles supplied by the IdP: a list of role names and/or of {'role': ..., 'expires_at': ...}
-            dictionaries, or a dictionary mapping role name to expiry date.
-        dry_run :
-            Only report what the synchronisation would do, without changing anything.
-
-        Returns
-        -------
-            The report of the synchronisation: the roles supplied and currently held, what was (or would be)
-            removed, added, updated, left unchanged, held back or ignored, the messages describing each step,
-            and a one-line summary.
-        """
-        url = build_url(choice(self.list_hosts), path='/'.join([self.ACCOUNTS_BASEURL, quote_plus(account), 'roles']))
-        response = self._send_request(url, method=HTTPMethod.PUT, data=render_json(roles=roles, dry_run=dry_run))
-        if response.status_code == codes.ok:
-            return response.json()
-        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
         raise exc_cls(exc_msg)
 
     def get_account(self, account: str) -> Optional[dict[str, Any]]:

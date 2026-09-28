@@ -23,6 +23,7 @@ import sys
 import textwrap
 import traceback
 from configparser import NoOptionError, NoSectionError
+from datetime import datetime
 from enum import Enum
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -361,6 +362,26 @@ class JSONType(click.ParamType):
             return json.loads(value)
         except json.JSONDecodeError as e:
             self.fail(f"Invalid JSON: {e}", param, ctx)
+
+
+class OptionalDateTime(click.ParamType):
+    """A date, or None when the given value is empty."""
+
+    name = "date"
+    FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
+
+    def convert(self, value, param, ctx) -> Optional[datetime]:
+        """Turn a command line value into a datetime, or None if it is empty."""
+        if value is None or isinstance(value, datetime):
+            return value
+        if not value.strip():
+            return None
+        for date_format in self.FORMATS:
+            try:
+                return datetime.strptime(value.strip(), date_format)
+            except ValueError:
+                continue
+        self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)}", param, ctx)
 
 
 def get_scope(did: str, client: Client) -> tuple[str, str]:
