@@ -21,7 +21,7 @@ from alembic import context
 from alembic.op import create_check_constraint, create_foreign_key, create_primary_key, create_table, drop_table, execute
 
 from rucio.common.schema import get_schema_value
-from rucio.db.sqla.constants import DatabaseOperationType
+from rucio.db.sqla.constants import RoleOperationType
 
 # Alembic revision identifiers
 revision = '5e5da3fb86c1'
@@ -34,14 +34,14 @@ def upgrade():
         create_table('roles',
                      sa.Column('role', sa.String(255)),
                      sa.Column('description', sa.Text),
-                     sa.Column('assignment_disabled', sa.Boolean, default=False),
-                     sa.Column('internal_role_flag', sa.Boolean, default=False),
+                     sa.Column('assignable', sa.Boolean, default=True),
+                     sa.Column('locked', sa.Boolean, default=False),
                      sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
                      sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
         create_primary_key('ROLES_PK', 'roles', ['role'])
         create_check_constraint('ROLES_ROLE_NN', 'roles', 'role is not null')
-        create_check_constraint('ROLES_ASSIGNMENT_DISABLED_NN', 'roles', 'assignment_disabled is not null')
-        create_check_constraint('ROLES_INTERNAL_ROLE_FLAG_NN', 'roles', 'internal_role_flag is not null')
+        create_check_constraint('ROLES_ASSIGNABLE_NN', 'roles', 'assignable is not null')
+        create_check_constraint('ROLES_LOCKED_NN', 'roles', 'locked is not null')
         create_check_constraint('ROLES_CREATED_NN', 'roles', 'created_at is not null')
         create_check_constraint('ROLES_UPDATED_NN', 'roles', 'updated_at is not null')
 
@@ -62,7 +62,7 @@ def upgrade():
         create_table('role_permission_map',
                      sa.Column('role', sa.String(255)),
                      sa.Column('scope_pattern', sa.String(get_schema_value('SCOPE_LENGTH'))),
-                     sa.Column('operation', sa.Enum(DatabaseOperationType,
+                     sa.Column('operation', sa.Enum(RoleOperationType,
                                                     name='ROLE_PERMISSION_MAP_OPERATION_CHK',
                                                     create_constraint=True,
                                                     values_callable=lambda obj: [e.value for e in obj])),

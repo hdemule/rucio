@@ -36,7 +36,6 @@ from rucio.db.sqla.constants import (
     AccountType,
     BadFilesStatus,
     BadPFNStatus,
-    DatabaseOperationType,
     DIDAvailability,
     DIDReEvaluation,
     DIDType,
@@ -48,6 +47,7 @@ from rucio.db.sqla.constants import (
     ReplicaState,
     RequestState,
     RequestType,
+    RoleOperationType,
     RSEType,
     RuleGrouping,
     RuleNotification,
@@ -407,11 +407,11 @@ class Roles(BASE, ModelBase):
     role: Mapped[str] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text)
     assignable: Mapped[bool] = mapped_column(Boolean, default=True)
-    protected: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
     _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'),
                    CheckConstraint('ASSIGNABLE IS NOT NULL', name='ROLES_ASSIGNABLE_NN'),
-                   CheckConstraint('PROTECTED IS NOT NULL', name='ROLES_PROTECTED_NN'))
+                   CheckConstraint('LOCKED IS NOT NULL', name='ROLES_LOCKED_NN'))
 
 
 class AccountRoleAssociation(BASE, ModelBase):
@@ -432,9 +432,9 @@ class RolePermissionAssociation(BASE, ModelBase):
     __tablename__ = 'role_permission_map'
     role: Mapped[str] = mapped_column(String(255))
     scope_pattern: Mapped[str] = mapped_column(String(common_schema.get_schema_value('SCOPE_LENGTH')))
-    operation: Mapped[DatabaseOperationType] = mapped_column(Enum(DatabaseOperationType, name='ROLE_PERMISSION_MAP_OPERATION_CHK',
-                                                                  create_constraint=True,
-                                                                  values_callable=lambda obj: [e.value for e in obj]))
+    operation: Mapped[RoleOperationType] = mapped_column(Enum(RoleOperationType, name='ROLE_PERMISSION_MAP_OPERATION_CHK',
+                                                              create_constraint=True,
+                                                              values_callable=lambda obj: [e.value for e in obj]))
     _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_PERMISSION_MAP_PK'),
                    ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
