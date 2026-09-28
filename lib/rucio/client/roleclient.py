@@ -19,7 +19,7 @@ class RoleClient(BaseClient):
         Returns
         -------
             A list of dictionaries, one per role, with the keys `role`, `description`,
-            `assignable` and `protected`. `description` is None for roles
+            `assignable` and `locked`. `description` is None for roles
             without a description.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/")
@@ -40,7 +40,7 @@ class RoleClient(BaseClient):
             role: str,
             description: Optional[str] = None,
             assignable: bool = True,
-            protected: bool = False) -> None:
+            locked: bool = False) -> None:
         """
         Add a new role.
 
@@ -52,11 +52,11 @@ class RoleClient(BaseClient):
             An optional description of the role. An empty description is stored as NULL.
         assignable :
             Whether an identity provider may assign this role to, or take it away from, an account.
-        protected :
-            Whether the role is protected, which prevents a policy package from altering or deleting it.
+        locked :
+            Whether the role is locked, which prevents a policy package from altering or deleting it.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
-        data = render_json(description=description, assignable=assignable, protected=protected)
+        data = render_json(description=description, assignable=assignable, locked=locked)
         response = self._send_request(url, method=HTTPMethod.POST, data=data)
 
         if response.status_code == codes.created:
@@ -74,7 +74,7 @@ class RoleClient(BaseClient):
             role: str,
             description: Optional[str] = None,
             assignable: Optional[bool] = None,
-            protected: Optional[bool] = None,
+            locked: Optional[bool] = None,
             force: bool = False) -> None:
         """
         Update an existing role. Only the parameters explicitly given are changed.
@@ -87,13 +87,13 @@ class RoleClient(BaseClient):
             The new description, or None to leave it untouched. An empty string clears it.
         assignable :
             The new assignable state, or None to leave it untouched.
-        protected :
-            The new protected state, or None to leave it untouched.
+        locked :
+            The new locked state, or None to leave it untouched.
         force :
-            Change the description or the assignable state even if the role is protected.
+            Change the description or the assignable state even if the role is locked.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
-        data = render_json(description=description, assignable=assignable, protected=protected, force=force)
+        data = render_json(description=description, assignable=assignable, locked=locked, force=force)
         response = self._send_request(url, method=HTTPMethod.PUT, data=data)
 
         if response.status_code == codes.ok:
@@ -116,7 +116,7 @@ class RoleClient(BaseClient):
             The role to delete.
         force :
             Also remove the role from every account it is assigned to and drop its permissions,
-            instead of refusing to delete a role which is still in use, and delete it even if it is protected.
+            instead of refusing to delete a role which is still in use, and delete it even if it is locked.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
         data = render_json(force=force) if force else None
@@ -174,7 +174,7 @@ class RoleClient(BaseClient):
         scope_pattern :
             The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted (e.g. '*' or 'data*').
         force :
-            Grant the permission even if the role is protected.
+            Grant the permission even if the role is locked.
         """
         path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions/{quote_plus(operation)}/{quote_plus(scope_pattern)}"
         data = render_json(force=force) if force else None
@@ -196,7 +196,7 @@ class RoleClient(BaseClient):
         scope_pattern :
             The scope pattern to remove the permission from.
         force :
-            Remove the permission even if the role is protected.
+            Remove the permission even if the role is locked.
         """
         path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions/{quote_plus(operation)}/{quote_plus(scope_pattern)}"
         data = render_json(force=force) if force else None
