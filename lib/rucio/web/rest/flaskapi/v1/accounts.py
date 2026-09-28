@@ -18,25 +18,20 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 from flask import Flask, Response, jsonify, redirect, request
 
-from rucio.common.constants import ISSUER_ACCOUNT_ALIAS, HTTPMethod
+from rucio.common.constants import HTTPMethod
 from rucio.common.exception import (
     AccessDenied,
     AccountNotFound,
     CounterNotFound,
     Duplicate,
     IdentityError,
-    InputValidationError,
     InvalidAccountType,
     InvalidObject,
-    RoleAssignmentDisabled,
-    RoleAssignmentNotFound,
-    RoleNotFound,
     RSENotFound,
     RuleNotFound,
     ScopeNotFound,
 )
 from rucio.common.utils import APIEncoder, render_json
-from rucio.gateway import role as role_gateway
 from rucio.gateway.account import add_account, add_account_attribute, del_account, del_account_attribute, get_account_info, get_usage_history, list_account_attributes, list_accounts, list_identities, update_account
 from rucio.gateway.account_limit import delete_global_account_limit, delete_local_account_limit, get_global_account_limit, get_global_account_usage, get_local_account_limit, get_local_account_usage, set_global_account_limit, set_local_account_limit
 from rucio.gateway.identity import add_account_identity, del_account_identity
@@ -292,140 +287,6 @@ class Scopes(ErrorHandlingMethodView):
             return generate_http_error_flask(404, error)
 
         return 'Created', 201
-
-
-class Roles(ErrorHandlingMethodView):
-    def get(self, account: str) -> 'ResponseReturnValue':
-        detail = param_get_bool(request.args, 'detail', default=False)
-        issuer = request.environ['issuer']
-        if account == ISSUER_ACCOUNT_ALIAS:
-            account = issuer
-        try:
-            roles = role_gateway.list_account_roles(account=account, issuer=issuer, detail=detail, vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        # rendered through the API encoder, so that the expiry date of an assignment is
-        # reported in Rucio's date format
-        return Response(render_json(**roles), content_type='application/json')
-
-    def post(self, account: str, role: str) -> 'ResponseReturnValue':
-        parameters = json_parameters(optional=True)
-        expires_at = param_get(parameters, 'expires_at', default=None)
-        force = param_get(parameters, 'force', default=False)
-
-        try:
-            role_gateway.add_account_role(account=account, role=role, issuer=request.environ['issuer'], expires_at=expires_at, force=force, vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        except InputValidationError as error:
-            return generate_http_error_flask(400, error)
-        except (AccountNotFound, RoleNotFound) as error:
-            return generate_http_error_flask(404, error)
-        except RoleAssignmentDisabled as error:
-            return generate_http_error_flask(403, error)
-        except Duplicate as error:
-            return generate_http_error_flask(409, error)
-        return jsonify({"message": f"Role '{role}' successfully added to account '{account}'."}), 201
-
-    def put(self, account: str, role: str) -> 'ResponseReturnValue':
-        """Overwrite the `expires_at` of a role assigned to an account. A null value clears it."""
-        parameters = json_parameters()
-        expires_at = param_get(parameters, 'expires_at')
-
-        try:
-            stored = role_gateway.set_account_role_expires_at(account=account, role=role, expires_at=expires_at, issuer=request.environ['issuer'], vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        except InputValidationError as error:
-            return generate_http_error_flask(400, error)
-        except RoleAssignmentNotFound as error:
-            return generate_http_error_flask(404, error)
-
-        if stored is None:
-            return jsonify({"message": f"Expiry date of role '{role}' for account '{account}' successfully cleared."}), 200
-        return jsonify({"message": f"Expiry date of role '{role}' for account '{account}' successfully updated."}), 200
-
-    def delete(self, account: str, role: str) -> 'ResponseReturnValue':
-        parameters = json_parameters(optional=True)
-        force = param_get(parameters, 'force', default=False)
-
-        try:
-            role_gateway.delete_account_role(account=account, role=role, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        except RoleAssignmentNotFound as error:
-            return generate_http_error_flask(404, error)
-        except RoleAssignmentDisabled as error:
-            return generate_http_error_flask(403, error)
-        return jsonify({"message": f"Role '{role}' successfully removed from account '{account}'."}), 200
-
-
-class RolesSync(ErrorHandlingMethodView):
-    def put(self, account: str) -> 'ResponseReturnValue':
-        """
-        ---
-        summary: Synchronise account roles
-        description: |
-          Synchronise the role assignments of an account with the roles supplied by an identity provider:
-          expired assignments and roles which are not supplied are removed, supplied roles are assigned
-          and their expiry dates updated. Roles which are not assignable are left untouched.
-          With `dry_run`, only report what would be done.
-        tags:
-          - Account
-        parameters:
-        - name: account
-          in: path
-          description: "The account identifier."
-          schema:
-            type: string
-          style: simple
-        requestBody:
-          content:
-            'application/json':
-              schema:
-                type: object
-                required:
-                - roles
-                properties:
-                  roles:
-                    description: "The roles supplied by the IdP: a list of role names and/or of {role, expires_at} objects, or an object mapping role name to expiry date."
-                    oneOf:
-                    - type: array
-                    - type: object
-                  dry_run:
-                    description: "Only report what the synchronisation would do."
-                    type: boolean
-                    default: false
-        responses:
-          200:
-            description: "The report of the synchronisation: what was (or would be) removed, added, updated, left unchanged, held back or ignored, the messages describing each step, and a summary."
-            content:
-              application/json:
-                schema:
-                  type: object
-          400:
-            description: "The roles are not in an accepted form."
-          401:
-            description: "Invalid Auth Token"
-          403:
-            description: "Not allowed to synchronise the roles of this account."
-          404:
-            description: "No account found."
-        """
-        parameters = json_parameters()
-        roles = param_get(parameters, 'roles')
-        dry_run = param_get_bool(parameters, 'dry_run', default=False)
-
-        try:
-            report = role_gateway.sync_account_roles(account=account, roles=roles, issuer=request.environ['issuer'], dry_run=dry_run, vo=request.environ['vo'])
-        except AccessDenied as error:
-            return generate_http_error_flask(403, error)
-        except InputValidationError as error:
-            return generate_http_error_flask(400, error)
-        except AccountNotFound as error:
-            return generate_http_error_flask(404, error)
-        # rendered through the API encoder, so that the dates are reported in Rucio's date format
-        return Response(render_json(**report), content_type='application/json')
 
 
 class AccountParameter(ErrorHandlingMethodView):
@@ -1393,11 +1254,6 @@ def blueprint(with_doc: bool = False) -> AuthenticatedBlueprint:
     scopes_view = Scopes.as_view('scopes')
     bp.add_url_rule('/<account>/scopes/', view_func=scopes_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/scopes/<scope>', view_func=scopes_view, methods=[HTTPMethod.POST.value])
-    roles_view = Roles.as_view('roles')
-    bp.add_url_rule('/<account>/roles', view_func=roles_view, methods=[HTTPMethod.GET.value])
-    bp.add_url_rule('/<account>/roles/<role>', view_func=roles_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
-    roles_sync_view = RolesSync.as_view('roles_sync')
-    bp.add_url_rule('/<account>/roles', view_func=roles_sync_view, methods=[HTTPMethod.PUT.value])
     local_account_limits_view = LocalAccountLimits.as_view('local_account_limit')
     bp.add_url_rule('/<account>/limits/local', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule('/<account>/limits', view_func=local_account_limits_view, methods=[HTTPMethod.GET.value])
