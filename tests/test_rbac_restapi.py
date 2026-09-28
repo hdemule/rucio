@@ -36,7 +36,7 @@
 
 import json
 import shutil
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import quote_plus
 from uuid import uuid4
 
@@ -148,9 +148,11 @@ def _role_path(role_name: str, *suffix: str) -> str:
     return '/'.join(['', 'roles', quote_plus(role_name), *suffix])
 
 
-def _account_roles_path(account: str, *suffix: str) -> str:
-    """Build a `/accounts/<account>/roles/<suffix>` path."""
-    return '/'.join(['', 'accounts', quote_plus(account), 'roles', *suffix])
+def _account_roles_path(account: str, role_name: Optional[str] = None) -> str:
+    """Build a `/roles/accounts/<account>` path, or `/roles/<role_name>/accounts/<account>` if a role is given."""
+    if role_name is None:
+        return '/'.join(['', 'roles', 'accounts', quote_plus(account)])
+    return _role_path(role_name, 'accounts', quote_plus(account))
 
 
 def _scope_name_path(resource: str, did: str, *suffix: str) -> str:
@@ -980,7 +982,7 @@ class TestSUBSCRIPTION:
 
 class TestROLE:
     """
-    RBAC role management (`/roles` and `/accounts/<account>/roles`). See the assumptions note at the top of this file.
+    RBAC role management (`/roles`, `/roles/accounts/<account>` and `/roles/<role>/accounts/<account>`). See the assumptions note at the top of this file.
     """
 
     # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
@@ -1021,7 +1023,7 @@ class TestROLE:
             assert _get(_role_path('data-scientist', 'accounts'), account).status_code == FORBIDDEN
 
     def test_list_account_roles(self):
-        """RBAC(ADMIN/USER): GET /accounts/<account>/roles is visible to root/admin and to accounts if they are querying their own roles"""
+        """RBAC(ADMIN/USER): GET /roles/accounts/<account> is visible to root/admin and to accounts if they are querying their own roles"""
         for account in ('root', 'alice'):
             response = _get(_account_roles_path('alice'), account)
             assert response.status_code == OK
@@ -1158,7 +1160,7 @@ class TestROLE:
     # --- expiry date of a role assigned to an account -----------------------------------
 
     def _account_role_expires_at(self, account: str, role_name: str) -> Any:
-        """Read the `expires_at` of `role_name` for `account` back from GET /accounts/<account>/roles."""
+        """Read the `expires_at` of `role_name` for `account` back from GET /roles/accounts/<account>."""
         roles = _get(_account_roles_path(account), 'root').json()['roles']
         return [role['expires_at'] for role in roles if role['role'] == role_name][0]
 
@@ -1286,7 +1288,7 @@ class TestROLE:
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_role_description_is_reported_for_assigned_roles(self):
-        """RBAC(ADMIN): GET /accounts/<account>/roles reports the description of each assigned role"""
+        """RBAC(ADMIN): GET /roles/accounts/<account> reports the description of each assigned role"""
         role_name = 'tmp_described_assignment'
         assert _post(_role_path(role_name), 'root', json={'description': 'Assigned role description'}).status_code == CREATED
         try:
