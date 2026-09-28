@@ -1,7 +1,7 @@
 from flask import Flask, Response, jsonify, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, Duplicate, InputValidationError, RoleInUse, RoleNotFound, RolePermissionNotFound, RoleProtected
+from rucio.common.exception import AccessDenied, Duplicate, InputValidationError, RoleInUse, RoleLocked, RoleNotFound, RolePermissionNotFound
 from rucio.common.utils import render_json
 from rucio.gateway.role import add_role, add_role_permission, delete_role, delete_role_permission, list_role_accounts, list_role_permissions, list_roles, update_role
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
@@ -21,7 +21,7 @@ class RoleList(ErrorHandlingMethodView):
         parameters = json_parameters(optional=True)
         description = param_get(parameters, 'description', default=None)
         assignable = param_get(parameters, 'assignable', default=True)
-        protected = param_get(parameters, 'protected', default=False)
+        locked = param_get(parameters, 'locked', default=False)
 
         try:
             add_role(
@@ -29,7 +29,7 @@ class RoleList(ErrorHandlingMethodView):
                 issuer=request.environ['issuer'],
                 description=description,
                 assignable=assignable,
-                protected=protected,
+                locked=locked,
                 vo=request.environ['vo'],
             )
         except AccessDenied as error:
@@ -46,7 +46,7 @@ class RoleList(ErrorHandlingMethodView):
         parameters = json_parameters()
         description = param_get(parameters, 'description', default=None)
         assignable = param_get(parameters, 'assignable', default=None)
-        protected = param_get(parameters, 'protected', default=None)
+        locked = param_get(parameters, 'locked', default=None)
         force = param_get(parameters, 'force', default=False)
 
         try:
@@ -54,12 +54,12 @@ class RoleList(ErrorHandlingMethodView):
                 role=role_name,
                 description=description,
                 assignable=assignable,
-                protected=protected,
+                locked=locked,
                 force=force,
                 issuer=request.environ['issuer'],
                 vo=request.environ['vo'],
             )
-        except (AccessDenied, RoleProtected) as error:
+        except (AccessDenied, RoleLocked) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -74,7 +74,7 @@ class RoleList(ErrorHandlingMethodView):
 
         try:
             delete_role(role_name, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except (AccessDenied, RoleProtected) as error:
+        except (AccessDenied, RoleLocked) as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
             return generate_http_error_flask(404, error)
@@ -99,7 +99,7 @@ class RolePermissions(ErrorHandlingMethodView):
 
         try:
             add_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except (AccessDenied, RoleProtected) as error:
+        except (AccessDenied, RoleLocked) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -115,7 +115,7 @@ class RolePermissions(ErrorHandlingMethodView):
 
         try:
             delete_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except (AccessDenied, RoleProtected) as error:
+        except (AccessDenied, RoleLocked) as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
             return generate_http_error_flask(404, error)
