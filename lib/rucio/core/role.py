@@ -20,13 +20,13 @@ from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.constants import DEFAULT_VO
-from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleNotFound, RolePermissionNotFound, RoleProtected
+from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleLocked, RoleNotFound, RolePermissionNotFound
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import DatabaseOperationType
+from rucio.db.sqla.constants import RoleOperationType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -98,26 +98,26 @@ def _normalize_expires_at(expires_at: Optional[Union[str, datetime]]) -> Optiona
 
 def list_roles(session: "Session") -> list[dict[str, Any]]:
     """
-    List all roles defined in the system, together with their description, assignable and protected state.
+    List all roles defined in the system, together with their description, assignable and locked state.
     """
-    stmt = select(models.Roles.role, models.Roles.description, models.Roles.assignable, models.Roles.protected).order_by(models.Roles.role)
+    stmt = select(models.Roles.role, models.Roles.description, models.Roles.assignable, models.Roles.locked).order_by(models.Roles.role)
     return [
-        {"role": role, "description": description, "assignable": assignable, "protected": protected}
-        for role, description, assignable, protected in session.execute(stmt).all()
+        {"role": role, "description": description, "assignable": assignable, "locked": locked}
+        for role, description, assignable, locked in session.execute(stmt).all()
     ]
 
 
-def add_role(role: str, description: Optional[str] = None, assignable: bool = True, protected: bool = False, *, session: "Session") -> None:
+def add_role(role: str, description: Optional[str] = None, assignable: bool = True, locked: bool = False, *, session: "Session") -> None:
     """
     Add a new role to the system.
 
     :param role: The name of the role to add.
     :param description: An optional description of the role. An empty description is stored as NULL.
     :param assignable: Whether an identity provider may assign this role to, or take it away from, an account; if not, only Rucio itself alters who holds it.
-    :param protected: Whether the role is protected, which prevents a policy package from altering or deleting it.
+    :param locked: Whether the role is locked, which prevents a policy package from altering or deleting it.
     :param session: The database session.
     """
-    new_role = models.Roles(role=role, description=_normalize_description(description), assignable=assignable, protected=protected)
+    new_role = models.Roles(role=role, description=_normalize_description(description), assignable=assignable, locked=locked)
     session.add(new_role)
     try:
         session.commit()
@@ -131,24 +131,24 @@ def update_role(
         *,
         description: Optional[str] = None,
         assignable: Optional[bool] = None,
-        protected: Optional[bool] = None,
+        locked: Optional[bool] = None,
         force: bool = False,
         session: "Session") -> dict[str, Any]:
     """
     Update the metadata of an existing role, changing only the parameters explicitly given.
 
-    A protected role cannot have its description or its assignable state changed, unless `force`
-    is given. Changing `protected` itself is always allowed, so that a role can be unprotected.
+    A locked role cannot have its description or its assignable state changed, unless `force`
+    is given. Changing `locked` itself is always allowed, so that a role can be unlocked.
 
     :param role: The role to update.
     :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
     :param assignable: The new assignable state, or None to leave it untouched.
-    :param protected: The new protected state, or None to leave it untouched.
-    :param force: Change the description or the assignable state even if the role is protected.
+    :param locked: The new locked state, or None to leave it untouched.
+    :param force: Change the description or the assignable state even if the role is locked.
     :param session: The database session.
     :returns: The role as it is stored after the update.
     :raises RoleNotFound: If the role does not exist.
-    :raises RoleProtected: If the role is protected, `force` is not given and something besides `protected` is being changed.
+    :raises RoleLocked: If the role is locked, `force` is not given and something besides `locked` is being changed.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
@@ -156,21 +156,21 @@ def update_role(
         raise RoleNotFound("Role '%s' does not exist." % role)
 
     if description is not None or assignable is not None:
-        _ensure_unprotected(role, force, session)
+        _ensure_unlocked(role, force, session)
 
     if description is not None:
         role_obj.description = _normalize_description(description)
     if assignable is not None:
         role_obj.assignable = assignable
-    if protected is not None:
-        role_obj.protected = protected
+    if locked is not None:
+        role_obj.locked = locked
 
     session.commit()
     return {
         "role": role,
         "description": role_obj.description,
         "assignable": role_obj.assignable,
-        "protected": role_obj.protected,
+        "locked": role_obj.locked,
     }
 
 
@@ -178,14 +178,14 @@ def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
     """
     Delete an existing role from the system.
 
-    A protected role is only deleted if `force` is given.
+    A locked role is only deleted if `force` is given.
 
     :param role: The role to delete.
     :param force: Also remove the role from every account it is assigned to and drop its permissions,
-                  instead of refusing to delete a role which is still in use, and delete it even if it is protected.
+                  instead of refusing to delete a role which is still in use, and delete it even if it is locked.
     :param session: The database session.
     :raises RoleNotFound: If the role does not exist.
-    :raises RoleProtected: If the role is protected and `force` is not set.
+    :raises RoleLocked: If the role is locked and `force` is not set.
     :raises RoleInUse: If the role is still in use and `force` is not set.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
@@ -193,7 +193,7 @@ def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
 
-    _ensure_unprotected(role, force, session, action="deleted")
+    _ensure_unlocked(role, force, session, action="deleted")
 
     if force:
         _remove_accounts_from_role(role, session=session)
@@ -242,22 +242,22 @@ def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
     return [{"account": account, "expires_at": expires_at} for account, expires_at in session.execute(stmt).all()]
 
 
-def _ensure_unprotected(role: str, force: bool, session: "Session", action: str = "altered") -> None:
+def _ensure_unlocked(role: str, force: bool, session: "Session", action: str = "altered") -> None:
     """
-    Refuse to touch a protected role, unless forced. Does nothing for a role which does not exist.
+    Refuse to touch a locked role, unless forced. Does nothing for a role which does not exist.
 
     :param role: The role about to be touched.
-    :param force: Touch the role even if it is protected.
+    :param force: Touch the role even if it is locked.
     :param session: The database session.
     :param action: What is about to be done to the role, for the error message.
-    :raises RoleProtected: If the role is protected and `force` is not given.
+    :raises RoleLocked: If the role is locked and `force` is not given.
     """
     if force:
         return
 
-    stmt = select(models.Roles.protected).where(models.Roles.role == role)
+    stmt = select(models.Roles.locked).where(models.Roles.role == role)
     if session.execute(stmt).scalar_one_or_none():
-        raise RoleProtected("Role '%s' is protected, so it cannot be %s." % (role, action))
+        raise RoleLocked("Role '%s' is locked, so it cannot be %s." % (role, action))
 
 
 def _role_not_assignable(role: str, session: "Session") -> bool:
@@ -401,22 +401,22 @@ def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]
     return [{"operation": permission.operation.value, "scope_pattern": permission.scope_pattern} for permission in session.execute(stmt).scalars()]
 
 
-def add_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", force: bool = False, *, session: "Session") -> None:
+def add_role_permission(role: str, scope_pattern: str, operation: "RoleOperationType", force: bool = False, *, session: "Session") -> None:
     """
     Grant a role a permission on a scope pattern.
 
     :param role: The role to grant the permission to.
     :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted, see :func:`_validate_scope_pattern`.
     :param operation: The operation to grant.
-    :param force: Grant the permission even if the role is protected.
+    :param force: Grant the permission even if the role is locked.
     :param session: The database session.
     :raises InputValidationError: If the scope pattern is not a trailing wildcard.
-    :raises RoleProtected: If the role is protected and `force` is not given.
+    :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RoleNotFound: If the role does not exist.
     :raises Duplicate: If the role already has that permission on that scope pattern.
     """
     scope_pattern = _validate_scope_pattern(scope_pattern)
-    _ensure_unprotected(role, force, session)
+    _ensure_unlocked(role, force, session)
 
     session.add(models.RolePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
     try:
@@ -430,19 +430,19 @@ def add_role_permission(role: str, scope_pattern: str, operation: "DatabaseOpera
         raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
 
 
-def delete_role_permission(role: str, scope_pattern: str, operation: "DatabaseOperationType", force: bool = False, *, session: "Session") -> None:
+def delete_role_permission(role: str, scope_pattern: str, operation: "RoleOperationType", force: bool = False, *, session: "Session") -> None:
     """
     Remove a permission from a role.
 
     :param role: The role to remove the permission from.
     :param scope_pattern: The scope pattern of the permission.
     :param operation: The operation of the permission.
-    :param force: Remove the permission even if the role is protected.
+    :param force: Remove the permission even if the role is locked.
     :param session: The database session.
-    :raises RoleProtected: If the role is protected and `force` is not given.
+    :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RolePermissionNotFound: If the role does not have that permission.
     """
-    _ensure_unprotected(role, force, session)
+    _ensure_unlocked(role, force, session)
 
     mapping = session.get(models.RolePermissionAssociation, (role, scope_pattern, operation))
     if mapping is None:
@@ -463,7 +463,7 @@ def has_account_role(account: "InternalAccount", role: str, session: "Session") 
 def has_role_scope_access(
     account: "InternalAccount",
     scope: "InternalScope",
-    operation: "DatabaseOperationType",
+    operation: "RoleOperationType",
     session: "Session",
 ) -> bool:
     """
@@ -504,7 +504,7 @@ def has_role_scope_access(
 def has_scope_access(
     account: "InternalAccount",
     scope: "InternalScope",
-    operation: "DatabaseOperationType",
+    operation: "RoleOperationType",
     *,
     session: "Session",
 ) -> bool:
@@ -532,7 +532,7 @@ def scope_access_checker(
     *,
     account: "InternalAccount",
     session: "Session",
-    operation: "DatabaseOperationType" = DatabaseOperationType.READ,
+    operation: "RoleOperationType" = RoleOperationType.READ,
 ) -> "Callable[[Optional[InternalScope]], bool]":
     """
     Build a callable telling whether the account may access a given scope in terms of RBAC, ownership and admin/root privileges.
@@ -570,7 +570,7 @@ def filter_iterable_by_scope_access(
     *,
     account: "InternalAccount",
     session: "Session",
-    operation: "DatabaseOperationType" = DatabaseOperationType.READ,
+    operation: "RoleOperationType" = RoleOperationType.READ,
     scope_keyword: str = "scope",
 ) -> "Iterator[dict[str, Any]]":
     """
@@ -682,10 +682,10 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
 
     The policy package is the source of truth for the description of the roles it defines, not
     for their permissions or their account assignments, which are managed from within Rucio. A
-    role the policy package defines is created, as an unprotected role (`assignable` True and
-    `protected` False), if it does not exist yet, or has its description brought
-    in line with the policy package if it exists and is not protected. A protected role
-    (`protected` True) is never touched by the policy package, whether or not
+    role the policy package defines is created, as an unlocked role (`assignable` True and
+    `locked` False), if it does not exist yet, or has its description brought
+    in line with the policy package if it exists and is not locked. A locked role
+    (`locked` True) is never touched by the policy package, whether or not
     the policy package defines it: such a role is managed entirely from within Rucio, see
     :func:`sync_account_roles_from_idp`.
 
@@ -710,13 +710,13 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
     print()
     print("Step 2: Retrieve all roles known to Rucio")
     _print_table(
-        ["ROLE", "DESCRIPTION", "PROTECTED"],
-        [[role, entry["description"] or "", "yes" if entry["protected"] else "no"] for role, entry in sorted(current.items())],
+        ["ROLE", "DESCRIPTION", "LOCKED"],
+        [[role, entry["description"] or "", "yes" if entry["locked"] else "no"] for role, entry in sorted(current.items())],
     )
 
     print()
     print("Step 3: What the synchronisation would do")
-    created, updated, unchanged, skipped_protected, deleted = 0, 0, 0, 0, 0
+    created, updated, unchanged, skipped_locked, deleted = 0, 0, 0, 0, 0
 
     for role in sorted(roles):
         description = _normalize_description(roles[role].get("description"))
@@ -726,9 +726,9 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
             print("  Role '%s' does not exist yet, so it would be created with description %r." % (role, description))
             continue
 
-        if current[role]["protected"]:
-            skipped_protected += 1
-            print("  Role '%s' is protected, so it would be left untouched." % role)
+        if current[role]["locked"]:
+            skipped_locked += 1
+            print("  Role '%s' is locked, so it would be left untouched." % role)
             continue
 
         if current[role]["description"] != description:
@@ -738,20 +738,20 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
             unchanged += 1
             print("  Role '%s' is already in line with the policy package." % role)
 
-    # a role which is not protected and which the policy package does not define goes, including
-    # one that was created by hand through the CLI; a protected role is out of the policy
+    # a role which is not locked and which the policy package does not define goes, including
+    # one that was created by hand through the CLI; a locked role is out of the policy
     # package's reach entirely, so it is left untouched even if the policy package does not define it
     for role in sorted(set(current) - set(roles)):
-        if current[role]["protected"]:
-            skipped_protected += 1
-            print("  Role '%s' is not defined by the policy package but is protected, so it would be left untouched." % role)
+        if current[role]["locked"]:
+            skipped_locked += 1
+            print("  Role '%s' is not defined by the policy package but is locked, so it would be left untouched." % role)
         else:
             deleted += 1
             print("  Role '%s' is not defined by the policy package, so it would be deleted." % role)
 
     print()
-    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d protected role(s) untouched."
-          % (created, updated, deleted, unchanged, skipped_protected))
+    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d locked role(s) untouched."
+          % (created, updated, deleted, unchanged, skipped_locked))
 
 
 def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
@@ -778,12 +778,12 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
 
     The policy package is the source of truth for the description of the roles it defines, not
     for their permissions or their account assignments, which are managed from within Rucio. A
-    role the policy package defines is created, as an unprotected role (`assignable` True and
-    `protected` False), if it does not exist yet, or has its description brought
-    in line with the policy package if it exists and is not protected. A protected role
-    (`protected` True) is never touched here, whether or not the policy
+    role the policy package defines is created, as an unlocked role (`assignable` True and
+    `locked` False), if it does not exist yet, or has its description brought
+    in line with the policy package if it exists and is not locked. A locked role
+    (`locked` True) is never touched here, whether or not the policy
     package defines it: such a role is managed entirely from within Rucio, see
-    :func:`sync_account_roles_from_idp`. A role which is not protected and which the policy
+    :func:`sync_account_roles_from_idp`. A role which is not locked and which the policy
     package does not define is deleted, together with its permissions and account assignments.
 
     The whole synchronisation is a single transaction, so either all of it is applied or none of
@@ -801,24 +801,24 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     # Step 2: Retrieve all roles currently known to Rucio
     current = {entry["role"]: entry for entry in list_roles(session=session)}
 
-    created, updated, unchanged, skipped_protected, deleted = 0, 0, 0, 0, 0
+    created, updated, unchanged, skipped_locked, deleted = 0, 0, 0, 0, 0
     revoked, unassigned = 0, 0
 
     try:
-        # Step 3: Create the roles of the policy package and bring the existing, unprotected
-        # ones in line with it. A protected role is left untouched.
+        # Step 3: Create the roles of the policy package and bring the existing, unlocked
+        # ones in line with it. A locked role is left untouched.
         for role in sorted(roles):
             description = _normalize_description(roles[role].get("description"))
 
             if role not in current:
-                session.add(models.Roles(role=role, description=description, assignable=True, protected=False))
+                session.add(models.Roles(role=role, description=description, assignable=True, locked=False))
                 created += 1
                 print("  Role '%s' created with description %r." % (role, description))
                 continue
 
-            if current[role]["protected"]:
-                skipped_protected += 1
-                print("  Role '%s' is protected, so it is left untouched." % role)
+            if current[role]["locked"]:
+                skipped_locked += 1
+                print("  Role '%s' is locked, so it is left untouched." % role)
                 continue
 
             if current[role]["description"] != description:
@@ -829,14 +829,14 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
                 unchanged += 1
 
         # Step 4: Delete the roles the policy package does not define any more, including the
-        # ones that were created by hand through the CLI, unless they are protected, which
+        # ones that were created by hand through the CLI, unless they are locked, which
         # takes them entirely out of the policy package's reach. Neither foreign key to `roles`
         # can be relied on to cascade, so each deleted role takes its permissions and its account
         # assignments along explicitly.
         for role in sorted(set(current) - set(roles)):
-            if current[role]["protected"]:
-                skipped_protected += 1
-                print("  Role '%s' is not defined by the policy package but is protected, so it is left untouched." % role)
+            if current[role]["locked"]:
+                skipped_locked += 1
+                print("  Role '%s' is not defined by the policy package but is locked, so it is left untouched." % role)
                 continue
 
             role_unassigned = _remove_accounts_from_role(role, session=session)
@@ -852,8 +852,8 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
         raise
 
     print()
-    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged, left %d protected role(s) untouched; removed %d permission(s) and %d account assignment(s) with the deleted roles."
-          % (created, updated, deleted, unchanged, skipped_protected, revoked, unassigned))
+    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged, left %d locked role(s) untouched; removed %d permission(s) and %d account assignment(s) with the deleted roles."
+          % (created, updated, deleted, unchanged, skipped_locked, revoked, unassigned))
 
 
 def _ensure_account_exists(account: "InternalAccount", session: "Session") -> None:
