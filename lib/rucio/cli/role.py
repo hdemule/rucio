@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional
 import click
 from tabulate import tabulate
 
-from rucio.cli.utils import OptionalDateTime, RoleOperationType, format_operations, format_permission_tree, wrap_table_column
+from rucio.cli.utils import OptionalDateTime, RoleOperationType, format_operations, format_permission_tree, format_tree, wrap_table_column
 from rucio.common.exception import Duplicate, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound
 
 if TYPE_CHECKING:
@@ -60,11 +60,10 @@ def list_(ctx: click.Context, detail: bool) -> None:
     roles = ctx.obj.client.list_roles()
     rows = []
     for role_entry in roles:
-        rows.append([role_entry['role'], role_entry.get('assignable'), role_entry.get('locked'), role_entry.get('description') or ''])
-        if not detail:
-            continue
-
-        rows.extend([line, "", "", ""] for line in format_permission_tree(ctx.obj.client.list_role_permissions(role_entry['role'])))
+        role_cell = role_entry['role']
+        if detail:
+            role_cell = format_permission_tree(role_cell, ctx.obj.client.list_role_permissions(role_cell))
+        rows.append([role_cell, role_entry.get('assignable'), role_entry.get('locked'), role_entry.get('description') or ''])
 
     headers = ["ROLE", "ASSIGNABLE", "LOCKED", "DESCRIPTION"]
     click.echo(tabulate(wrap_table_column(rows, headers, column=3), headers=headers, tablefmt=ctx.obj.tablefmt))
@@ -186,7 +185,7 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
         click.echo(tabulate(rows, headers=["ACCOUNT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
     else:
         rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
-        click.echo(f"Roles for account {rbac['account']}:")
+        click.echo(f"Roles for account '{rbac['account']}':")
         if not detail:
             rows = [[entry['role'], entry.get('expires_at') or '-'] for entry in rbac['roles']]
             headers = ["ROLE", "EXPIRES AT"]
@@ -198,8 +197,8 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
 
             rows = []
             for entry in rbac['roles']:
-                rows.append([entry['role'], entry.get('expires_at') or '-', entry.get('description') or '-'])
-                rows.extend([line, "", ""] for line in format_permission_tree(permissions_by_role.get(entry['role'], [])))
+                role_cell = format_permission_tree(entry['role'], permissions_by_role.get(entry['role'], []))
+                rows.append([role_cell, entry.get('expires_at') or '-', entry.get('description') or '-'])
             headers = ["ROLE", "EXPIRES AT", "DESCRIPTION"]
             click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
 
@@ -294,6 +293,7 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
 
     if not detail:
         rows = [[scope_pattern, format_operations(ops)] for scope_pattern, ops in sorted(ops_by_scope_pattern.items())]
+        click.echo(f"Permissions associated with role '{role_name}':")
         click.echo(tabulate(rows, headers=["SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
         return
 
@@ -302,18 +302,12 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
 
     rows = []
     for scope_pattern, ops in sorted(ops_by_scope_pattern.items()):
-        rows.append([scope_pattern, format_operations(ops)])
-        if '*' not in scope_pattern:
-            continue
+        scope_cell = scope_pattern
+        if '*' in scope_pattern:
+            scope_cell = format_tree(scope_pattern, _matching_scopes(scope_pattern, known_scopes), placeholder="(no scope currently matches)")
+        rows.append([scope_cell, format_operations(ops)])
 
-        matches = _matching_scopes(scope_pattern, known_scopes)
-        if not matches:
-            rows.append(["    (no scope currently matches)", ""])
-            continue
-        for index, scope in enumerate(matches):
-            branch = "`-- " if index == len(matches) - 1 else "|-- "
-            rows.append([f"    {branch}{scope}", ""])
-
+    click.echo(f"Permissions associated with role '{role_name}':")
     click.echo(tabulate(rows, headers=["SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
