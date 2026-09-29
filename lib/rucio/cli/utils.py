@@ -95,27 +95,53 @@ def format_operations(operations: "Iterable[str]") -> str:
     )
 
 
-def format_permission_tree(permissions: "Iterable[Mapping[str, str]]") -> list[str]:
+TREE_BRANCH = "|-- "
+TREE_LAST_BRANCH = "`-- "
+TREE_PLACEHOLDER_INDENT = ""
+
+
+def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
     """
-    Render the permissions of a role as the branches of a tree, to be listed under the role in a table.
+    Render a node and its branches as a tree, to be used as a single (multi-line) table cell.
+
+    Keeping the whole tree in one cell makes it start right below `root`, even if another column
+    of the same row wraps over several lines, and keeps the indentation of the branches, which
+    tabulate would strip from single-line cells.
+
+    :param root: The first line of the tree, e.g. a role name or a scope pattern.
+    :param branches: One line per branch, listed under `root` in the given order.
+    :param placeholder: The line listed under `root` if there is no branch.
+    :returns: The lines of the tree, joined by newlines.
+    """
+    if not branches:
+        return '\n'.join([root, f"{TREE_PLACEHOLDER_INDENT}{placeholder}"])
+
+    lines = [root]
+    for index, branch in enumerate(branches):
+        prefix = TREE_LAST_BRANCH if index == len(branches) - 1 else TREE_BRANCH
+        lines.append(f"{prefix}{branch}")
+    return '\n'.join(lines)
+
+
+def format_permission_tree(role: str, permissions: "Iterable[Mapping[str, str]]") -> str:
+    """
+    Render a role and its permissions as a tree, see :func:`format_tree`.
 
     Each scope pattern is one branch, showing its operations as in :func:`format_operations`.
 
-    :param permissions: The permissions of one role, each with an 'operation' and a 'scope_pattern'.
-    :returns: One line per scope pattern, or a single placeholder line if there is no permission.
+    :param role: The name of the role, the root of the tree.
+    :param permissions: The permissions of the role, each with an 'operation' and a 'scope_pattern'.
+    :returns: The tree, to be used as a single table cell.
     """
     ops_by_scope_pattern: dict[str, set[str]] = {}
     for permission in permissions:
         ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
 
-    if not ops_by_scope_pattern:
-        return ["    (no permission assigned)"]
-
-    branches = sorted(ops_by_scope_pattern.items())
-    return [
-        f"    {'`-- ' if index == len(branches) - 1 else '|-- '}{format_operations(operations)}  {scope_pattern}"
-        for index, (scope_pattern, operations) in enumerate(branches)
+    branches = [
+        f"{format_operations(operations)}  {scope_pattern}"
+        for scope_pattern, operations in sorted(ops_by_scope_pattern.items())
     ]
+    return format_tree(role, branches, placeholder="(no permission assigned)")
 
 
 def wrap_table_column(
@@ -142,7 +168,8 @@ def wrap_table_column(
     for index, header in enumerate(headers):
         if index == column:
             continue
-        natural_width += max([len(header)] + [len(str(row[index])) for row in rows])
+        # a multi-line cell is as wide as its longest line
+        natural_width += max([len(header)] + [len(line) for row in rows for line in str(row[index]).splitlines()])
 
     # every column is padded and separated by borders, e.g. '| a | b |' in the default 'psql' format
     borders = 3 * len(headers) + 1
