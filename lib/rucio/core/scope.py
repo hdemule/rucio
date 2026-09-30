@@ -23,7 +23,7 @@ import rucio.core.account as account_core
 from rucio.common.exception import AccountNotFound, Duplicate, RucioException, ScopeNotFound, VONotFound
 from rucio.core.vo import vo_exists
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import AccountStatus, DatabaseOperationType, ScopeStatus
+from rucio.db.sqla.constants import AccountStatus, ScopeStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence

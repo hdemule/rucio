@@ -24,6 +24,7 @@ from rucio.common.exception import AccountNotFound, Duplicate, InputValidationEr
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
+from rucio.core.account import has_account_attribute
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import RoleOperationType
@@ -514,7 +515,7 @@ def has_scope_access(
     """
 
     # Check for admin privileges
-    if permission.has_permission(issuer=account, action="can_access_all_scopes", kwargs={"operation": operation}, session=session):
+    if account.external == "root" or has_account_attribute(account=account, key='admin', session=session):
         return True
 
     if is_scope_owner(scope=scope, account=account, session=session):
