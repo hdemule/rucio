@@ -187,6 +187,13 @@ class TestLOCK:
         assert _get(path, 'alice', params=params).status_code == OK
         assert _get(path, 'bob', params=params).status_code == FORBIDDEN
 
+    def test_get_dataset_locks_for_rule_id(self, vo):
+        # endpoint => /rules/<rule_id>/locks
+        path = f'/rules/{_get_rule_id("file1.png", vo)}/locks'
+        assert _get(path, 'root').status_code == OK
+        assert _get(path, 'alice').status_code == OK
+        assert _get(path, 'bob').status_code == FORBIDDEN
+
 
 class TestOPENDATA:
     def test_get_opendata_did(self):
