@@ -16,10 +16,11 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from rucio.common.constants import DEFAULT_VO
-from rucio.common.exception import AccessDenied
+from rucio.common.exception import AccessDenied, RucioException, RuleNotFound
 from rucio.common.types import InternalScope
 from rucio.common.utils import gateway_update_return_dict
 from rucio.core import lock
+from rucio.core import rule as core_rule
 from rucio.core.rse import get_rse_id
 from rucio.db.sqla.constants import DatabaseOperationType, DIDType
 from rucio.db.sqla.session import db_session
@@ -145,18 +146,29 @@ def get_replica_locks_for_rule_id(
     :param vo:          The VO to act on.
     :return:            List of dicts.
     """
+    def access_denied_message() -> str:
+        return 'Rule ID \'%s\' either does not exist or account %s can not access it' % (rule_id, issuer)
 
     with db_session(DatabaseOperationType.READ) as session:
+        try:
+            rule = core_rule.get_rule(rule_id, session=session)
+        except (RuleNotFound, RucioException):  # TODO: RucioException comes from badly formatted rule_id, so we should probably handle that differently.
+            session.rollback()
+            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
+                raise RuleNotFound('Rule %s not found' % rule_id)
+            else:
+                raise AccessDenied(access_denied_message())
+
+        scope_str = str(rule['scope'])
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope_str}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied(access_denied_message())
+
         locks = lock.get_replica_locks_for_rule_id(rule_id=rule_id, session=session)
 
         for lock_object in locks:
             if lock_object['scope'].vo != vo:  # rule is on a different VO, so don't return any locks
                 LOGGER.debug('rule id %s is not present on VO %s' % (rule_id, vo))
                 break
-
-            scope_str = str(lock_object['scope'])
-            auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope_str}, session=session)
-            if not auth_result.allowed:
-                raise AccessDenied('Account %s can not access locks under scope %s. %s' % (issuer, scope_str, auth_result.message))
 
             yield gateway_update_return_dict(lock_object, session=session)
