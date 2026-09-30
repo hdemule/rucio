@@ -62,6 +62,7 @@ def get_dataset_locks(
 
 
 def get_dataset_locks_bulk(
+    issuer: str,
     dids: 'Iterable[dict[str, Any]]',
     vo: str = DEFAULT_VO,
 ) -> 'Iterator[dict[str, Any]]':
@@ -97,9 +98,15 @@ def get_dataset_locks_bulk(
     seen = set()
 
     with db_session(DatabaseOperationType.READ) as session:
+        for did in dids_converted:
+            auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks_bulk', kwargs={'scope': str(did["scope"])}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s can not access locks under scope %s. %s' % (issuer, str(did["scope"]), auth_result.message))
+
         for lock_info in lock.get_dataset_locks_bulk(dids_converted, session=session):
             # filter duplicates - same scope, name, rse_id, rule_id
             scope_str = str(lock_info["scope"])
+
             key = (scope_str, lock_info["name"], lock_info["rse_id"], lock_info["rule_id"])
             if key not in seen:
                 seen.add(key)
