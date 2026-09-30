@@ -2049,7 +2049,7 @@ class AssociatedRules(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for rule in list_associated_replication_rules_for_file(scope=scope, name=name, vo=vo):
+                for rule in list_associated_replication_rules_for_file(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
