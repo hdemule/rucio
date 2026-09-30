@@ -356,6 +356,7 @@ def set_new_dids(
 
 
 def list_content(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -363,6 +364,7 @@ def list_content(
     """
     List data identifier contents.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param vo: The VO to act on.
@@ -371,12 +373,17 @@ def list_content(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_content', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not list data identifier contents in scope %s. %s' % (issuer, scope, auth_result.message))
+
         dids = did.list_content(scope=internal_scope, name=name, session=session)
         for d in dids:
             yield gateway_update_return_dict(d, session=session)
 
 
 def list_content_history(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -384,6 +391,7 @@ def list_content_history(
     """
     List data identifier contents history.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param vo: The VO to act on.
@@ -392,6 +400,10 @@ def list_content_history(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_content_history', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not list data identifier contents history in scope %s. %s' % (issuer, scope, auth_result.message))
+
         dids = did.list_content_history(scope=internal_scope, name=name, session=session)
 
         for d in dids:
@@ -399,6 +411,7 @@ def list_content_history(
 
 
 def bulk_list_files(
+    issuer: str,
     dids: 'Iterable[dict[str, Any]]',
     long: bool = False,
     vo: str = DEFAULT_VO,
@@ -410,16 +423,22 @@ def bulk_list_files(
     :param long:       A boolean to choose if more metadata are returned or not.
     :param vo:         The VO to act on.
     """
-
-    for did_ in dids:
-        did_['scope'] = InternalScope(did_['scope'], vo=vo)
+    dids = list(dids)  # Convert to list to allow multiple iterations
 
     with db_session(DatabaseOperationType.READ) as session:
+        for did_ in dids:
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': did_['scope']}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s can not list files for data identifier in scope %s. %s' % (issuer, did_['scope'], auth_result.message))
+
+            did_['scope'] = InternalScope(did_['scope'], vo=vo)
+
         for file_ in did.bulk_list_files(dids=dids, long=long, session=session):
             yield gateway_update_return_dict(file_, session=session)
 
 
 def list_files(
+    issuer: str,
     scope: str,
     name: str,
     long: bool,
@@ -428,6 +447,7 @@ def list_files(
     """
     List data identifier file contents.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param long:       A boolean to choose if GUID is returned or not.
@@ -437,6 +457,11 @@ def list_files(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not list data identifier contents in scope %s. %s' % (issuer, scope, auth_result.message))
+
         dids = did.list_files(scope=internal_scope, name=name, long=long, session=session)
 
         for d in dids:
@@ -594,6 +619,7 @@ def set_dids_metadata_bulk(
 
 
 def get_metadata(
+    issuer: str,
     scope: str,
     name: str,
     plugin: str = 'DID_COLUMN',
@@ -611,11 +637,16 @@ def get_metadata(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_metadata', kwargs={'scope': scope, 'name': name, 'plugin': plugin}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not get metadata for data identifier %s:%s. %s' % (issuer, scope, name, auth_result.message))
+
         d = did.get_metadata(scope=internal_scope, name=name, plugin=plugin, session=session)
         return gateway_update_return_dict(d, session=session)
 
 
 def get_metadata_bulk(
+    issuer: str,
     dids: 'Iterable[dict[str, Any]]',
     inherit: bool = False,
     plugin: str = 'DID_COLUMN',
@@ -628,12 +659,17 @@ def get_metadata_bulk(
     :param plugin:             The metadata plugin to query, 'ALL' for all available plugins
     :param vo:                 The VO to act on.
     """
-
+    dids = list(dids)
     validate_schema(name='dids', obj=dids, vo=vo)
-    for entry in dids:
-        entry['scope'] = InternalScope(entry['scope'], vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        for entry in dids:
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_metadata', kwargs={'scope': entry['scope'], 'name': entry['name'], 'plugin': plugin}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s can not get metadata for data identifier %s:%s. %s' % (issuer, entry['scope'], entry['name'], auth_result.message))
+
+            entry['scope'] = InternalScope(entry['scope'], vo=vo)
+
         meta = did.get_metadata_bulk(dids, inherit=inherit, plugin=plugin, session=session)
         for met in meta:
             yield gateway_update_return_dict(met, session=session)
@@ -707,6 +743,7 @@ def get_dataset_by_guid(
 
 
 def list_parent_dids(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -722,6 +759,10 @@ def list_parent_dids(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_parent_dids', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not list parent data identifiers for %s:%s. %s' % (issuer, scope, name, auth_result.message))
+
         dids = did.list_parent_dids(scope=internal_scope, name=name, session=session)
 
         for d in dids:
