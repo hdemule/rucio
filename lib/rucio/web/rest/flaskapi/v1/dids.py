@@ -253,7 +253,7 @@ class Search(ErrorHandlingMethodView):
                     type: object
                     description: "The name of a DID or a dictionary of a DID for long option."
           401:
-            description: "Invalid Auth Token"
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "Invalid key in filter."
           406:
@@ -295,7 +295,7 @@ class Search(ErrorHandlingMethodView):
         except UnsupportedOperation as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except KeyNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -588,8 +588,8 @@ class DIDs(ErrorHandlingMethodView):
                       bytes:
                         description: "The size in bytes."
                         type: number
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden, the current authenticated user does not have permission to get the DID."
           404:
             description: "Scope not found"
           406:
@@ -613,7 +613,7 @@ class DIDs(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except (ScopeNotFound, DataIdentifierNotFound) as error:
             return generate_http_error_flask(404, error)
 
@@ -836,7 +836,7 @@ class Attachment(ErrorHandlingMethodView):
                         description: "The md5 checksum of the DID."
                         type: string
           401:
-            description: "Invalid Auth Token"
+            description: "Forbidden – the current authenticated user does not have permission to list the contents of the DID."
           404:
             description: "Scope not found"
           406:
@@ -853,7 +853,7 @@ class Attachment(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1060,7 +1060,7 @@ class AttachmentHistory(ErrorHandlingMethodView):
                         description: "The last time the DID was updated."
                         type: string
           401:
-            description: "Invalid Auth Token"
+            description: "Forbidden – the current authenticated user does not have permission to view the content history of the DID."
           404:
             description: "DID not found"
           406:
@@ -1077,7 +1077,7 @@ class AttachmentHistory(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1148,8 +1148,8 @@ class Files(ErrorHandlingMethodView):
                         description: "The lumi block number. Only returned when `long` is requested and the information exists."
           400:
             description: "Bad Request – invalid scope/name."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to get the DID."
           404:
             description: "DID not found"
           406:
@@ -1168,7 +1168,7 @@ class Files(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1237,8 +1237,8 @@ class BulkFiles(ErrorHandlingMethodView):
                       adler32:
                         description: "The adler32 checksum."
                         type: string
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden, the current authenticated user does not have permission to list files for one or more of the specified DIDs."
         """
         parameters = json_parameters(parse_response)
         dids = param_get(parameters, 'dids', default=[])
@@ -1249,7 +1249,7 @@ class BulkFiles(ErrorHandlingMethodView):
 
             return try_stream(generate(vo=request.environ['vo']))
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class Parents(ErrorHandlingMethodView):
@@ -1290,8 +1290,8 @@ class Parents(ErrorHandlingMethodView):
                       type:
                         description: "The type of the DID."
                         type: string
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to get the DID."
           404:
             description: "DID not found"
           406:
@@ -1308,7 +1308,7 @@ class Parents(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1370,8 +1370,8 @@ class Meta(ErrorHandlingMethodView):
                       # ... etc
           400:
             description: "Bad Request – invalid scope_name, or invalid metadata plugin specified."
-          401:
-            description: "Unauthorized – invalid Auth Token."
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to get the DID."
           404:
             description: "Not found – the specified DID does not exist."
           405:
@@ -1404,7 +1404,7 @@ class Meta(ErrorHandlingMethodView):
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except UnsupportedMetadataPlugin as error:
             return generate_http_error_flask(400, error)
 
@@ -1800,6 +1800,8 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
               missing `dids` array).
           401:
             description: "Unauthorized – invalid Auth Token."
+          403:
+            description: "Forbidden – insufficient privileges to read at least one DID."
           404:
             description: "Not found – none of the requested DIDs exist."
           406:
@@ -1931,7 +1933,7 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
                 400, err, "Cannot decode json parameter list"
             )
         except AccessDenied as err:
-            return generate_http_error_flask(401, err)
+            return generate_http_error_flask(403, err)
         except DataIdentifierNotFound as err:
             return generate_http_error_flask(404, err)
 
@@ -2038,8 +2040,8 @@ class AssociatedRules(ErrorHandlingMethodView):
                       rse_expression:
                         description: "The rse expression of the rule."
                         type: string
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the DID."
           404:
             description: "DID not found"
           406:
@@ -2055,10 +2057,10 @@ class AssociatedRules(ErrorHandlingMethodView):
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
-        except AccessDenied as error:
-            return generate_http_error_flask(401, error)
 
 
 class GUIDLookup(ErrorHandlingMethodView):
