@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from rucio.common.config import config_get_bool
 from rucio.common.constants import DEFAULT_ACTIVITY, DEFAULT_VO
-from rucio.common.exception import AccessDenied
+from rucio.common.exception import AccessDenied, RucioException, RuleNotFound
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import gateway_update_return_dict
@@ -37,6 +37,10 @@ def is_multi_vo(session: "Session") -> bool:
     returns: Boolean True if running in multi-VO
     """
     return config_get_bool('common', 'multi_vo', raise_exception=False, default=False, session=session)
+
+
+def access_denied_message(rule_id: str, issuer: str) -> str:
+    return 'Rule ID \'%s\' either does not exist or account %s can not access it' % (rule_id, issuer)
 
 
 def add_replication_rule(
@@ -155,13 +159,19 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not access rules at other VOs. %s' % (issuer, auth_result.message))
 
-        result = rule.get_rule(rule_id, session=session)
-        scope = result['scope']
-        kwargs = {'scope': scope.external}
+        try:
+            result = rule.get_rule(rule_id, session=session)
+        except (RuleNotFound, RucioException):  # TODO: RucioException comes from badly formatted rule_id, so we should probably handle that differently.
+            session.rollback()
+            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
+                raise RuleNotFound('Rule %s not found' % rule_id)
+            else:
+                raise AccessDenied(access_denied_message(rule_id, issuer))
 
-        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replication_rule', kwargs=kwargs, session=session)
+        scope = str(result['scope'])
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s can not access rules from scope %s. %s' % (issuer, scope, auth_result.message))
+            raise AccessDenied(access_denied_message(rule_id, issuer))
 
         return gateway_update_return_dict(result, session=session)
 
@@ -381,13 +391,20 @@ def examine_replication_rule(
             auth_result = has_permission(issuer=issuer, vo=vo, action='access_rule_vo', kwargs=kwargs, session=session)
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not access rules at other VOs. %s' % (issuer, auth_result.message))
-        result = rule.examine_rule(rule_id, session=session)
-        scope = result['scope']
-        kwargs = {'scope': scope.external}
 
-        auth_result = has_permission(issuer=issuer, vo=vo, action='examine_replication_rule', kwargs=kwargs, session=session)
+        try:
+            result = rule.examine_rule(rule_id, session=session)
+        except (RuleNotFound, RucioException):  # TODO: RucioException comes from badly formatted rule_id, so we should probably handle that differently.
+            session.rollback()
+            if has_permission(issuer=issuer, vo=vo, action='know_if_rule_exists', kwargs={}, session=session).allowed:
+                raise RuleNotFound('Rule %s not found' % rule_id)
+            else:
+                raise AccessDenied(access_denied_message(rule_id, issuer))
+
+        scope = str(result['scope'])
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope}, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s can not access rules from scope %s. %s' % (issuer, scope, auth_result.message))
+            raise AccessDenied(access_denied_message(rule_id, issuer))
 
         result = gateway_update_return_dict(result, session=session)
         if 'transfers' in result:
