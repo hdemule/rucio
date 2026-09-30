@@ -314,6 +314,8 @@ class DatasetLocksForDids(ErrorHandlingMethodView):
                   enum: ['Cannot find the list of DIDs in the data. Use "dids" keyword.']
           406:
             description: "Not acceptable"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the lock."
 
         """
 
@@ -324,7 +326,7 @@ class DatasetLocksForDids(ErrorHandlingMethodView):
             return 'Can not find the list of DIDs in the data. Use "dids" keyword.', 400
         vo = request.environ['vo']
         try:
-            locks = get_dataset_locks_bulk(dids, vo)        # removes duplicates
+            locks = get_dataset_locks_bulk(issuer=request.environ['issuer'], dids=dids, vo=vo)        # removes duplicates
 
             def generate(locks):
                 for lock in locks:
@@ -334,6 +336,8 @@ class DatasetLocksForDids(ErrorHandlingMethodView):
 
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 def blueprint() -> AuthenticatedBlueprint:
