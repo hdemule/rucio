@@ -82,8 +82,8 @@ class Rule(ErrorHandlingMethodView):
                   type: string
           406:
             description: "Not Acceptable"
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           404:
             description: "No rule found for the given id"
         """
@@ -97,7 +97,7 @@ class Rule(ErrorHandlingMethodView):
         except RuleNotFound as error:
             return generate_http_error_flask(404, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
         return Response(render_json(**rule), content_type="application/json")
 
@@ -737,8 +737,8 @@ class RuleHistoryFull(ErrorHandlingMethodView):
                       locks_replicating_cnt:
                         type: integer
                         description: "The number of locks which are replicating."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           406:
             description: "Not acceptable."
         """
@@ -753,7 +753,7 @@ class RuleHistoryFull(ErrorHandlingMethodView):
         except ValueError as error:
             return generate_http_error_flask(400, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
 
 class RuleAnalysis(ErrorHandlingMethodView):
@@ -817,8 +817,8 @@ class RuleAnalysis(ErrorHandlingMethodView):
                           last_time:
                             type: string
                             description: "The time of the last transfer."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           404:
             description: "No rule found for the given id"
           406:
@@ -827,7 +827,7 @@ class RuleAnalysis(ErrorHandlingMethodView):
         try:
             analysis = examine_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         return Response(render_json(**analysis), content_type='application/json')
 
 
