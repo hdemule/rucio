@@ -96,6 +96,8 @@ class Rule(ErrorHandlingMethodView):
             rule = get_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except RuleNotFound as error:
             return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
 
         return Response(render_json(**rule), content_type="application/json")
 
@@ -744,12 +746,14 @@ class RuleHistoryFull(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for history in list_replication_rule_full_history(scope, name, vo=vo):
+                for history in list_replication_rule_full_history(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**history) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class RuleAnalysis(ErrorHandlingMethodView):
