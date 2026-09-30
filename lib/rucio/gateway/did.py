@@ -471,10 +471,11 @@ def scope_list(
             yield ret_did
 
 
-def get_did(scope: str, name: str, dynamic_depth: Optional[DIDType] = None, vo: str = DEFAULT_VO) -> "dict[str, Any]":
+def get_did(issuer: str, scope: str, name: str, dynamic_depth: Optional[DIDType] = None, vo: str = DEFAULT_VO) -> "dict[str, Any]":
     """
     Retrieve a single data DID.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param dynamic_depth: the DID type to use as source for estimation of this DIDs length/bytes.
@@ -487,6 +488,10 @@ def get_did(scope: str, name: str, dynamic_depth: Optional[DIDType] = None, vo: 
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_did', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not get data identifier %s:%s in scope %s. %s' % (issuer, scope, name, scope, auth_result.message))
+
         d = did.get_did(scope=internal_scope, name=name, dynamic_depth=dynamic_depth, session=session)
         return gateway_update_return_dict(d, session=session)
 
