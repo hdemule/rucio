@@ -470,6 +470,8 @@ class ReplicaLocks(ErrorHandlingMethodView):
                         type: string
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           404:
             description: "No rule found for the given id"
           406:
