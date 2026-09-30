@@ -294,6 +294,8 @@ class Search(ErrorHandlingMethodView):
             return generate_http_error_flask(400, error)
         except UnsupportedOperation as error:
             return generate_http_error_flask(409, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except KeyNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -610,6 +612,8 @@ class DIDs(ErrorHandlingMethodView):
             return Response(render_json(**did), content_type='application/json')
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except (ScopeNotFound, DataIdentifierNotFound) as error:
             return generate_http_error_flask(404, error)
 
@@ -842,12 +846,14 @@ class Attachment(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for did in list_content(scope=scope, name=name, vo=vo):
+                for did in list_content(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**did) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1064,12 +1070,14 @@ class AttachmentHistory(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for did in list_content_history(scope=scope, name=name, vo=vo):
+                for did in list_content_history(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**did) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1153,12 +1161,14 @@ class Files(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for file in list_files(scope=scope, name=name, long=long, vo=vo):
+                for file in list_files(issuer=request.environ['issuer'], scope=scope, name=name, long=long, vo=vo):
                     yield dumps(file) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1234,7 +1244,7 @@ class BulkFiles(ErrorHandlingMethodView):
         dids = param_get(parameters, 'dids', default=[])
         try:
             def generate(vo):
-                for did in bulk_list_files(dids=dids, vo=vo):
+                for did in bulk_list_files(issuer=request.environ['issuer'], dids=dids, vo=vo):
                     yield render_json(**did) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
@@ -1291,12 +1301,14 @@ class Parents(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for dataset in list_parent_dids(scope=scope, name=name, vo=vo):
+                for dataset in list_parent_dids(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**dataset) + "\n"
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1387,10 +1399,12 @@ class Meta(ErrorHandlingMethodView):
 
         plugin = request.args.get('plugin', default='DID_COLUMN')
         try:
-            meta = get_metadata(scope=scope, name=name, plugin=plugin, vo=vo)
+            meta = get_metadata(issuer=request.environ['issuer'], scope=scope, name=name, plugin=plugin, vo=vo)
             return Response(render_json(**meta), content_type='application/json')
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(401, error)
         except UnsupportedMetadataPlugin as error:
             return generate_http_error_flask(400, error)
 
@@ -1902,7 +1916,13 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for meta in get_metadata_bulk(dids, inherit=inherit, plugin=plugin, vo=vo):
+                for meta in get_metadata_bulk(
+                    issuer=request.environ['issuer'],
+                    dids=dids,
+                    inherit=inherit,
+                    plugin=plugin,
+                    vo=vo,
+                ):
                     yield render_json(**meta) + "\n"
 
             return try_stream(generate(vo=request.environ["vo"]))
@@ -1910,6 +1930,8 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
             return generate_http_error_flask(
                 400, err, "Cannot decode json parameter list"
             )
+        except AccessDenied as err:
+            return generate_http_error_flask(401, err)
         except DataIdentifierNotFound as err:
             return generate_http_error_flask(404, err)
 
