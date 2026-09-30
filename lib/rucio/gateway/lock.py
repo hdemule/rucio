@@ -16,12 +16,14 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from rucio.common.constants import DEFAULT_VO
+from rucio.common.exception import AccessDenied
 from rucio.common.types import InternalScope
 from rucio.common.utils import gateway_update_return_dict
 from rucio.core import lock
 from rucio.core.rse import get_rse_id
 from rucio.db.sqla.constants import DatabaseOperationType, DIDType
 from rucio.db.sqla.session import db_session
+from rucio.gateway.permission import has_permission
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -32,6 +34,7 @@ LOGGER.setLevel(logging.DEBUG)
 
 
 def get_dataset_locks(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -39,15 +42,19 @@ def get_dataset_locks(
     """
     Get the dataset locks of a dataset.
 
+    :param issuer:         The account issuing the request.
     :param scope:          Scope of the dataset.
     :param name:           Name of the dataset.
     :param vo:             The VO to act on.
     :return:               List of dicts {'rse_id': ..., 'state': ...}
     """
-
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks', kwargs={'scope': scope}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s can not access locks under scope %s. %s' % (issuer, internal_scope, auth_result.message))
+
         locks = lock.get_dataset_locks(scope=internal_scope, name=name, session=session)
 
         for lock_object in locks:
