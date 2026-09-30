@@ -484,6 +484,8 @@ class ReplicaLocks(ErrorHandlingMethodView):
 
         try:
             res = try_stream(generate(vo=request.environ['vo']))
+        except RuleNotFound as error:
+            return generate_http_error_flask(404, error)
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
 
@@ -833,6 +835,8 @@ class RuleAnalysis(ErrorHandlingMethodView):
         """
         try:
             analysis = examine_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except RuleNotFound as error:
+            return generate_http_error_flask(404, error)
         except AccessDenied as error:
             return generate_http_error_flask(403, error)
         return Response(render_json(**analysis), content_type='application/json')
