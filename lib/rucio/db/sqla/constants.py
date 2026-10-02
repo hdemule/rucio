@@ -213,7 +213,22 @@ class DatabaseOperationType(Enum):
     WRITE = 'write'
 
 
-class RoleOperationType(Enum):
+class RolePermissionOperationType(Enum):
+    """
+    The parent of the operations a role permission grants.
+
+    It has no member: each permission type checked against requests subclasses it with its own
+    operations, see `rucio.core.role.CheckedPermissionTypeHandler`.
+    """
+
+
+class ScopeOperationType(RolePermissionOperationType):
+    """The operations a scope permission grants on the content of the scopes its pattern matches."""
     READ = 'read'
     WRITE = 'write'
     DELETE = 'delete'
+
+
+class RolePermissionType(Enum):
+    """The types of the permissions a role can be granted, each stored in its own `role_<type>_permission_map` table(s)."""
+    SCOPE = 'scope'
