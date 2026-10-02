@@ -47,11 +47,11 @@ from rucio.db.sqla.constants import (
     ReplicaState,
     RequestState,
     RequestType,
-    RoleOperationType,
     RSEType,
     RuleGrouping,
     RuleNotification,
     RuleState,
+    ScopeOperationType,
     ScopeStatus,
     SubscriptionState,
 )
@@ -430,19 +430,19 @@ class AccountRoleAssociation(BASE, ModelBase):
                    CheckConstraint('EXPIRES_AT IS NULL OR ACTIVATES_AT < EXPIRES_AT', name='ACCOUNT_ROLE_MAP_EXPIRES_CHK'))
 
 
-class RolePermissionAssociation(BASE, ModelBase):
+class RoleScopePermissionAssociation(BASE, ModelBase):
     """Represents a role's permission (scope + operation) for Role-Based Access Control (RBAC)"""
-    __tablename__ = 'role_permission_map'
+    __tablename__ = 'role_scope_permission_map'
     role: Mapped[str] = mapped_column(String(255))
     scope_pattern: Mapped[str] = mapped_column(String(common_schema.get_schema_value('SCOPE_LENGTH')))
-    operation: Mapped[RoleOperationType] = mapped_column(Enum(RoleOperationType, name='ROLE_PERMISSION_MAP_OPERATION_CHK',
+    operation: Mapped[ScopeOperationType] = mapped_column(Enum(ScopeOperationType, name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_CHK',
                                                               create_constraint=True,
                                                               values_callable=lambda obj: [e.value for e in obj]))
-    _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_PERMISSION_MAP_PK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
-                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
-                   CheckConstraint('SCOPE_PATTERN IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_PATTERN_NN'),
-                   CheckConstraint('OPERATION IS NOT NULL', name='ROLE_PERMISSION_MAP_OPERATION_NN'))
+    _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_SCOPE_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_SCOPE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('SCOPE_PATTERN IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_SCOPE_PATTERN_NN'),
+                   CheckConstraint('OPERATION IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_NN'))
 
 
 class DataIdentifier(BASE, ModelBase):
