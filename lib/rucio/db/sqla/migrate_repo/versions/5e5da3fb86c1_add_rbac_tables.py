@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Add Rule-Based Access Control tables"""    # noqa: D400, D415
+"""Add Role-Based Access Control tables"""    # noqa: D400, D415
 
 import datetime
 
@@ -22,6 +22,7 @@ from alembic.op import create_check_constraint, create_foreign_key, create_prima
 
 from rucio.common.schema import get_schema_value
 from rucio.db.sqla.constants import RoleOperationType
+from rucio.db.sqla.types import GUID
 
 # Alembic revision identifiers
 revision = '5e5da3fb86c1'
@@ -59,31 +60,47 @@ def upgrade():
         create_check_constraint('ACCOUNT_ROLE_MAP_CREATED_NN', 'account_role_map', 'created_at is not null')
         create_check_constraint('ACCOUNT_ROLE_MAP_UPDATED_NN', 'account_role_map', 'updated_at is not null')
 
-        create_table('role_permission_map',
+        create_table('role_scope_permission_map',
                      sa.Column('role', sa.String(255)),
                      sa.Column('scope_pattern', sa.String(get_schema_value('SCOPE_LENGTH'))),
                      sa.Column('operation', sa.Enum(RoleOperationType,
-                                                    name='ROLE_PERMISSION_MAP_OPERATION_CHK',
+                                                    name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_CHK',
                                                     create_constraint=True,
                                                     values_callable=lambda obj: [e.value for e in obj])),
                      sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
                      sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
-        create_primary_key('ROLE_PERMISSION_MAP_PK', 'role_permission_map', ['role', 'scope_pattern', 'operation'])
-        create_foreign_key('ROLE_PERMISSION_MAP_ROLE_FK', 'role_permission_map', 'roles', ['role'], ['role'], onupdate='CASCADE', ondelete='CASCADE')
-        create_check_constraint('ROLE_PERMISSION_MAP_ROLE_NN', 'role_permission_map', 'role is not null')
-        create_check_constraint('ROLE_PERMISSION_MAP_SCOPE_PATTERN_NN', 'role_permission_map', 'scope_pattern is not null')
-        create_check_constraint('ROLE_PERMISSION_MAP_OPERATION_NN', 'role_permission_map', 'operation is not null')
-        create_check_constraint('ROLE_PERMISSION_MAP_CREATED_NN', 'role_permission_map', 'created_at is not null')
-        create_check_constraint('ROLE_PERMISSION_MAP_UPDATED_NN', 'role_permission_map', 'updated_at is not null')
+        create_primary_key('ROLE_SCOPE_PERMISSION_MAP_PK', 'role_scope_permission_map', ['role', 'scope_pattern', 'operation'])
+        create_foreign_key('ROLE_SCOPE_PERMISSION_MAP_ROLE_FK', 'role_scope_permission_map', 'roles', ['role'], ['role'], onupdate='CASCADE', ondelete='CASCADE')
+        create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_ROLE_NN', 'role_scope_permission_map', 'role is not null')
+        create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_SCOPE_PATTERN_NN', 'role_scope_permission_map', 'scope_pattern is not null')
+        create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_OPERATION_NN', 'role_scope_permission_map', 'operation is not null')
+        create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_CREATED_NN', 'role_scope_permission_map', 'created_at is not null')
+        create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_UPDATED_NN', 'role_scope_permission_map', 'updated_at is not null')
+
+        create_table('role_rse_permission_map',
+                     sa.Column('role', sa.String(255)),
+                     sa.Column('rse_id', GUID()),
+                     sa.Column('limit_bytes', sa.BigInteger),
+                     sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
+                     sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
+        create_primary_key('ROLE_RSE_PERMISSION_MAP_PK', 'role_rse_permission_map', ['role', 'rse_id'])
+        create_foreign_key('ROLE_RSE_PERMISSION_MAP_ROLE_FK', 'role_rse_permission_map', 'roles', ['role'], ['role'], onupdate='CASCADE', ondelete='CASCADE')
+        create_foreign_key('ROLE_RSE_PERMISSION_MAP_RSE_FK', 'role_rse_permission_map', 'rses', ['rse_id'], ['id'], onupdate='CASCADE', ondelete='CASCADE')
+        create_check_constraint('ROLE_RSE_PERMISSION_MAP_ROLE_NN', 'role_rse_permission_map', 'role is not null')
+        create_check_constraint('ROLE_RSE_PERMISSION_MAP_RSE_NN', 'role_rse_permission_map', 'rse_id is not null')
+        create_check_constraint('ROLE_RSE_PERMISSION_MAP_LIMIT_BYTES_NN', 'role_rse_permission_map', 'limit_bytes is not null')
+        create_check_constraint('ROLE_RSE_PERMISSION_MAP_CREATED_NN', 'role_rse_permission_map', 'created_at is not null')
+        create_check_constraint('ROLE_RSE_PERMISSION_MAP_UPDATED_NN', 'role_rse_permission_map', 'updated_at is not null')
 
 
 def downgrade():
     """Downgrade the database to the previous revision."""
     if context.get_context().dialect.name in ['oracle', 'mysql', 'postgresql']:
-        drop_table('role_permission_map')
+        drop_table('role_rse_permission_map')
+        drop_table('role_scope_permission_map')
         drop_table('account_role_map')
         drop_table('roles')
 
     if context.get_context().dialect.name == 'postgresql':
         # The enumerated type is not removed together with the table it belongs to
-        execute('DROP TYPE "ROLE_PERMISSION_MAP_OPERATION_CHK"')
+        execute('DROP TYPE "ROLE_SCOPE_PERMISSION_MAP_OPERATION_CHK"')

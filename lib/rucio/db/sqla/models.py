@@ -402,7 +402,7 @@ class Scope(BASE, ModelBase):
 
 
 class Roles(BASE, ModelBase):
-    """Represents a role for Rule-Based Access Control (RBAC)"""
+    """Represents a role for Role-Based Access Control (RBAC)"""
     __tablename__ = 'roles'
     role: Mapped[str] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text)
@@ -415,7 +415,7 @@ class Roles(BASE, ModelBase):
 
 
 class AccountRoleAssociation(BASE, ModelBase):
-    """Represents a map account-role for Rule-Based Access Control (RBAC)"""
+    """Represents a map account-role for Role-Based Access Control (RBAC)"""
     __tablename__ = 'account_role_map'
     account: Mapped[InternalAccount] = mapped_column(InternalAccountString(common_schema.get_schema_value('ACCOUNT_LENGTH')))
     role: Mapped[str] = mapped_column(String(255))
@@ -427,19 +427,33 @@ class AccountRoleAssociation(BASE, ModelBase):
                    CheckConstraint('ROLE IS NOT NULL', name='ACCOUNT_ROLE_MAP_ROLE_NN'))
 
 
-class RolePermissionAssociation(BASE, ModelBase):
-    """Represents a role's permission (scope + operation) for Rule-Based Access Control (RBAC)"""
-    __tablename__ = 'role_permission_map'
+class RoleScopePermissionAssociation(BASE, ModelBase):
+    """Represents a role's permission (scope + operation) for Role-Based Access Control (RBAC)"""
+    __tablename__ = 'role_scope_permission_map'
     role: Mapped[str] = mapped_column(String(255))
     scope_pattern: Mapped[str] = mapped_column(String(common_schema.get_schema_value('SCOPE_LENGTH')))
-    operation: Mapped[RoleOperationType] = mapped_column(Enum(RoleOperationType, name='ROLE_PERMISSION_MAP_OPERATION_CHK',
+    operation: Mapped[RoleOperationType] = mapped_column(Enum(RoleOperationType, name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_CHK',
                                                               create_constraint=True,
                                                               values_callable=lambda obj: [e.value for e in obj]))
-    _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_PERMISSION_MAP_PK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
-                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_PERMISSION_MAP_ROLE_NN'),
-                   CheckConstraint('SCOPE_PATTERN IS NOT NULL', name='ROLE_PERMISSION_MAP_SCOPE_PATTERN_NN'),
-                   CheckConstraint('OPERATION IS NOT NULL', name='ROLE_PERMISSION_MAP_OPERATION_NN'))
+    _table_args = (PrimaryKeyConstraint('role', 'scope_pattern', 'operation', name='ROLE_SCOPE_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_SCOPE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('SCOPE_PATTERN IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_SCOPE_PATTERN_NN'),
+                   CheckConstraint('OPERATION IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_NN'))
+
+
+class RoleRSEPermissionAssociation(BASE, ModelBase):
+    """Represents a role's permission (RSE + limit) for Role-Based Access Control (RBAC)"""
+    __tablename__ = 'role_rse_permission_map'
+    role: Mapped[str] = mapped_column(String(255))
+    rse_id: Mapped[GUID] = mapped_column(GUID())
+    limit_bytes: Mapped[int] = mapped_column(BigInteger)
+    _table_args = (PrimaryKeyConstraint('role', 'rse_id', name='ROLE_RSE_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_RSE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   ForeignKeyConstraint(['rse_id'], ['rses.id'], name='ROLE_RSE_PERMISSION_MAP_RSE_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_RSE_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('RSE_ID IS NOT NULL', name='ROLE_RSE_PERMISSION_MAP_RSE_NN'),
+                   CheckConstraint('LIMIT_BYTES IS NOT NULL', name='ROLE_RSE_PERMISSION_MAP_LIMIT_BYTES_NN'))
 
 
 class DataIdentifier(BASE, ModelBase):
