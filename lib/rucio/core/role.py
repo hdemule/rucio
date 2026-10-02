@@ -395,9 +395,9 @@ def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]
         raise RoleNotFound("Role '%s' does not exist." % role)
 
     stmt = (
-        select(models.RolePermissionAssociation)
-        .where(models.RolePermissionAssociation.role == role)
-        .order_by(models.RolePermissionAssociation.scope_pattern, models.RolePermissionAssociation.operation)
+        select(models.RoleScopePermissionAssociation)
+        .where(models.RoleScopePermissionAssociation.role == role)
+        .order_by(models.RoleScopePermissionAssociation.scope_pattern, models.RoleScopePermissionAssociation.operation)
     )
     return [{"operation": permission.operation.value, "scope_pattern": permission.scope_pattern} for permission in session.execute(stmt).scalars()]
 
@@ -419,14 +419,14 @@ def add_role_permission(role: str, scope_pattern: str, operation: "RoleOperation
     scope_pattern = _validate_scope_pattern(scope_pattern)
     _ensure_unlocked(role, force, session)
 
-    session.add(models.RolePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
+    session.add(models.RoleScopePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
     try:
         session.commit()
     except IntegrityError as error:
         session.rollback()
-        if _violates_constraint(error, "ROLE_PERMISSION_MAP_ROLE_FK"):
+        if _violates_constraint(error, "ROLE_SCOPE_PERMISSION_MAP_ROLE_FK"):
             raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, "ROLE_PERMISSION_MAP_PK"):
+        if _violates_constraint(error, "ROLE_SCOPE_PERMISSION_MAP_PK"):
             raise Duplicate("Role '%s' already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
         raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
 
@@ -445,7 +445,7 @@ def delete_role_permission(role: str, scope_pattern: str, operation: "RoleOperat
     """
     _ensure_unlocked(role, force, session)
 
-    mapping = session.get(models.RolePermissionAssociation, (role, scope_pattern, operation))
+    mapping = session.get(models.RoleScopePermissionAssociation, (role, scope_pattern, operation))
     if mapping is None:
         raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
 
@@ -482,15 +482,15 @@ def has_role_scope_access(
     For checking ownership or admin/root privileges, use the :func:`has_scope_access` function instead.
     """
     stmt = (
-        select(models.RolePermissionAssociation.scope_pattern)
+        select(models.RoleScopePermissionAssociation.scope_pattern)
         .select_from(models.AccountRoleAssociation)
         .join(
-            models.RolePermissionAssociation,
-            models.RolePermissionAssociation.role == models.AccountRoleAssociation.role,
+            models.RoleScopePermissionAssociation,
+            models.RoleScopePermissionAssociation.role == models.AccountRoleAssociation.role,
         )
         .where(
             models.AccountRoleAssociation.account == account,
-            models.RolePermissionAssociation.operation == operation,
+            models.RoleScopePermissionAssociation.operation == operation,
             or_(
                 models.AccountRoleAssociation.expires_at.is_(None),
                 # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
@@ -759,7 +759,7 @@ def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
     """
     Delete a role together with the rows referencing it.
 
-    `account_role_map.role` and `role_permission_map.role` reference `roles.role`, so the
+    `account_role_map.role` and `role_scope_permission_map.role` reference `roles.role`, so the
     database refuses to delete a role which is still assigned to an account or still carries
     permissions. Those rows are therefore removed first, which keeps the deletion working
     whatever referential action the foreign keys are declared with.
