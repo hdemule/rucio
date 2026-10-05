@@ -1,6 +1,5 @@
 FROM rucio/rucio-clients:release-41.1.1 AS builder
 
-USER root
 WORKDIR /src
 
 ARG SOURCE_REVISION
@@ -21,8 +20,6 @@ RUN bash tools/build_sdist_wheel.sh clients
 
 FROM rucio/rucio-clients:release-41.1.1
 
-USER root
-
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
 
@@ -32,4 +29,12 @@ RUN python3 -m pip install --no-cache-dir /tmp/wheels/*.whl \
     && python3 -m pip check \
     && rm -rf /tmp/wheels
 
-# Preserve the official image's entrypoint and default command.
+# Repository for the RBAC tutorial
+RUN dnf install -y git \
+    && dnf clean all \
+    && git clone https://gitlab.cern.ch/gguerrie/rucio-tutorial.git /opt/rucio-tutorial
+
+# Setup of the certificate and configuration files with small script for setting the username at runtime.
+COPY tls-ca-bundle.pem /certs/tls-ca-bundle.pem
+COPY rucio.cfg /opt/rucio/etc/rucio.cfg
+COPY --chmod=755 set-username.sh /usr/local/bin/set-username

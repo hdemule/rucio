@@ -44,6 +44,9 @@ build/
 !/build/rbac-client-image/
 /build/rbac-client-image/*
 !/build/rbac-client-image/Dockerfile
+!/build/rbac-client-image/rucio.cfg
+!/build/rbac-client-image/set-username.sh
+!/build/rbac-client-image/tls-ca-bundle.pem
 covhtml
 dist/
 examples/whip/results/
