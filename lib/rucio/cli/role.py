@@ -5,24 +5,14 @@ from typing import TYPE_CHECKING, Optional
 import click
 from tabulate import tabulate
 
-from rucio.cli.utils import OptionalDateTime, RoleOperationType, format_operations, format_permission_tree, format_tree, wrap_table_column
+from rucio.cli.utils import OptionalDateTime, RoleOperations, RoleOperationType, format_operations, format_permission_tree, format_tree, wrap_table_column
 from rucio.common.exception import Duplicate, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
 
-# Shorthands accepted on the command line, mapped to the operation(s) they expand to.
-OPERATION_SHORTHANDS: dict[str, list[RoleOperationType]] = {
-    'r': [RoleOperationType.READ],
-    'read': [RoleOperationType.READ],
-    'w': [RoleOperationType.WRITE],
-    'write': [RoleOperationType.WRITE],
-    'd': [RoleOperationType.DELETE],
-    'delete': [RoleOperationType.DELETE],
-    'rw': [RoleOperationType.READ, RoleOperationType.WRITE],
-    'rwd': [RoleOperationType.READ, RoleOperationType.WRITE, RoleOperationType.DELETE],
-}
+OPERATIONS = RoleOperations()
 
 OPTIONAL_DATE = OptionalDateTime()
 DATE_EXAMPLE = "2012-02-29 or 2012-02-29T16:33:30"
@@ -313,18 +303,21 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
 
 @permission.command("add")
 @click.argument("role_name")
-@click.argument("operation", type=click.Choice(list(OPERATION_SHORTHANDS), case_sensitive=False))
+@click.argument("operations", type=OPERATIONS)
 @click.argument("scope_pattern")
 @click.option("--force", is_flag=True, default=False, help="Add the permission even if the role is locked.")
 @click.pass_context
-def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pattern: str, force: bool) -> None:
-    """Add OPERATION on SCOPE_PATTERN to ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write', 'd'/'delete', or a combination ('rw', 'rwd').
+def permission_add(ctx: click.Context, role_name: str, operations: list[RoleOperationType], scope_pattern: str, force: bool) -> None:
+    """Add OPERATIONS on SCOPE_PATTERN to ROLE_NAME.
+
+    OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'.
+
     SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob."""
     if not _confirm_scope_pattern(ctx, scope_pattern, "add"):
         click.echo("Aborted, no permission was added.")
         return
     added, already_assigned = [], []
-    for op in OPERATION_SHORTHANDS[operation.lower()]:
+    for op in operations:
         try:
             with _lock_hint(role_name):
                 ctx.obj.client.add_role_permission(role_name, op.value, scope_pattern, force=force)
@@ -340,28 +333,29 @@ def permission_add(ctx: click.Context, role_name: str, operation: str, scope_pat
 
 @permission.command("remove")
 @click.argument("role_name")
-@click.argument("operation", type=click.Choice(list(OPERATION_SHORTHANDS), case_sensitive=False))
+@click.argument("operations", type=OPERATIONS)
 @click.argument("scope_pattern")
 @click.option("--force", is_flag=True, default=False, help="Remove the permission even if the role is locked.")
 @click.pass_context
-def permission_remove(ctx: click.Context, role_name: str, operation: str, scope_pattern: str, force: bool) -> None:
-    """Remove OPERATION on SCOPE_PATTERN from ROLE_NAME. OPERATION is 'r'/'read', 'w'/'write', 'd'/'delete', or a combination ('rw', 'rwd')."""
-    requested = OPERATION_SHORTHANDS[operation.lower()]
+def permission_remove(ctx: click.Context, role_name: str, operations: list[RoleOperationType], scope_pattern: str, force: bool) -> None:
+    """Remove OPERATIONS on SCOPE_PATTERN from ROLE_NAME.
+
+    OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'."""
     assigned = {
         permission['operation']
         for permission in ctx.obj.client.list_role_permissions(role_name)
         if permission['scope_pattern'] == scope_pattern
     }
-    if not any(op.value in assigned for op in requested):
+    if not any(op.value in assigned for op in operations):
         raise RolePermissionNotFound(
-            f"None of the requested permissions ({'/'.join(op.value for op in requested)}) are assigned to role '{role_name}' on scope pattern '{scope_pattern}'.")
+            f"None of the requested permissions ({'/'.join(op.value for op in operations)}) are assigned to role '{role_name}' on scope pattern '{scope_pattern}'.")
 
     if not _confirm_scope_pattern(ctx, scope_pattern, "remove"):
         click.echo("Aborted, no permission was removed.")
         return
 
     removed, not_assigned = [], []
-    for op in requested:
+    for op in operations:
         try:
             with _lock_hint(role_name):
                 ctx.obj.client.delete_role_permission(role_name, op.value, scope_pattern, force=force)

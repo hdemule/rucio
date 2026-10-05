@@ -411,6 +411,40 @@ class OptionalDateTime(click.ParamType):
         self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)}", param, ctx)
 
 
+class RoleOperations(click.ParamType):
+    """
+    One or more role operations, in any order and combination.
+
+    Accepted forms, case insensitive:
+      - letters among r, w and d, e.g. 'r', 'rw', 'dw', 'rwd';
+      - the same letters with '-' placeholders, as shown by `role permission list`, e.g. 'rw-', 'r-d';
+      - comma-separated operation names, e.g. 'read', 'read,delete'.
+    """
+
+    name = "operations"
+    HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd', 'rwd' or 'read,write'"
+
+    def convert(self, value, param, ctx) -> list[RoleOperationType]:
+        """Turn a command line value into the requested operations, deduplicated and in canonical order."""
+        if isinstance(value, list):
+            return value
+        by_letter = {letter: operation for operation, letter in OPERATION_LETTERS.items()}
+        by_name = {operation.value: operation for operation in RoleOperationType}
+
+        requested: set[RoleOperationType] = set()
+        for token in value.lower().replace(' ', '').split(','):
+            if token in by_name:
+                requested.add(by_name[token])
+            elif token and all(char in by_letter or char == '-' for char in token):
+                requested.update(by_letter[char] for char in token if char != '-')
+            else:
+                self.fail(f"{token!r} is not a valid operation, expected {self.HELP}", param, ctx)
+
+        if not requested:
+            self.fail(f"{value!r} does not contain any operation, expected {self.HELP}", param, ctx)
+        return [operation for operation in OPERATION_LETTERS if operation in requested]
+
+
 def get_scope(did: str, client: Client) -> tuple[str, str]:
     try:
         scope, name = extract_scope(did)
