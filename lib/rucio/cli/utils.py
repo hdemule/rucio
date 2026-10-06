@@ -392,23 +392,24 @@ class JSONType(click.ParamType):
 
 
 class OptionalDateTime(click.ParamType):
-    """A date, or None when the given value is empty."""
+    """A date, or None when the given value is `NEVER` (case insensitive)."""
 
     name = "date"
     FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
+    NEVER = "NEVER"
 
     def convert(self, value, param, ctx) -> Optional[datetime]:
-        """Turn a command line value into a datetime, or None if it is empty."""
+        """Turn a command line value into a datetime, or None if it is `NEVER`."""
         if value is None or isinstance(value, datetime):
             return value
-        if not value.strip():
+        if value.strip().upper() == self.NEVER:
             return None
         for date_format in self.FORMATS:
             try:
                 return datetime.strptime(value.strip(), date_format)
             except ValueError:
                 continue
-        self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)}", param, ctx)
+        self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)} or {self.NEVER}", param, ctx)
 
 
 class RoleOperations(click.ParamType):

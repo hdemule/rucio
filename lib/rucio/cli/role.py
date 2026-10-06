@@ -102,7 +102,7 @@ def add(ctx: click.Context, role_name: str, description: Optional[str], assignab
 @role.command("update")
 @click.pass_context
 @click.argument("role_name")
-@click.option("-d", "--description", help='Set the description of the role, overwriting the existing one. Pass an empty string ("") to remove it.')
+@click.option("-d", "--description", help='Set the description of the role, overwriting the existing one. Pass an empty string ("") to remove it (--description="").')
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=None,
               help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `role account add`/`remove`.")
 @click.option("-l", "--locked", type=bool, is_flag=False, flag_value="true", default=None,
@@ -223,10 +223,10 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
 @account.command("add")
 @click.argument("role_name")
 @click.argument("account_name")
-@click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, the assignment does not expire.")
+@click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, or {OptionalDateTime.NEVER}, the assignment does not expire.")
 @click.option("--force", is_flag=True, default=False, help="Assign the role even if it is not assignable.")
 @click.pass_context
-def account_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime], force: bool) -> None:
+def account_add(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional["datetime"], force: bool) -> None:
     """Assign ROLE_NAME to ACCOUNT_NAME, optionally until an expiry date."""
     with _assignable_hint(role_name, account_name, action="assigned to"):
         ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force)
@@ -239,10 +239,13 @@ def account_add(ctx: click.Context, role_name: str, account_name: str, expires_a
 @account.command("update")
 @click.argument("role_name")
 @click.argument("account_name")
-@click.option("--expires-at", type=OPTIONAL_DATE, required=True, help=f'New date at which the assignment expires, e.g. {DATE_EXAMPLE}, overwriting the existing one. Pass an empty string ("") so that the assignment does not expire.')
+@click.option("--expires-at", type=OPTIONAL_DATE, help=f"New date at which the assignment expires, e.g. {DATE_EXAMPLE}, overwriting the existing one. Pass {OptionalDateTime.NEVER} so that the assignment does not expire.")
 @click.pass_context
-def account_update(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional[datetime]) -> None:
-    """Update the expiry date of ROLE_NAME for ACCOUNT_NAME. The given date overwrites the existing one; an empty date removes it."""
+def account_update(ctx: click.Context, role_name: str, account_name: str, expires_at: Optional["datetime"]) -> None:
+    """Update the expiry date of ROLE_NAME for ACCOUNT_NAME. The given date overwrites the existing one; NEVER removes it."""
+    # not `required=True`: click would then reject NEVER, which converts to None like a missing option
+    if ctx.get_parameter_source("expires_at") is click.core.ParameterSource.DEFAULT:
+        raise click.UsageError("Missing option '--expires-at'.")
     ctx.obj.client.set_account_role_expires_at(account_name, role_name, expires_at)
     if expires_at:
         click.echo(f"Role '{role_name}' for account '{account_name}' now expires at {expires_at}.")
