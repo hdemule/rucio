@@ -55,6 +55,7 @@ services:
       - ./rucio/idpsecrets.json:/opt/rucio/etc/idpsecrets.json:ro
       - ../../../container_upload/etc/rucio-alice.cfg:/opt/rucio/etc/rucio-alice.cfg:ro
       - ../../../container_upload/etc/rucio-bob.cfg:/opt/rucio/etc/rucio-bob.cfg:ro
+      - ../../../container_upload/etc/rucio-admin.cfg:/opt/rucio/etc/rucio-admin.cfg:ro
       - ../../../container_upload/file1.png:/opt/rucio/file1.png
       - ../../../container_upload/file2.png:/opt/rucio/file2.png
       - ../../../container_upload/file3.png:/opt/rucio/file3.png
