@@ -597,11 +597,41 @@ def has_scope_access(
     )
 
 
+def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session: "Session") -> bool:
+    """
+    Tell whether the policy package disables a filter for the account.
+
+    Filtering is the default: a filter is only disabled if the policy package of the account's VO
+    lists it in the 'disable-filters' of a role the account holds through an assignment which has
+    not expired yet. A reserved role never disables a filter, since the policy package cannot
+    define it. The filters are documented in the role module of the policy package.
+
+    :param account: The account the listing is filtered for.
+    :param filter_name: The name of the filter, e.g. 'list_scopes'.
+    :param session: The database session.
+    :returns: True if the listing must not be filtered for the account.
+    """
+    roles = [
+        role for role, definition in permission.get_roles(vo=account.vo).items()
+        if filter_name in definition.get('disable_filters', ()) and not is_reserved_role(role)
+    ]
+    if not roles:
+        return False
+
+    stmt = select(models.AccountRoleAssociation.role).where(
+        models.AccountRoleAssociation.account == account,
+        models.AccountRoleAssociation.role.in_(roles),
+        _assignment_not_expired(),
+    )
+    return session.execute(stmt).first() is not None
+
+
 def scope_access_checker(
     *,
     account: "InternalAccount",
     session: "Session",
     operation: "RoleOperationType" = RoleOperationType.READ,
+    skip_filtering: bool = False,
 ) -> "Callable[[Optional[InternalScope]], bool]":
     """
     Build a callable telling whether the account may access a given scope in terms of RBAC, ownership and admin/root privileges.
@@ -614,8 +644,12 @@ def scope_access_checker(
     :param account: The account for which to check access.
     :param session: The database session.
     :param operation: The type of operation to check access for.
-    :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused.
+    :param skip_filtering: Grant access to every scope, without checking it, see :func:`is_filter_disabled`.
+    :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused, unless `skip_filtering` is given.
     """
+    if skip_filtering:
+        return lambda scope: True
+
     access_by_scope: dict["InternalScope", bool] = {}
 
     def _can_access(scope: "Optional[InternalScope]") -> bool:
@@ -641,6 +675,7 @@ def filter_iterable_by_scope_access(
     session: "Session",
     operation: "RoleOperationType" = RoleOperationType.READ,
     scope_keyword: str = "scope",
+    skip_filtering: bool = False,
 ) -> "Iterator[dict[str, Any]]":
     """
     Yield only items whose scope the account may access in terms of RBAC, ownership and admin/root privileges.
@@ -653,9 +688,10 @@ def filter_iterable_by_scope_access(
     :param session: The database session.
     :param operation: The type of operation to check access for.
     :param scope_keyword: The key in the item dictionaries that contains the associated scope.
+    :param skip_filtering: Yield every item, without checking its scope, see :func:`scope_access_checker`.
     :returns: An iterator over the items that the account has access to.
     """
-    can_access = scope_access_checker(account=account, session=session, operation=operation)
+    can_access = scope_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering)
 
     for item in items:
         if can_access(item.get(scope_keyword)):

@@ -154,7 +154,8 @@ def _parse_roles(roles: Any, module_name: str) -> dict[str, dict[str, Any]]:
     The `roles` attribute of a policy package role module may either be a mapping of
     role name to role definition, or a sequence of role definitions carrying their own
     'name' key. Both are normalised into a mapping of role name to a definition holding
-    a 'description'. The policy package only defines the role and its description; its
+    a 'description' and the 'disable_filters' of the role, see :func:`_parse_disable_filters`.
+    The policy package only defines the role, its description and its disabled filters; its
     permissions and account assignments are managed from within Rucio, see
     :func:`rucio.core.role.sync_roles_from_policy_package`.
 
@@ -186,9 +187,37 @@ def _parse_roles(roles: Any, module_name: str) -> dict[str, dict[str, Any]]:
 
         parsed[name] = {
             'description': definition.get('description'),
+            'disable_filters': _parse_disable_filters(definition.get('disable-filters'), name, module_name),
         }
 
     return parsed
+
+
+def _parse_disable_filters(disable_filters: Any, role: str, module_name: str) -> frozenset[str]:
+    """
+    Normalise the filters a policy package disables for a role.
+
+    A role filters by default: each listing drops the items in scopes the account may not read.
+    The optional 'disable-filters' of a role definition names the listings which do not, for the
+    accounts holding that role, see :func:`rucio.core.role.is_filter_disabled`.
+
+    :param disable_filters: The 'disable-filters' of the role definition, or None if it has none.
+    :param role: The name of the role, used for error messages.
+    :param module_name: The name of the role module, used for error messages.
+    :returns: The names of the disabled filters, empty if the role disables none.
+    :raises ErrorLoadingPolicyPackage: If 'disable-filters' is not a sequence of non-empty strings.
+    """
+    if disable_filters is None:
+        return frozenset()
+
+    if isinstance(disable_filters, (str, bytes)) or not isinstance(disable_filters, Sequence):
+        raise exception.ErrorLoadingPolicyPackage(
+            "%s: 'disable-filters' of role '%s' must be a sequence of filter names, got '%s'" % (module_name, role, type(disable_filters).__name__))
+
+    if not all(isinstance(name, str) and name.strip() for name in disable_filters):
+        raise exception.ErrorLoadingPolicyPackage("%s: 'disable-filters' of role '%s' must only hold non-empty filter names" % (module_name, role))
+
+    return frozenset(name.strip() for name in disable_filters)
 
 
 def load_roles_for_vo(vo: str) -> None:
@@ -242,7 +271,7 @@ def get_roles(vo: str = DEFAULT_VO) -> dict[str, dict[str, Any]]:
     The definitions are loaded from the policy package on first use and cached afterwards.
 
     :param vo: The VO to get the role definitions for.
-    :returns: A dictionary mapping role name to its definition, each holding a 'description'.
+    :returns: A dictionary mapping role name to its definition, each holding a 'description' and its 'disable_filters'.
               Empty if the VO has no policy-defined roles.
     """
     if vo not in role_definitions:
