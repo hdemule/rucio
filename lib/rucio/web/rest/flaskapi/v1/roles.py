@@ -14,6 +14,7 @@ from rucio.common.exception import (
     RoleLocked,
     RoleNotFound,
     RolePermissionNotFound,
+    RoleReserved,
 )
 from rucio.common.utils import render_json
 from rucio.gateway.role import (
@@ -62,7 +63,7 @@ class RoleList(ErrorHandlingMethodView):
                 locked=locked,
                 vo=request.environ['vo'],
             )
-        except AccessDenied as error:
+        except (AccessDenied, RoleReserved) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -89,7 +90,7 @@ class RoleList(ErrorHandlingMethodView):
                 issuer=request.environ['issuer'],
                 vo=request.environ['vo'],
             )
-        except (AccessDenied, RoleLocked) as error:
+        except (AccessDenied, RoleLocked, RoleReserved) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -104,7 +105,7 @@ class RoleList(ErrorHandlingMethodView):
 
         try:
             delete_role(role_name, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except (AccessDenied, RoleLocked) as error:
+        except (AccessDenied, RoleLocked, RoleReserved) as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
             return generate_http_error_flask(404, error)
@@ -129,7 +130,7 @@ class RolePermissions(ErrorHandlingMethodView):
 
         try:
             add_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except (AccessDenied, RoleLocked) as error:
+        except (AccessDenied, RoleLocked, RoleReserved) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
             return generate_http_error_flask(400, error)
@@ -145,7 +146,7 @@ class RolePermissions(ErrorHandlingMethodView):
 
         try:
             delete_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
-        except (AccessDenied, RoleLocked) as error:
+        except (AccessDenied, RoleLocked, RoleReserved) as error:
             return generate_http_error_flask(403, error)
         except RoleNotFound as error:
             return generate_http_error_flask(404, error)
