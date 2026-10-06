@@ -133,7 +133,7 @@ def get_dataset_locks_by_rse(
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
         locks = lock.get_dataset_locks_by_rse_id(rse_id=rse_id, session=session)
 
-        for lock_object in role.filter_iterable_by_scope_access(locks, account=internal_issuer, session=session):
+        for lock_object in role.filter_iterable_by_scope_access(locks, account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'get_dataset_locks_by_rse', session=session)):
             yield gateway_update_return_dict(lock_object, session=session)
 
 
@@ -170,7 +170,8 @@ def get_replica_locks_for_rule_id(
         # a rule on a collection locks its files, which may live in other scopes than the collection
         locks = lock.get_replica_locks_for_rule_id(rule_id=rule_id, session=session)
 
-        for lock_object in role.filter_iterable_by_scope_access(locks, account=InternalAccount(issuer, vo=vo), session=session):
+        internal_issuer = InternalAccount(issuer, vo=vo)
+        for lock_object in role.filter_iterable_by_scope_access(locks, account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'get_replica_locks_for_rule_id', session=session)):
             if lock_object['scope'].vo != vo:  # rule is on a different VO, so don't return any locks
                 LOGGER.debug('rule id %s is not present on VO %s' % (rule_id, vo))
                 break

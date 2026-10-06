@@ -292,8 +292,8 @@ def list_bad_replicas_status(
             else:
                 result.append({'scope': badfile.scope, 'name': badfile.name, 'rse': get_rse_name(rse_id=badfile.rse_id, session=session), 'rse_id': badfile.rse_id, 'state': badfile.state, 'created_at': badfile.created_at, 'updated_at': badfile.updated_at})
     if account is not None:
-        from rucio.core.role import filter_iterable_by_scope_access
-        result = list(filter_iterable_by_scope_access(result, account=account, session=session))
+        from rucio.core.role import filter_iterable_by_scope_access, is_filter_disabled
+        result = list(filter_iterable_by_scope_access(result, account=account, session=session, skip_filtering=is_filter_disabled(account, 'list_bad_replicas_status', session=session)))
     if list_pfns:
         reps = []
         for rep in list_replicas(result, schemes=None, unavailable=False, request_id=None, ignore_availability=True, all_states=True, session=session):

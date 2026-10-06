@@ -210,7 +210,7 @@ def list_replication_rules(
 
     with db_session(DatabaseOperationType.READ) as session:
         rules = rule.list_rules(filters, session=session)
-        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session):
+        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'list_replication_rules', session=session)):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -296,7 +296,7 @@ def list_associated_replication_rules_for_file(
 
         # the rules protecting a file may be set on its parent collections, which may live in other scopes
         rules = rule.list_associated_rules_for_file(scope=scope_internal, name=name, session=session)
-        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session):
+        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'list_associated_replication_rules_for_file', session=session)):
             yield gateway_update_return_dict(r, session=session)
 
 

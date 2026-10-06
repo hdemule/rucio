@@ -228,7 +228,7 @@ def get_did_from_pfns(
 
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
-        can_access = role.scope_access_checker(account=internal_issuer, session=session)
+        can_access = role.scope_access_checker(account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'get_did_from_pfns', session=session))
         replicas = replica.get_did_from_pfns(pfns=pfns, rse_id=rse_id, vo=vo, session=session)
 
         for r in replicas:
@@ -303,7 +303,8 @@ def list_replicas(
                                          nrandom=nrandom, updated_after=updated_after, by_rse_name=True, session=session)
 
         # the requested collections may contain files, and the files may have parents, in other scopes
-        can_access = role.scope_access_checker(account=InternalAccount(issuer, vo=vo), session=session)
+        internal_issuer = InternalAccount(issuer, vo=vo)
+        can_access = role.scope_access_checker(account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'list_replicas', session=session))
 
         for rep in replicas:
             if not can_access(rep['scope']):
@@ -565,7 +566,7 @@ def list_datasets_per_rse(issuer: str, rse: str, filters: Optional[dict[str, Any
         if 'scope' in filters:
             filters['scope'] = InternalScope(filters['scope'], vo=vo)
         datasets = replica.list_datasets_per_rse(rse_id, filters=filters, limit=limit, session=session)
-        for r in role.filter_iterable_by_scope_access(datasets, account=internal_issuer, session=session):
+        for r in role.filter_iterable_by_scope_access(datasets, account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'list_datasets_per_rse', session=session)):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -659,7 +660,7 @@ def get_suspicious_files(
     with db_session(DatabaseOperationType.READ) as session:
         replicas = replica.get_suspicious_files(rse_expression=rse_expression, available_elsewhere=SuspiciousAvailability["ALL"].value,
                                                 younger_than=younger_than, nattempts=nattempts, filter_={'vo': vo}, session=session)
-        return [gateway_update_return_dict(r, session=session) for r in role.filter_iterable_by_scope_access(replicas, account=internal_issuer, session=session)]
+        return [gateway_update_return_dict(r, session=session) for r in role.filter_iterable_by_scope_access(replicas, account=internal_issuer, session=session, skip_filtering=role.is_filter_disabled(internal_issuer, 'get_suspicious_files', session=session))]
 
 
 def set_tombstone(
