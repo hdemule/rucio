@@ -1363,3 +1363,13 @@ class RoleLocked(RucioException):
         super(RoleLocked, self).__init__(*args)
         self._message = "The role is locked, so it cannot be altered or deleted."
         self.error_code = 129
+
+
+class RoleReserved(RucioException):
+    """
+    RoleReserved
+    """
+    def __init__(self, *args):
+        super(RoleReserved, self).__init__(*args)
+        self._message = "The role is reserved by Rucio, so it cannot be created, altered or deleted."
+        self.error_code = 130

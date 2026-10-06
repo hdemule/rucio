@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from rucio.common.constants import DEFAULT_VO
-from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleLocked, RoleNotFound, RolePermissionNotFound
+from rucio.common.constants import DEFAULT_VO, RESERVED_ROLES
+from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleLocked, RoleNotFound, RolePermissionNotFound, RoleReserved
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
@@ -33,10 +33,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from sqlalchemy.orm import Session
+    from sqlalchemy.sql.elements import ColumnElement
 
 
 # the only wildcard a scope pattern may use, see `_validate_scope_pattern`
 SCOPE_WILDCARD = "*"
+
+
+def is_reserved_role(role: str) -> bool:
+    """Tell whether a role is reserved by Rucio, see `RESERVED_ROLES`."""
+    return role in RESERVED_ROLES
 
 
 def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
@@ -99,11 +105,11 @@ def _normalize_expires_at(expires_at: Optional[Union[str, datetime]]) -> Optiona
 
 def list_roles(session: "Session") -> list[dict[str, Any]]:
     """
-    List all roles defined in the system, together with their description, assignable and locked state.
+    List all roles defined in the system, together with their description, assignable, locked and reserved state.
     """
     stmt = select(models.Roles.role, models.Roles.description, models.Roles.assignable, models.Roles.locked).order_by(models.Roles.role)
     return [
-        {"role": role, "description": description, "assignable": assignable, "locked": locked}
+        {"role": role, "description": description, "assignable": assignable, "locked": locked, "reserved": is_reserved_role(role)}
         for role, description, assignable, locked in session.execute(stmt).all()
     ]
 
@@ -117,7 +123,11 @@ def add_role(role: str, description: Optional[str] = None, assignable: bool = Tr
     :param assignable: Whether an identity provider may assign this role to, or take it away from, an account; if not, only Rucio itself alters who holds it.
     :param locked: Whether the role is locked, which prevents a policy package from altering or deleting it.
     :param session: The database session.
+    :raises RoleReserved: If the role is reserved, see :func:`setup_reserved_roles`.
     """
+    if is_reserved_role(role):
+        raise RoleReserved("Role '%s' is reserved, so it cannot be added." % role)
+
     new_role = models.Roles(role=role, description=_normalize_description(description), assignable=assignable, locked=locked)
     session.add(new_role)
     try:
@@ -140,6 +150,7 @@ def update_role(
 
     A locked role cannot have its description or its assignable state changed, unless `force`
     is given. Changing `locked` itself is always allowed, so that a role can be unlocked.
+    A reserved role only ever has its assignable state changed, whether or not `force` is given.
 
     :param role: The role to update.
     :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
@@ -150,13 +161,17 @@ def update_role(
     :returns: The role as it is stored after the update.
     :raises RoleNotFound: If the role does not exist.
     :raises RoleLocked: If the role is locked, `force` is not given and something besides `locked` is being changed.
+    :raises RoleReserved: If the role is reserved and something besides `assignable` is being changed.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
 
-    if description is not None or assignable is not None:
+    if is_reserved_role(role):
+        if description is not None or locked is not None:
+            raise RoleReserved("Role '%s' is reserved, so only its assignable state can be changed." % role)
+    elif description is not None or assignable is not None:
         _ensure_unlocked(role, force, session)
 
     if description is not None:
@@ -188,11 +203,15 @@ def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
     :raises RoleNotFound: If the role does not exist.
     :raises RoleLocked: If the role is locked and `force` is not set.
     :raises RoleInUse: If the role is still in use and `force` is not set.
+    :raises RoleReserved: If the role is reserved, whether or not `force` is set.
     """
     stmt = select(models.Roles).where(models.Roles.role == role)
     role_obj = session.execute(stmt).scalar_one_or_none()
     if role_obj is None:
         raise RoleNotFound("Role '%s' does not exist." % role)
+
+    if is_reserved_role(role):
+        raise RoleReserved("Role '%s' is reserved, so it cannot be deleted." % role)
 
     _ensure_unlocked(role, force, session, action="deleted")
 
@@ -209,9 +228,36 @@ def delete_role(role: str, force: bool = False, *, session: "Session") -> None:
         raise RoleInUse("Role '%s' is still assigned to accounts and cannot be deleted." % role)
 
 
+def setup_reserved_roles(*, session: "Session") -> list[str]:
+    """
+    Create the reserved roles which do not exist yet, see `RESERVED_ROLES`.
+
+    This is the only way to create a reserved role: it is created locked and not assignable, with
+    the description given in `RESERVED_ROLES`. A reserved role which already exists is left
+    untouched, and no role is ever deleted.
+
+    :param session: The database session.
+    :returns: The names of the roles which were created.
+    """
+    import logging
+    stmt = select(models.Roles.role).where(models.Roles.role.in_(RESERVED_ROLES))
+    existing = set(session.execute(stmt).scalars().all())
+
+    created = []
+    for role, description in sorted(RESERVED_ROLES.items()):
+        if role in existing:
+            continue
+        session.add(models.Roles(role=role, description=description, assignable=False, locked=True))
+        created.append(role)
+        logging.log(logging.INFO, "Created reserved role '%s' with description '%s', assignable=False and locked=True.", role, description)
+
+    session.commit()
+    return created
+
+
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
     """
-    List the roles assigned to an account, together with their expiry date and description.
+    List the roles assigned to an account, together with their expiry date, description and reserved state.
 
     An `expires_at` of None means that the assignment does not expire.
     """
@@ -221,7 +267,10 @@ def list_account_roles(account: "InternalAccount", session: "Session") -> list[d
         .where(models.AccountRoleAssociation.account == account)
         .order_by(models.AccountRoleAssociation.role)
     )
-    return [{"role": role, "expires_at": expires_at, "description": description} for role, expires_at, description in session.execute(stmt).all()]
+    return [
+        {"role": role, "expires_at": expires_at, "description": description, "reserved": is_reserved_role(role)}
+        for role, expires_at, description in session.execute(stmt).all()
+    ]
 
 
 def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
@@ -415,8 +464,11 @@ def add_role_permission(role: str, scope_pattern: str, operation: "RoleOperation
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RoleNotFound: If the role does not exist.
     :raises Duplicate: If the role already has that permission on that scope pattern.
+    :raises RoleReserved: If the role is reserved, whether or not `force` is given.
     """
     scope_pattern = _validate_scope_pattern(scope_pattern)
+    if is_reserved_role(role):
+        raise RoleReserved("Role '%s' is reserved, so no permission can be granted to it." % role)
     _ensure_unlocked(role, force, session)
 
     session.add(models.RolePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
@@ -442,7 +494,10 @@ def delete_role_permission(role: str, scope_pattern: str, operation: "RoleOperat
     :param session: The database session.
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RolePermissionNotFound: If the role does not have that permission.
+    :raises RoleReserved: If the role is reserved, whether or not `force` is given.
     """
+    if is_reserved_role(role):
+        raise RoleReserved("Role '%s' is reserved, so no permission can be removed from it." % role)
     _ensure_unlocked(role, force, session)
 
     mapping = session.get(models.RolePermissionAssociation, (role, scope_pattern, operation))
@@ -453,12 +508,29 @@ def delete_role_permission(role: str, scope_pattern: str, operation: "RoleOperat
     session.commit()
 
 
-def has_account_role(account: "InternalAccount", role: str, session: "Session") -> bool:
-    stmt = select(models.AccountRoleAssociation).where(
+def _assignment_not_expired() -> "ColumnElement[bool]":
+    """SQL condition keeping only the account role assignments which have not expired yet."""
+    return or_(
+        models.AccountRoleAssociation.expires_at.is_(None),
+        # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
+        models.AccountRoleAssociation.expires_at > datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def has_account_valid_role(account: "InternalAccount", role: str, session: "Session") -> bool:
+    """
+    Tell whether the account holds the role through an assignment which has not expired yet.
+
+    :param account: The account to check.
+    :param role: The role to check.
+    :param session: The database session.
+    """
+    stmt = select(models.AccountRoleAssociation.role).where(
         models.AccountRoleAssociation.account == account,
         models.AccountRoleAssociation.role == role,
+        _assignment_not_expired(),
     )
-    return bool(session.execute(stmt).scalar_one_or_none())
+    return session.execute(stmt).first() is not None
 
 
 def has_role_scope_access(
@@ -491,11 +563,7 @@ def has_role_scope_access(
         .where(
             models.AccountRoleAssociation.account == account,
             models.RolePermissionAssociation.operation == operation,
-            or_(
-                models.AccountRoleAssociation.expires_at.is_(None),
-                # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
-                models.AccountRoleAssociation.expires_at > datetime.now(timezone.utc).replace(tzinfo=None),
-            ),
+            _assignment_not_expired(),
         )
     )
 
@@ -688,7 +756,8 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
     in line with the policy package if it exists and is not locked. A locked role
     (`locked` True) is never touched by the policy package, whether or not
     the policy package defines it: such a role is managed entirely from within Rucio, see
-    :func:`sync_account_roles_from_idp`.
+    :func:`sync_account_roles_from_idp`. A reserved role is never touched either, see
+    :func:`setup_reserved_roles`.
 
     This is a dry run: it reports what the synchronisation would do and leaves the database
     untouched.
@@ -717,10 +786,15 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
 
     print()
     print("Step 3: What the synchronisation would do")
-    created, updated, unchanged, skipped_locked, deleted = 0, 0, 0, 0, 0
+    created, updated, unchanged, skipped_locked, skipped_reserved, deleted = 0, 0, 0, 0, 0, 0
 
     for role in sorted(roles):
         description = _normalize_description(roles[role].get("description"))
+
+        if is_reserved_role(role):
+            skipped_reserved += 1
+            print("  Role '%s' is reserved, so it would be left untouched." % role)
+            continue
 
         if role not in current:
             created += 1
@@ -743,7 +817,10 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
     # one that was created by hand through the CLI; a locked role is out of the policy
     # package's reach entirely, so it is left untouched even if the policy package does not define it
     for role in sorted(set(current) - set(roles)):
-        if current[role]["locked"]:
+        if is_reserved_role(role):
+            skipped_reserved += 1
+            print("  Role '%s' is not defined by the policy package but is reserved, so it would be left untouched." % role)
+        elif current[role]["locked"]:
             skipped_locked += 1
             print("  Role '%s' is not defined by the policy package but is locked, so it would be left untouched." % role)
         else:
@@ -751,8 +828,8 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
             print("  Role '%s' is not defined by the policy package, so it would be deleted." % role)
 
     print()
-    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d locked role(s) untouched."
-          % (created, updated, deleted, unchanged, skipped_locked))
+    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d locked and %d reserved role(s) untouched."
+          % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved))
 
 
 def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
@@ -784,7 +861,8 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     in line with the policy package if it exists and is not locked. A locked role
     (`locked` True) is never touched here, whether or not the policy
     package defines it: such a role is managed entirely from within Rucio, see
-    :func:`sync_account_roles_from_idp`. A role which is not locked and which the policy
+    :func:`sync_account_roles_from_idp`. Neither is a reserved role, see :func:`setup_reserved_roles`.
+    A role which is not locked and which the policy
     package does not define is deleted, together with its permissions and account assignments.
 
     The whole synchronisation is a single transaction, so either all of it is applied or none of
@@ -802,14 +880,19 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     # Step 2: Retrieve all roles currently known to Rucio
     current = {entry["role"]: entry for entry in list_roles(session=session)}
 
-    created, updated, unchanged, skipped_locked, deleted = 0, 0, 0, 0, 0
+    created, updated, unchanged, skipped_locked, skipped_reserved, deleted = 0, 0, 0, 0, 0, 0
     revoked, unassigned = 0, 0
 
     try:
         # Step 3: Create the roles of the policy package and bring the existing, unlocked
-        # ones in line with it. A locked role is left untouched.
+        # ones in line with it. A locked or reserved role is left untouched.
         for role in sorted(roles):
             description = _normalize_description(roles[role].get("description"))
+
+            if is_reserved_role(role):
+                skipped_reserved += 1
+                print("  Role '%s' is reserved, so it is left untouched." % role)
+                continue
 
             if role not in current:
                 session.add(models.Roles(role=role, description=description, assignable=True, locked=False))
@@ -835,6 +918,11 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
         # can be relied on to cascade, so each deleted role takes its permissions and its account
         # assignments along explicitly.
         for role in sorted(set(current) - set(roles)):
+            if is_reserved_role(role):
+                skipped_reserved += 1
+                print("  Role '%s' is not defined by the policy package but is reserved, so it is left untouched." % role)
+                continue
+
             if current[role]["locked"]:
                 skipped_locked += 1
                 print("  Role '%s' is not defined by the policy package but is locked, so it is left untouched." % role)
@@ -853,8 +941,8 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
         raise
 
     print()
-    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged, left %d locked role(s) untouched; removed %d permission(s) and %d account assignment(s) with the deleted roles."
-          % (created, updated, deleted, unchanged, skipped_locked, revoked, unassigned))
+    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged, left %d locked and %d reserved role(s) untouched; removed %d permission(s) and %d account assignment(s) with the deleted roles."
+          % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved, revoked, unassigned))
 
 
 def _ensure_account_exists(account: "InternalAccount", session: "Session") -> None:
