@@ -22,7 +22,7 @@ class RoleClient(BaseClient):
         Returns
         -------
             A list of dictionaries, one per role, with the keys `role`, `description`,
-            `assignable` and `locked`. `description` is None for roles
+            `assignable`, `locked` and `reserved`. `description` is None for roles
             without a description.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/")

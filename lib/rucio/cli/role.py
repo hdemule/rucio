@@ -1,5 +1,5 @@
+import textwrap
 from contextlib import contextmanager
-from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 import click
@@ -9,13 +9,21 @@ from rucio.cli.utils import OptionalDateTime, RoleOperations, RoleOperationType,
 from rucio.common.exception import Duplicate, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable, Mapping
+    from datetime import datetime
 
 
 OPERATIONS = RoleOperations()
 
 OPTIONAL_DATE = OptionalDateTime()
 DATE_EXAMPLE = "2012-02-29 or 2012-02-29T16:33:30"
+
+# appended to the name of a reserved role when listing roles, and explained below it with `--detail`
+RESERVED_ROLE_TAG = "(built-in)"
+RESERVED_ROLE_DETAIL = textwrap.fill(
+    "`== Built-in role, managed by Rucio",
+    width=40, initial_indent="", subsequent_indent="  ",
+)
 
 
 @contextmanager
@@ -37,6 +45,22 @@ def _lock_hint(role_name: str, action: str = "altered") -> 'Generator[None, None
         raise RoleLocked(f"Role '{role_name}' is locked, so it cannot be {action}. Add {forced}, or unlock it first with `rucio role update {role_name} -l false`.") from error
 
 
+def _role_label(role_name: str, reserved: bool) -> str:
+    """The name of a role, tagged with `RESERVED_ROLE_TAG` if it is reserved."""
+    return f"{role_name} {RESERVED_ROLE_TAG}" if reserved else role_name
+
+
+def _role_detail(role_name: str, reserved: bool, permissions: "Iterable[Mapping[str, str]]") -> str:
+    """
+    The label of a role followed by its permission tree, see :func:`format_permission_tree`.
+
+    A reserved role has no permissions, so its tag is explained instead of an empty permission tree.
+    """
+    if reserved:
+        return f"{_role_label(role_name, reserved)}\n{RESERVED_ROLE_DETAIL}"
+    return format_permission_tree(_role_label(role_name, reserved), permissions)
+
+
 @click.group()
 def role():
     """Manage role-based access control."""
@@ -46,13 +70,15 @@ def role():
 @click.option("--detail", is_flag=True, help="Show the permissions associated with each role. Use `role permission list --detail` to also expand their scope patterns.")
 @click.pass_context
 def list_(ctx: click.Context, detail: bool) -> None:
-    """List all roles."""
+    """List all roles. A role managed by Rucio itself is tagged with (built-in)."""
     roles = ctx.obj.client.list_roles()
     rows = []
     for role_entry in roles:
-        role_cell = role_entry['role']
+        role_name, reserved = role_entry['role'], bool(role_entry.get('reserved'))
         if detail:
-            role_cell = format_permission_tree(role_cell, ctx.obj.client.list_role_permissions(role_cell))
+            role_cell = _role_detail(role_name, reserved, [] if reserved else ctx.obj.client.list_role_permissions(role_name))
+        else:
+            role_cell = _role_label(role_name, reserved)
         rows.append([role_cell, role_entry.get('assignable'), role_entry.get('locked'), role_entry.get('description') or ''])
 
     headers = ["ROLE", "ASSIGNABLE", "LOCKED", "DESCRIPTION"]
@@ -170,14 +196,15 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
 
     if role_name is not None:
         assignments = ctx.obj.client.list_role_accounts(role_name)
-        click.echo(f"Accounts assigned to role {role_name}:")
+        reserved = any(entry['role'] == role_name and entry.get('reserved') for entry in ctx.obj.client.list_roles())
+        click.echo(f"Accounts assigned to role {_role_label(role_name, reserved)}:")
         rows = [[assignment['account'], assignment.get('expires_at') or '-'] for assignment in assignments]
         click.echo(tabulate(rows, headers=["ACCOUNT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
     else:
         rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
         click.echo(f"Roles for account '{rbac['account']}':")
         if not detail:
-            rows = [[entry['role'], entry.get('expires_at') or '-'] for entry in rbac['roles']]
+            rows = [[_role_label(entry['role'], bool(entry.get('reserved'))), entry.get('expires_at') or '-'] for entry in rbac['roles']]
             headers = ["ROLE", "EXPIRES AT"]
             click.echo(tabulate(wrap_table_column(rows, headers, column=1), headers=headers, tablefmt=ctx.obj.tablefmt))
         else:
@@ -187,7 +214,7 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
 
             rows = []
             for entry in rbac['roles']:
-                role_cell = format_permission_tree(entry['role'], permissions_by_role.get(entry['role'], []))
+                role_cell = _role_detail(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], []))
                 rows.append([role_cell, entry.get('expires_at') or '-', entry.get('description') or '-'])
             headers = ["ROLE", "EXPIRES AT", "DESCRIPTION"]
             click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))

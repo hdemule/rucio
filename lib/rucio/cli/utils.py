@@ -89,7 +89,7 @@ def format_operations(operations: "Iterable[str]") -> str:
 
 TREE_BRANCH = "|-- "
 TREE_LAST_BRANCH = "`-- "
-TREE_PLACEHOLDER_INDENT = ""
+TREE_PLACEHOLDER_INDENT = "`-- "
 
 
 def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
