@@ -17,8 +17,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import delete
 
-from rucio.common.exception import RoleReserved
+from rucio.common.exception import ErrorLoadingPolicyPackage, RoleReserved
 from rucio.common.utils import generate_uuid
+from rucio.core import permission
 from rucio.core import role as core_role
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import RoleOperationType
@@ -164,3 +165,67 @@ def test_add_reserved_role_rest(rest_client, auth_token):
     """ROLE (REST): Adding a reserved role is refused with 403."""
     response = rest_client.post('/roles/admin', headers=headers(auth(auth_token)), json={})
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize('definition, expected', [
+    ({'description': 'no filter disabled'}, frozenset()),
+    ({'disable-filters': []}, frozenset()),
+    ({'disable-filters': ['list_scopes', ' list_content ']}, frozenset({'list_scopes', 'list_content'})),
+])
+def test_parse_roles_disable_filters(definition, expected):
+    """ROLE (CORE): A policy package role disables no filter, unless it names them in its 'disable-filters'."""
+    roles = permission._parse_roles([dict(definition, name='data-scientist')], 'policy.role')
+    assert roles['data-scientist']['disable_filters'] == expected
+
+
+@pytest.mark.parametrize('disable_filters', ['list_scopes', [''], ['list_scopes', 42], {'list_scopes': True}])
+def test_parse_roles_invalid_disable_filters(disable_filters):
+    """ROLE (CORE): A policy package role whose 'disable-filters' is not a list of filter names is refused."""
+    with pytest.raises(ErrorLoadingPolicyPackage):
+        permission._parse_roles([{'name': 'data-scientist', 'disable-filters': disable_filters}], 'policy.role')
+
+
+@pytest.fixture
+def policy_role(db_session):
+    """Add a new role for the test, and remove it again afterwards together with its account assignments."""
+    role = 'policy-%s' % generate_uuid()
+    core_role.add_role(role, session=db_session)
+    yield role
+    db_session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role == role))
+    db_session.execute(delete(models.Roles).where(models.Roles.role == role))
+    db_session.commit()
+
+
+@pytest.mark.parametrize('disable_filters, expires_at, disabled', [
+    (frozenset({'list_scopes'}), None, True),
+    (frozenset({'list_scopes'}), datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1), True),
+    (frozenset({'list_scopes'}), datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1), False),
+    (frozenset({'list_content'}), None, False),
+    (frozenset(), None, False),
+])
+def test_is_filter_disabled(policy_role, db_session, root_account, monkeypatch, disable_filters, expires_at, disabled):
+    """ROLE (CORE): A filter is only disabled by a role which disables it and which the account holds through an assignment which has not expired yet."""
+    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: {policy_role: {'description': None, 'disable_filters': disable_filters}})
+    assert not core_role.is_filter_disabled(root_account, 'list_scopes', session=db_session)
+
+    core_role.add_account_role(root_account, policy_role, expires_at=expires_at, session=db_session)
+    assert core_role.is_filter_disabled(root_account, 'list_scopes', session=db_session) is disabled
+
+
+def test_is_filter_disabled_reserved_role(reserved_role, db_session, root_account, monkeypatch):
+    """ROLE (CORE): A reserved role never disables a filter, even if the policy package says so."""
+    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: {reserved_role: {'description': None, 'disable_filters': frozenset({'list_scopes'})}})
+    core_role.add_account_role(root_account, reserved_role, force=True, session=db_session)
+    try:
+        assert not core_role.is_filter_disabled(root_account, 'list_scopes', session=db_session)
+    finally:
+        core_role.delete_account_role(root_account, reserved_role, force=True, session=db_session)
+
+
+@pytest.mark.parametrize('skip_filtering, expected', [(False, []), (True, [{'scope': None}])])
+def test_filter_iterable_by_scope_access_skip_filtering(db_session, root_account, skip_filtering, expected):
+    """ROLE (CORE): Skipping the filtering yields every item, even one whose scope would be refused."""
+    items = [{'scope': None}]
+    assert list(core_role.filter_iterable_by_scope_access(items, account=root_account, session=db_session, skip_filtering=skip_filtering)) == expected
+    can_access = core_role.scope_access_checker(account=root_account, session=db_session, skip_filtering=skip_filtering)
+    assert can_access(None) is bool(expected)
