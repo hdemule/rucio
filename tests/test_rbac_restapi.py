@@ -988,13 +988,14 @@ class TestROLE:
     # --- read-only listing, only root/admin is authorized (perm_default) ---------------------
 
     def test_list_roles(self):
-        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description, assignable and locked state"""
+        """RBAC(ADMIN): GET /roles/ is only visible to root/admin and lists each role with its description, assignable, locked and reserved state"""
         response = _get('/roles/', 'root')
         assert response.status_code == OK
         roles = response.json()
         assert 'data-scientist' in [role['role'] for role in roles]
-        # every entry carries a description, which is null for roles without one, and its assignable and locked states
-        assert all({'description', 'assignable', 'locked'} <= set(role) for role in roles)
+        # every entry carries a description, which is null for roles without one, and its assignable, locked and reserved states
+        assert all({'description', 'assignable', 'locked', 'reserved'} <= set(role) for role in roles)
+        assert [role['reserved'] for role in roles if role['role'] == 'data-scientist'] == [False]
         for account in ('alice', 'bob'):
             assert _get('/roles/', account).status_code == FORBIDDEN
 
