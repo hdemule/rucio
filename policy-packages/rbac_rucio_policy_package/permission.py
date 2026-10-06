@@ -1,8 +1,7 @@
-import logging
 from typing import TYPE_CHECKING, Any
 
 import rucio.core.scope
-from rucio.common.constants import RseAttr
+from rucio.common.constants import ADMIN_ROLE, RseAttr
 from rucio.common.types import InternalAccount
 from rucio.core import role as role_core
 from rucio.core import scope as scope_core
@@ -188,10 +187,11 @@ def _is_admin(issuer: "InternalAccount", session: "Session") -> bool:
     :param session: The DB session to use
     :returns: True if account is admin, otherwise False
     """
-    return has_account_attribute(account=issuer, key='admin', session=session)
+
+    return role_core.has_account_valid_role(account=issuer, role=ADMIN_ROLE, session=session)
 
 
-def _can_operate_on_scope(issuer: "InternalAccount", scope: "InternalScope", operation: RoleOperationType, session: "Session") -> bool:
+def _can_operate_on_scope(issuer: "InternalAccount", scope: "InternalScope | None", operation: RoleOperationType, session: "Session") -> bool:
     """
     Checks if an account can operate on a scope. Admins and root can operate on all scopes by default, other accounts can operate on scopes that are listed in the 'write_scopes' account attribute.
 
@@ -203,6 +203,9 @@ def _can_operate_on_scope(issuer: "InternalAccount", scope: "InternalScope", ope
     """
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
+
+    if scope is None:
+        return False
 
     if scope_core.is_scope_owner(scope=scope, account=issuer, session=session):
         return True
@@ -592,7 +595,7 @@ def perm_list_role_permissions(issuer: "InternalAccount", kwargs: dict[str, Any]
     if role is None or not isinstance(role, str):
         return False
 
-    return role_core.has_account_role(account=issuer, role=role, session=session)
+    return role_core.has_account_valid_role(account=issuer, role=role, session=session)
 
 
 def perm_add_role_permission(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -648,7 +651,7 @@ def perm_add_rse(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_update_rse(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -660,7 +663,7 @@ def perm_update_rse(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_add_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -674,7 +677,7 @@ def perm_add_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "S
     """
     if kwargs['account'] == issuer and not kwargs['locked']:
         return True
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -688,7 +691,7 @@ def perm_add_subscription(issuer: "InternalAccount", kwargs: dict[str, Any], ses
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -702,7 +705,7 @@ def perm_add_rse_attribute(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -716,7 +719,7 @@ def perm_del_rse_attribute(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -730,7 +733,7 @@ def perm_del_rse(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_add_account(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -766,7 +769,7 @@ def perm_update_account(issuer: "InternalAccount", kwargs: dict[str, Any], sessi
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_add_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -778,7 +781,7 @@ def perm_add_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_update_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -791,7 +794,7 @@ def perm_update_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer) \
-        or has_account_attribute(account=issuer, key='admin', session=session) \
+        or _is_admin(issuer=issuer, session=session) \
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
 
 
@@ -847,7 +850,7 @@ def perm_add_account_identity(issuer: "InternalAccount", kwargs: dict[str, Any],
     :returns: True if account is allowed, otherwise False
     """
 
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_del_account_identity(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -860,7 +863,7 @@ def perm_del_account_identity(issuer: "InternalAccount", kwargs: dict[str, Any],
     :returns: True if account is allowed, otherwise False
     """
 
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_del_identity(issuer: "InternalAccount", kwargs, session: "Session") -> bool:
@@ -886,13 +889,13 @@ def perm_add_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     :returns: True if account is allowed, otherwise False
     """
     # Check the accounts of the issued rules
-    if not _is_root(issuer) and not has_account_attribute(account=issuer, key='admin', session=session):
+    if not _is_root(issuer) and not _is_admin(issuer=issuer, session=session):
         for rule in kwargs.get('rules', []):
             if rule['account'] != issuer:
                 return False
 
     return _is_root(issuer)\
-        or has_account_attribute(account=issuer, key='admin', session=session)\
+        or _is_admin(issuer=issuer, session=session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
         or kwargs['scope'].external == 'mock'
 
@@ -920,7 +923,7 @@ def perm_attach_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer)\
-        or has_account_attribute(account=issuer, key='admin', session=session)\
+        or _is_admin(issuer=issuer, session=session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
         or kwargs['scope'].external == 'mock'
 
@@ -934,7 +937,7 @@ def perm_attach_dids_to_dids(issuer: "InternalAccount", kwargs: dict[str, Any], 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     else:
         attachments = kwargs['attachments']
@@ -956,7 +959,7 @@ def perm_create_did_sample(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer)\
-        or has_account_attribute(account=issuer, key='admin', session=session)\
+        or _is_admin(issuer=issuer, session=session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
         or kwargs['scope'].external == 'mock'
 
@@ -970,7 +973,7 @@ def perm_del_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "S
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -984,7 +987,7 @@ def perm_update_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -998,7 +1001,7 @@ def perm_approve_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -1012,7 +1015,7 @@ def perm_reduce_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -1026,7 +1029,7 @@ def perm_move_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     :param session: The DB session to use
     :returns:        True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     return False
 
@@ -1040,7 +1043,7 @@ def perm_update_subscription(issuer: "InternalAccount", kwargs: dict[str, Any], 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
 
     return False
@@ -1067,7 +1070,7 @@ def perm_set_metadata_bulk(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
 
 
 def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1079,7 +1082,7 @@ def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
 
 
 def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1092,10 +1095,10 @@ def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     :returns: True if account is allowed, otherwise False
     """
     if kwargs.get('open', False):
-        if not _is_root(issuer) and not has_account_attribute(account=issuer, key='admin', session=session):
+        if not _is_root(issuer) and not _is_admin(issuer=issuer, session=session):
             return False
 
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
 
 
 def perm_add_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1107,7 +1110,7 @@ def perm_add_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_del_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1119,7 +1122,7 @@ def perm_del_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_update_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1131,7 +1134,7 @@ def perm_update_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], sess
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_add_qos_policy(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1143,7 +1146,7 @@ def perm_add_qos_policy(issuer: "InternalAccount", kwargs: dict[str, Any], sessi
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_delete_qos_policy(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1155,7 +1158,7 @@ def perm_delete_qos_policy(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_declare_bad_file_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1196,7 +1199,7 @@ def perm_add_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session
         or str(kwargs.get('rse', '')).endswith('MOCK')\
         or str(kwargs.get('rse', '')).endswith('LOCALGROUPDISK')\
         or _is_root(issuer)\
-        or has_account_attribute(account=issuer, key='admin', session=session)
+        or _is_admin(issuer=issuer, session=session)
 
 
 def perm_skip_availability_check(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1208,7 +1211,7 @@ def perm_skip_availability_check(issuer: "InternalAccount", kwargs: dict[str, An
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_delete_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1232,7 +1235,7 @@ def perm_update_replicas_states(issuer: "InternalAccount", kwargs: dict[str, Any
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_queue_requests(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1256,7 +1259,7 @@ def perm_list_requests(issuer: "InternalAccount", kwargs: dict[str, Any], sessio
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_list_requests_history(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1268,7 +1271,7 @@ def perm_list_requests_history(issuer: "InternalAccount", kwargs: dict[str, Any]
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_get_request_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1292,7 +1295,7 @@ def perm_get_request_history_by_did(issuer: "InternalAccount", kwargs: dict[str,
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_cancel_request(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1340,7 +1343,7 @@ def perm_set_rse_limits(issuer: "InternalAccount", kwargs: dict[str, Any], sessi
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_set_local_account_limit(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1352,7 +1355,7 @@ def perm_set_local_account_limit(issuer: "InternalAccount", kwargs: dict[str, An
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     # Check if user is a country admin
     admin_in_country = []
@@ -1373,7 +1376,7 @@ def perm_set_global_account_limit(issuer: "InternalAccount", kwargs: dict[str, A
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     # Check if user is a country admin
     admin_in_country = set()
@@ -1396,7 +1399,7 @@ def perm_delete_local_account_limit(issuer: "InternalAccount", kwargs: dict[str,
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     # Check if user is a country admin
     admin_in_country = []
@@ -1417,7 +1420,7 @@ def perm_delete_global_account_limit(issuer: "InternalAccount", kwargs: dict[str
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     # Check if user is a country admin
     admin_in_country = set()
@@ -1441,7 +1444,7 @@ def perm_config(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Ses
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_get_local_account_usage(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1453,7 +1456,7 @@ def perm_get_local_account_usage(issuer: "InternalAccount", kwargs: dict[str, An
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session) or kwargs.get('account') == issuer:
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session) or kwargs.get('account') == issuer:
         return True
     # Check if user is a country admin
     for kv in list_account_attributes(account=issuer, session=session):
@@ -1471,7 +1474,7 @@ def perm_get_global_account_usage(issuer: "InternalAccount", kwargs: dict[str, A
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session) or kwargs.get('account') == issuer:
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session) or kwargs.get('account') == issuer:
         return True
 
     # Check if user is a country admin for all involved countries
@@ -1490,7 +1493,7 @@ def perm_add_account_attribute(issuer: "InternalAccount", kwargs: dict[str, Any]
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_del_account_attribute(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1526,7 +1529,7 @@ def perm_resurrect(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_update_lifetime_exceptions(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1541,7 +1544,7 @@ def perm_update_lifetime_exceptions(issuer: "InternalAccount", kwargs: dict[str,
         exceptions = next(list_exceptions(exception_id=kwargs['exception_id'], states=False, session=session))
         if exceptions['scope'].vo != kwargs['vo']:
             return False
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_get_auth_token_ssh(issuer: "InternalAccount", kwargs: dict, session: "Session") -> bool:
@@ -1588,7 +1591,7 @@ def perm_remove_did_from_followed(issuer: "InternalAccount", kwargs: dict[str, A
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer)\
-        or has_account_attribute(account=issuer, key='admin', session=session)\
+        or _is_admin(issuer=issuer, session=session)\
         or kwargs['account'] == issuer\
         or kwargs['scope'].external == 'mock'
 
@@ -1602,7 +1605,7 @@ def perm_remove_dids_from_followed(issuer: "InternalAccount", kwargs: dict[str, 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session):
+    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
     if not kwargs['account'] == issuer:
         return False
@@ -1630,7 +1633,7 @@ def perm_list_transfer_limits(issuer: "InternalAccount", kwargs: dict[str, Any],
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_set_transfer_limit(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1642,7 +1645,7 @@ def perm_set_transfer_limit(issuer: "InternalAccount", kwargs: dict[str, Any], s
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
 
 
 def perm_delete_transfer_limit(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1654,4 +1657,4 @@ def perm_delete_transfer_limit(issuer: "InternalAccount", kwargs: dict[str, Any]
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or has_account_attribute(account=issuer, key='admin', session=session)
+    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
