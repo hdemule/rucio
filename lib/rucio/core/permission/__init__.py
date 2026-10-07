@@ -40,6 +40,15 @@ permission_modules = {}
 # dictionary of role definitions for each VO, loaded on demand from the policy package
 role_definitions: dict[str, dict[str, dict[str, Any]]] = {}
 
+# attributes of a policy package role module disabling filters for more than a single role,
+# see `get_disabled_filters_for_all_roles` and `get_disabled_filters_for_all_accounts`
+DISABLE_FILTERS_FOR_ALL_ROLES = 'disable_filters_for_all_roles'
+DISABLE_FILTERS_FOR_ALL_ACCOUNTS = 'disable_filters_for_all_accounts'
+
+# dictionary of the filters disabled for all roles and for all accounts of each VO, keyed by the
+# attribute defining them, loaded on demand from the policy package together with the role definitions
+disabled_filters: dict[str, dict[str, frozenset[str]]] = {}
+
 try:
     multivo = config.config_get_bool('common', 'multi_vo')
 except (NoOptionError, NoSectionError):
@@ -187,35 +196,38 @@ def _parse_roles(roles: Any, module_name: str) -> dict[str, dict[str, Any]]:
 
         parsed[name] = {
             'description': definition.get('description'),
-            'disable_filters': _parse_disable_filters(definition.get('disable-filters'), name, module_name),
+            'disable_filters': _parse_disable_filters(definition.get('disable-filters'), "'disable-filters' of role '%s'" % name, module_name),
         }
 
     return parsed
 
 
-def _parse_disable_filters(disable_filters: Any, role: str, module_name: str) -> frozenset[str]:
+def _parse_disable_filters(disable_filters: Any, source: str, module_name: str) -> frozenset[str]:
     """
-    Normalise the filters a policy package disables for a role.
+    Normalise the filters a policy package disables.
 
-    A role filters by default: each listing drops the items in scopes the account may not read.
-    The optional 'disable-filters' of a role definition names the listings which do not, for the
-    accounts holding that role, see :func:`rucio.core.role.is_filter_disabled`.
+    Filtering is the default: each listing drops the items in scopes the account may not read.
+    A policy package disables filters for the accounts holding a role, through the optional
+    'disable-filters' of the role definition, for every account holding at least one role, through
+    the optional `disable_filters_for_all_roles` attribute of its role module, or for every account
+    of the VO, through the optional `disable_filters_for_all_accounts` attribute of its role module,
+    see :func:`rucio.core.role.is_filter_disabled`.
 
-    :param disable_filters: The 'disable-filters' of the role definition, or None if it has none.
-    :param role: The name of the role, used for error messages.
+    :param disable_filters: The filter names as defined by the policy package, or None if it defines none.
+    :param source: Where the filter names are defined, used for error messages.
     :param module_name: The name of the role module, used for error messages.
-    :returns: The names of the disabled filters, empty if the role disables none.
-    :raises ErrorLoadingPolicyPackage: If 'disable-filters' is not a sequence of non-empty strings.
+    :returns: The names of the disabled filters, empty if none is disabled.
+    :raises ErrorLoadingPolicyPackage: If the filter names are not a sequence of non-empty strings.
     """
     if disable_filters is None:
         return frozenset()
 
     if isinstance(disable_filters, (str, bytes)) or not isinstance(disable_filters, Sequence):
         raise exception.ErrorLoadingPolicyPackage(
-            "%s: 'disable-filters' of role '%s' must be a sequence of filter names, got '%s'" % (module_name, role, type(disable_filters).__name__))
+            "%s: %s must be a sequence of filter names, got '%s'" % (module_name, source, type(disable_filters).__name__))
 
     if not all(isinstance(name, str) and name.strip() for name in disable_filters):
-        raise exception.ErrorLoadingPolicyPackage("%s: 'disable-filters' of role '%s' must only hold non-empty filter names" % (module_name, role))
+        raise exception.ErrorLoadingPolicyPackage("%s: %s must only hold non-empty filter names" % (module_name, source))
 
     return frozenset(name.strip() for name in disable_filters)
 
@@ -225,15 +237,18 @@ def load_roles_for_vo(vo: str) -> None:
     Load the role definitions of a VO from its policy package and cache them.
 
     A policy package defines the roles of an installation through a `role` module which
-    exposes a `roles` attribute. Unlike permissions there is no generic fallback: a VO
-    without a policy package, or with a policy package that does not provide a role
-    module, simply has no policy-defined roles.
+    exposes a `roles` attribute, and may disable filters for every account holding a role, or
+    for every account of the VO, through the optional `disable_filters_for_all_roles` and
+    `disable_filters_for_all_accounts` attributes. Unlike permissions there is no generic
+    fallback: a VO without a policy package, or with a policy package that does not provide a
+    role module, simply has no policy-defined roles and disables no filter.
 
     :param vo: The VO to load the role definitions for.
     """
     package = _get_policy_package_name(vo)
     if package is None:
         role_definitions[vo] = {}
+        disabled_filters[vo] = dict.fromkeys((DISABLE_FILTERS_FOR_ALL_ROLES, DISABLE_FILTERS_FOR_ALL_ACCOUNTS), frozenset())
         return
 
     try:
@@ -251,17 +266,23 @@ def load_roles_for_vo(vo: str) -> None:
         # a policy package may omit modules that do not need customisation
         LOGGER.debug('Policy package %s does not provide a role module, no roles defined for VO %s' % (package, vo))
         role_definitions[vo] = {}
+        disabled_filters[vo] = dict.fromkeys((DISABLE_FILTERS_FOR_ALL_ROLES, DISABLE_FILTERS_FOR_ALL_ACCOUNTS), frozenset())
         return
     except ImportError:
         raise exception.ErrorLoadingPolicyPackage(module_name)
+
+    filters = {
+        attribute: _parse_disable_filters(getattr(module, attribute, None), "'%s'" % attribute, module_name)
+        for attribute in (DISABLE_FILTERS_FOR_ALL_ROLES, DISABLE_FILTERS_FOR_ALL_ACCOUNTS)
+    }
 
     roles = getattr(module, 'roles', None)
     if roles is None:
         LOGGER.warning("Role module %s does not define 'roles', no roles defined for VO %s" % (module_name, vo))
         role_definitions[vo] = {}
-        return
-
-    role_definitions[vo] = _parse_roles(roles, module_name)
+    else:
+        role_definitions[vo] = _parse_roles(roles, module_name)
+    disabled_filters[vo] = filters
 
 
 def get_roles(vo: str = DEFAULT_VO) -> dict[str, dict[str, Any]]:
@@ -277,6 +298,39 @@ def get_roles(vo: str = DEFAULT_VO) -> dict[str, dict[str, Any]]:
     if vo not in role_definitions:
         load_roles_for_vo(vo)
     return role_definitions[vo]
+
+
+def get_disabled_filters_for_all_roles(vo: str = DEFAULT_VO) -> frozenset[str]:
+    """
+    Get the filters the policy package of a VO disables for every account holding at least one role.
+
+    These filters are disabled by any role the account holds through an assignment which has not
+    expired yet, except a reserved role, whether or not the policy package defines that role.
+    They are loaded from the policy package on first use and cached afterwards, together with the
+    role definitions.
+
+    :param vo: The VO to get the disabled filters for.
+    :returns: The names of the filters disabled for every role, empty if none is disabled.
+    """
+    if vo not in disabled_filters:
+        load_roles_for_vo(vo)
+    return disabled_filters[vo][DISABLE_FILTERS_FOR_ALL_ROLES]
+
+
+def get_disabled_filters_for_all_accounts(vo: str = DEFAULT_VO) -> frozenset[str]:
+    """
+    Get the filters the policy package of a VO disables for every account of the VO.
+
+    These filters are disabled regardless of the roles of the account, including for an account
+    which holds no role at all. They are loaded from the policy package on first use and cached
+    afterwards, together with the role definitions.
+
+    :param vo: The VO to get the disabled filters for.
+    :returns: The names of the filters disabled for every account, empty if none is disabled.
+    """
+    if vo not in disabled_filters:
+        load_roles_for_vo(vo)
+    return disabled_filters[vo][DISABLE_FILTERS_FOR_ALL_ACCOUNTS]
 
 
 class PermissionResult:

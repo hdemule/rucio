@@ -602,25 +602,40 @@ def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session:
     Tell whether the policy package disables a filter for the account.
 
     Filtering is the default: a filter is only disabled if the policy package of the account's VO
-    lists it in the 'disable-filters' of a role the account holds through an assignment which has
-    not expired yet. A reserved role never disables a filter, since the policy package cannot
-    define it. The filters are documented in the role module of the policy package.
+    lists it, from the most general to the most specific, in:
+
+    - its `disable_filters_for_all_accounts`: for every account of the VO regardless of its roles,
+      even for an account holding no role at all;
+    - its `disable_filters_for_all_roles`: for every account holding at least one role;
+    - the 'disable-filters' of a role: for every account holding that role.
+
+    An account only holds a role through an assignment which has not expired yet. A reserved role
+    never disables a filter, since the policy package cannot define it. The filters are documented
+    in the role module of the policy package.
 
     :param account: The account the listing is filtered for.
     :param filter_name: The name of the filter, e.g. 'list_scopes'.
     :param session: The database session.
     :returns: True if the listing must not be filtered for the account.
     """
-    roles = [
-        role for role, definition in permission.get_roles(vo=account.vo).items()
-        if filter_name in definition.get('disable_filters', ()) and not is_reserved_role(role)
-    ]
-    if not roles:
-        return False
+    if filter_name in permission.get_disabled_filters_for_all_accounts(vo=account.vo):
+        return True
+
+    if filter_name in permission.get_disabled_filters_for_all_roles(vo=account.vo):
+        # any role disables the filter, so there is no need to look at the role definitions
+        role_disables_filter = models.AccountRoleAssociation.role.not_in(list(RESERVED_ROLES))
+    else:
+        roles = [
+            role for role, definition in permission.get_roles(vo=account.vo).items()
+            if filter_name in definition.get('disable_filters', ()) and not is_reserved_role(role)
+        ]
+        if not roles:
+            return False
+        role_disables_filter = models.AccountRoleAssociation.role.in_(roles)
 
     stmt = select(models.AccountRoleAssociation.role).where(
         models.AccountRoleAssociation.account == account,
-        models.AccountRoleAssociation.role.in_(roles),
+        role_disables_filter,
         _assignment_not_expired(),
     )
     return session.execute(stmt).first() is not None
