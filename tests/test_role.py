@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -186,6 +188,59 @@ def test_parse_roles_invalid_disable_filters(disable_filters):
 
 
 @pytest.fixture
+def policy_role_module(monkeypatch):
+    """Serve a fake policy package with an empty role module, and an empty role cache, for the test."""
+    role_module = types.ModuleType('fake_policy.role')
+    monkeypatch.setitem(sys.modules, 'fake_policy', types.ModuleType('fake_policy'))
+    monkeypatch.setitem(sys.modules, 'fake_policy.role', role_module)
+    monkeypatch.setattr(permission, '_get_policy_package_name', lambda vo: 'fake_policy')
+    monkeypatch.setattr(permission, 'role_definitions', {})
+    monkeypatch.setattr(permission, 'disabled_filters', {})
+    return role_module
+
+
+@pytest.mark.parametrize('attribute, getter', [
+    ('disable_filters_for_all_roles', permission.get_disabled_filters_for_all_roles),
+    ('disable_filters_for_all_accounts', permission.get_disabled_filters_for_all_accounts),
+])
+@pytest.mark.parametrize('attributes, expected', [
+    ({}, frozenset()),
+    ({'disable_filters': []}, frozenset()),
+    ({'disable_filters': ['list_scopes', ' get_scopes ']}, frozenset({'list_scopes', 'get_scopes'})),
+    ({'roles': [{'name': 'data-scientist'}], 'disable_filters': ['list_scopes']}, frozenset({'list_scopes'})),
+])
+def test_load_disabled_filters_for_all(policy_role_module, vo, attribute, getter, attributes, expected):
+    """ROLE (CORE): A policy package disables no filter for all roles or all accounts, unless its role module names them in the matching attribute, with or without roles."""
+    for name, value in attributes.items():
+        setattr(policy_role_module, attribute if name == 'disable_filters' else name, value)
+    assert getter(vo=vo) == expected
+
+
+def test_load_disabled_filters_for_all_are_independent(policy_role_module, vo):
+    """ROLE (CORE): The filters disabled for all roles and for all accounts are loaded separately."""
+    policy_role_module.disable_filters_for_all_roles = ['list_scopes']
+    policy_role_module.disable_filters_for_all_accounts = ['get_scopes']
+    assert permission.get_disabled_filters_for_all_roles(vo=vo) == frozenset({'list_scopes'})
+    assert permission.get_disabled_filters_for_all_accounts(vo=vo) == frozenset({'get_scopes'})
+
+
+@pytest.mark.parametrize('attribute', ['disable_filters_for_all_roles', 'disable_filters_for_all_accounts'])
+@pytest.mark.parametrize('disable_filters', ['list_scopes', [''], ['list_scopes', 42], {'list_scopes': True}])
+def test_load_invalid_disabled_filters_for_all(policy_role_module, vo, attribute, disable_filters):
+    """ROLE (CORE): A policy package whose filters disabled for all roles or all accounts are not a list of filter names is refused."""
+    setattr(policy_role_module, attribute, disable_filters)
+    with pytest.raises(ErrorLoadingPolicyPackage):
+        permission.get_roles(vo=vo)
+
+
+def _stub_disabled_filters(monkeypatch, roles=None, all_roles=frozenset(), all_accounts=frozenset()):
+    """Stub the filters the policy package disables for some roles, for all roles and for all accounts."""
+    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: roles or {})
+    monkeypatch.setattr(core_role.permission, 'get_disabled_filters_for_all_roles', lambda vo: all_roles)
+    monkeypatch.setattr(core_role.permission, 'get_disabled_filters_for_all_accounts', lambda vo: all_accounts)
+
+
+@pytest.fixture
 def policy_role(db_session):
     """Add a new role for the test, and remove it again afterwards together with its account assignments."""
     role = 'policy-%s' % generate_uuid()
@@ -205,21 +260,49 @@ def policy_role(db_session):
 ])
 def test_is_filter_disabled(policy_role, db_session, root_account, monkeypatch, disable_filters, expires_at, disabled):
     """ROLE (CORE): A filter is only disabled by a role which disables it and which the account holds through an assignment which has not expired yet."""
-    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: {policy_role: {'description': None, 'disable_filters': disable_filters}})
+    _stub_disabled_filters(monkeypatch, roles={policy_role: {'description': None, 'disable_filters': disable_filters}})
     assert not core_role.is_filter_disabled(root_account, 'list_scopes', session=db_session)
 
     core_role.add_account_role(root_account, policy_role, expires_at=expires_at, session=db_session)
     assert core_role.is_filter_disabled(root_account, 'list_scopes', session=db_session) is disabled
 
 
-def test_is_filter_disabled_reserved_role(reserved_role, db_session, root_account, monkeypatch):
-    """ROLE (CORE): A reserved role never disables a filter, even if the policy package says so."""
-    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: {reserved_role: {'description': None, 'disable_filters': frozenset({'list_scopes'})}})
-    core_role.add_account_role(root_account, reserved_role, force=True, session=db_session)
+def test_is_filter_disabled_reserved_role(reserved_role, db_session, random_account, monkeypatch):
+    """ROLE (CORE): A reserved role never disables a filter, even if the policy package says so for it or for all roles."""
+    _stub_disabled_filters(monkeypatch, roles={reserved_role: {'description': None, 'disable_filters': frozenset({'list_scopes'})}}, all_roles=frozenset({'list_scopes'}))
+    core_role.add_account_role(random_account, reserved_role, force=True, session=db_session)
     try:
-        assert not core_role.is_filter_disabled(root_account, 'list_scopes', session=db_session)
+        assert not core_role.is_filter_disabled(random_account, 'list_scopes', session=db_session)
     finally:
-        core_role.delete_account_role(root_account, reserved_role, force=True, session=db_session)
+        core_role.delete_account_role(random_account, reserved_role, force=True, session=db_session)
+
+
+@pytest.mark.parametrize('disabled_filters, expires_at, disabled', [
+    (frozenset({'list_scopes'}), None, True),
+    (frozenset({'list_scopes'}), datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1), True),
+    (frozenset({'list_scopes'}), datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1), False),
+    (frozenset({'list_content'}), None, False),
+    (frozenset(), None, False),
+])
+def test_is_filter_disabled_for_all_roles(policy_role, random_account, db_session, monkeypatch, disabled_filters, expires_at, disabled):
+    """ROLE (CORE): A filter disabled for all roles is disabled for every account holding a role which does not disable it itself, but not for an account holding no role."""
+    _stub_disabled_filters(monkeypatch, roles={policy_role: {'description': None, 'disable_filters': frozenset()}}, all_roles=disabled_filters)
+    assert not core_role.is_filter_disabled(random_account, 'list_scopes', session=db_session)
+
+    core_role.add_account_role(random_account, policy_role, expires_at=expires_at, session=db_session)
+    assert core_role.is_filter_disabled(random_account, 'list_scopes', session=db_session) is disabled
+
+
+@pytest.mark.parametrize('disabled_filters, disabled', [
+    (frozenset({'list_scopes'}), True),
+    (frozenset({'list_content'}), False),
+    (frozenset(), False),
+])
+def test_is_filter_disabled_for_all_accounts(random_account, db_session, monkeypatch, disabled_filters, disabled):
+    """ROLE (CORE): A filter disabled for all accounts is disabled for every account, even for an account holding no role at all."""
+    _stub_disabled_filters(monkeypatch, all_accounts=disabled_filters)
+    assert not core_role.list_account_roles(random_account, session=db_session)
+    assert core_role.is_filter_disabled(random_account, 'list_scopes', session=db_session) is disabled
 
 
 @pytest.mark.parametrize('skip_filtering, expected', [(False, []), (True, [{'scope': None}])])
