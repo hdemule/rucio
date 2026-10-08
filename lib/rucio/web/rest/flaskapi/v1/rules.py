@@ -82,8 +82,8 @@ class Rule(ErrorHandlingMethodView):
                   type: string
           406:
             description: "Not Acceptable"
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           404:
             description: "No rule found for the given id"
         """
@@ -96,6 +96,8 @@ class Rule(ErrorHandlingMethodView):
             rule = get_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except RuleNotFound as error:
             return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
         return Response(render_json(**rule), content_type="application/json")
 
@@ -248,7 +250,7 @@ class AllRule(ErrorHandlingMethodView):
         """
         try:
             def generate(filters, vo):
-                for rule in list_replication_rules(filters=filters, vo=vo):
+                for rule in list_replication_rules(issuer=request.environ['issuer'], filters=filters, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
             return try_stream(generate(filters=dict(request.args.items(multi=False)), vo=request.environ['vo']))
@@ -468,6 +470,8 @@ class ReplicaLocks(ErrorHandlingMethodView):
                         type: string
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           404:
             description: "No rule found for the given id"
           406:
@@ -475,10 +479,17 @@ class ReplicaLocks(ErrorHandlingMethodView):
         """
 
         def generate(vo):
-            for lock in get_replica_locks_for_rule_id(rule_id, vo=vo):
+            for lock in get_replica_locks_for_rule_id(issuer=request.environ['issuer'], rule_id=rule_id, vo=vo):
                 yield render_json(**lock) + '\n'
 
-        return try_stream(generate(vo=request.environ['vo']))
+        try:
+            res = try_stream(generate(vo=request.environ['vo']))
+        except RuleNotFound as error:
+            return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+
+        return res
 
 
 class ReduceRule(ErrorHandlingMethodView):
@@ -677,7 +688,12 @@ class RuleHistory(ErrorHandlingMethodView):
             for history in list_replication_rule_history(rule_id, issuer=issuer, vo=vo):
                 yield render_json(**history) + '\n'
 
-        return try_stream(generate(issuer=request.environ['issuer'], vo=request.environ['vo']))
+        try:
+            return try_stream(generate(issuer=request.environ['issuer'], vo=request.environ['vo']))
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except RuleNotFound as error:
+            return generate_http_error_flask(404, error)
 
 
 class RuleHistoryFull(ErrorHandlingMethodView):
@@ -735,8 +751,8 @@ class RuleHistoryFull(ErrorHandlingMethodView):
                       locks_replicating_cnt:
                         type: integer
                         description: "The number of locks which are replicating."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           406:
             description: "Not acceptable."
         """
@@ -744,12 +760,14 @@ class RuleHistoryFull(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for history in list_replication_rule_full_history(scope, name, vo=vo):
+                for history in list_replication_rule_full_history(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**history) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class RuleAnalysis(ErrorHandlingMethodView):
@@ -813,14 +831,19 @@ class RuleAnalysis(ErrorHandlingMethodView):
                           last_time:
                             type: string
                             description: "The time of the last transfer."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the rule."
           404:
             description: "No rule found for the given id"
           406:
             description: "Not acceptable."
         """
-        analysis = examine_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        try:
+            analysis = examine_replication_rule(rule_id, issuer=request.environ['issuer'], vo=request.environ['vo'])
+        except RuleNotFound as error:
+            return generate_http_error_flask(404, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
         return Response(render_json(**analysis), content_type='application/json')
 
 

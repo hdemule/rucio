@@ -19,7 +19,18 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 from flask import Flask, Response, jsonify, redirect, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import AccessDenied, AccountNotFound, CounterNotFound, Duplicate, IdentityError, InvalidAccountType, InvalidObject, RSENotFound, RuleNotFound, ScopeNotFound
+from rucio.common.exception import (
+    AccessDenied,
+    AccountNotFound,
+    CounterNotFound,
+    Duplicate,
+    IdentityError,
+    InvalidAccountType,
+    InvalidObject,
+    RSENotFound,
+    RuleNotFound,
+    ScopeNotFound,
+)
 from rucio.common.utils import APIEncoder, render_json
 from rucio.gateway.account import add_account, add_account_attribute, del_account, del_account_attribute, get_account_info, get_usage_history, list_account_attributes, list_accounts, list_identities, update_account
 from rucio.gateway.account_limit import delete_global_account_limit, delete_local_account_limit, get_global_account_limit, get_global_account_usage, get_local_account_limit, get_local_account_usage, set_global_account_limit, set_local_account_limit
@@ -218,7 +229,7 @@ class Scopes(ErrorHandlingMethodView):
             description: "Not acceptable"
         """
         try:
-            scopes = get_scopes(account, vo=request.environ['vo'])
+            scopes = get_scopes(account, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except AccountNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -1034,7 +1045,7 @@ class Rules(ErrorHandlingMethodView):
         filters.update(request.args)
         try:
             def generate(vo: str) -> "Iterator[str]":
-                for rule in list_replication_rules(filters=filters, vo=vo):
+                for rule in list_replication_rules(issuer=request.environ['issuer'], filters=filters, vo=vo):
                     yield dumps(rule, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))

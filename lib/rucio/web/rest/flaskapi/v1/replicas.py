@@ -650,8 +650,8 @@ class ListReplicas(ErrorHandlingMethodView):
                       type: array
           400:
             description: "Cannot decode json parameter list."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           404:
             description: "DID not found."
           406:
@@ -757,6 +757,8 @@ class ListReplicas(ErrorHandlingMethodView):
             return try_stream(response_generator, content_type=content_type)
         except (InvalidObject, DataIdentifierNotFound, SortingAlgorithmNotSupported) as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class ReplicasDIDs(ErrorHandlingMethodView):
@@ -820,7 +822,7 @@ class ReplicasDIDs(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for pfn in get_did_from_pfns(pfns, rse, vo=vo):
+                for pfn in get_did_from_pfns(issuer=request.environ['issuer'], pfns=pfns, rse=rse, vo=vo):
                     yield dumps(pfn) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
@@ -1082,7 +1084,7 @@ class SuspiciousReplicas(ErrorHandlingMethodView):
             if 'nattempts' in params:
                 nattempts = int(params['nattempts'][0])
 
-        result = get_suspicious_files(rse_expression=rse_expression, younger_than=younger_than, nattempts=nattempts, vo=request.environ['vo'])
+        result = get_suspicious_files(issuer=request.environ['issuer'], rse_expression=rse_expression, younger_than=younger_than, nattempts=nattempts, vo=request.environ['vo'])
         return Response(render_json(result), 200, content_type='application/json')
 
 
@@ -1205,7 +1207,7 @@ class BadReplicasStates(ErrorHandlingMethodView):
                 list_pfns = bool(params['list_pfns'][0])
 
         def generate(vo):
-            for row in list_bad_replicas_status(state=state, rse=rse, younger_than=younger_than,
+            for row in list_bad_replicas_status(issuer=request.environ['issuer'], state=state, rse=rse, younger_than=younger_than,
                                                 older_than=older_than, limit=limit, list_pfns=list_pfns,
                                                 vo=vo):
                 yield dumps(row, cls=APIEncoder) + '\n'
@@ -1364,8 +1366,8 @@ class DatasetReplicas(ErrorHandlingMethodView):
                         description: "The date-time the replica was accessed."
                         type: string
                         format: date-time
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           404:
             description: "Not found"
           406:
@@ -1375,7 +1377,7 @@ class DatasetReplicas(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(_deep, vo):
-                for row in list_dataset_replicas(scope=scope, name=name, deep=_deep, vo=vo):
+                for row in list_dataset_replicas(issuer=request.environ['issuer'], scope=scope, name=name, deep=_deep, vo=vo):
                     yield dumps(row, cls=APIEncoder) + '\n'
 
             deep = param_get_bool(request.args, 'deep', default=False)
@@ -1383,6 +1385,8 @@ class DatasetReplicas(ErrorHandlingMethodView):
             return try_stream(generate(_deep=deep, vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class DatasetReplicasBulk(ErrorHandlingMethodView):
@@ -1468,8 +1472,8 @@ class DatasetReplicasBulk(ErrorHandlingMethodView):
                         format: date-time
           400:
             description: "Bad Request."
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           404:
             description: "Not found"
           406:
@@ -1482,12 +1486,14 @@ class DatasetReplicasBulk(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for row in list_dataset_replicas_bulk(dids=dids, vo=vo):
+                for row in list_dataset_replicas_bulk(issuer=request.environ['issuer'], dids=dids, vo=vo):
                     yield dumps(row, cls=APIEncoder) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except InvalidObject as error:
             return generate_http_error_flask(400, error, f'Cannot validate DIDs: {error}')
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class DatasetReplicasVP(ErrorHandlingMethodView):
@@ -1510,14 +1516,14 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
           style: simple
         - name: deep
           in: query
-          description: "Flag to ennable lookup at the file level."
+          description: "Flag to enable lookup at the file level."
           schema:
             type: boolean
         responses:
           200:
             description: "OK. This needs documentation!"
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the replica."
           406:
             description: "Not acceptable"
         """
@@ -1525,7 +1531,7 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(_deep, vo):
-                for row in list_dataset_replicas_vp(scope=scope, name=name, deep=_deep, vo=vo):
+                for row in list_dataset_replicas_vp(issuer=request.environ['issuer'], scope=scope, name=name, deep=_deep, vo=vo):
                     yield dumps(row, cls=APIEncoder) + '\n'
 
             deep = param_get_bool(request.args, 'deep', default=False)
@@ -1533,6 +1539,8 @@ class DatasetReplicasVP(ErrorHandlingMethodView):
             return try_stream(generate(_deep=deep, vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class ReplicasRSE(ErrorHandlingMethodView):
@@ -1609,7 +1617,7 @@ class ReplicasRSE(ErrorHandlingMethodView):
         """
 
         def generate(vo):
-            for row in list_datasets_per_rse(rse=rse, vo=vo):
+            for row in list_datasets_per_rse(issuer=request.environ['issuer'], rse=rse, vo=vo):
                 yield dumps(row, cls=APIEncoder) + '\n'
 
         return try_stream(generate(vo=request.environ['vo']))

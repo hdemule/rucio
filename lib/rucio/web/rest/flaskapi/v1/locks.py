@@ -15,7 +15,7 @@
 from flask import Flask, request
 
 from rucio.common.constants import HTTPMethod
-from rucio.common.exception import RSENotFound
+from rucio.common.exception import AccessDenied, RSENotFound
 from rucio.common.utils import render_json
 from rucio.gateway.lock import get_dataset_locks, get_dataset_locks_bulk, get_dataset_locks_by_rse
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
@@ -110,7 +110,7 @@ class LockByRSE(ErrorHandlingMethodView):
 
         try:
             def generate(vo):
-                for lock in get_dataset_locks_by_rse(rse, vo=vo):
+                for lock in get_dataset_locks_by_rse(issuer=request.environ['issuer'], rse=rse, vo=vo):
                     yield render_json(**lock) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
@@ -188,8 +188,8 @@ class LocksByScopeName(ErrorHandlingMethodView):
                       accessed_at:
                         description: "The last time is was accessed."
                         type: string
-          401:
-            description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the lock."
           500:
             description: "Wrong DID type"
             content:
@@ -208,12 +208,14 @@ class LocksByScopeName(ErrorHandlingMethodView):
             scope, name = parse_scope_name(scope_name, request.environ['vo'])
 
             def generate(vo):
-                for lock in get_dataset_locks(scope, name, vo=vo):
+                for lock in get_dataset_locks(issuer=request.environ['issuer'], scope=scope, name=name, vo=vo):
                     yield render_json(**lock) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 class DatasetLocksForDids(ErrorHandlingMethodView):
@@ -312,6 +314,8 @@ class DatasetLocksForDids(ErrorHandlingMethodView):
                   enum: ['Cannot find the list of DIDs in the data. Use "dids" keyword.']
           406:
             description: "Not acceptable"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to access the lock."
 
         """
 
@@ -322,7 +326,7 @@ class DatasetLocksForDids(ErrorHandlingMethodView):
             return 'Can not find the list of DIDs in the data. Use "dids" keyword.', 400
         vo = request.environ['vo']
         try:
-            locks = get_dataset_locks_bulk(dids, vo)        # removes duplicates
+            locks = get_dataset_locks_bulk(issuer=request.environ['issuer'], dids=dids, vo=vo)        # removes duplicates
 
             def generate(locks):
                 for lock in locks:
@@ -332,6 +336,8 @@ class DatasetLocksForDids(ErrorHandlingMethodView):
 
         except ValueError as error:
             return generate_http_error_flask(400, error)
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
 
 
 def blueprint() -> AuthenticatedBlueprint:
