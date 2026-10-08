@@ -27,6 +27,7 @@ import os.path
 import re
 import signal
 import socket
+import shutil
 import subprocess  # noqa: S404 -- subprocess used for external commands
 import tempfile
 import threading
@@ -331,6 +332,28 @@ def execute(cmd: str) -> tuple[int, str, str]:
     result = process.communicate()
     (out, err) = result
     exitcode = process.returncode
+
+    # TODO: Temporary prints for debugging test
+    # BEGIN TEMP
+    stdout = out.decode(encoding='utf-8')
+    stderr = err.decode(encoding='utf-8')
+    status = "SUCCESS" if exitcode == 0 else "FAILED"
+
+    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+
+    print(f"\n\033[94m{' ' + cmd + ' ':=^{terminal_width}}\033[0m")
+    print(f"Command  : {cmd}")
+    print(f"Status   : {status}")
+    print(f"Exit code: {exitcode}")
+    print("\033[34m" + "-" * terminal_width + "\033[0m")
+    print("Standard output:")
+    print(stdout or "<empty>")
+    print("\033[34m" + "-" * terminal_width + "\033[0m")
+    print("Standard error:")
+    print(stderr or "<empty>")
+    print("\033[94m" + "=" * terminal_width + "\033[0m")
+    # END TEMP
+
     return exitcode, out.decode(encoding='utf-8'), err.decode(encoding='utf-8')
 
 
