@@ -30,12 +30,12 @@ from rucio.common import exception
 from rucio.common.config import config_get_bool, config_get_int
 from rucio.common.constants import DEFAULT_VO
 from rucio.common.utils import chunks, is_archive
-from rucio.core import did_meta_plugins
+from rucio.core import did_meta_plugins, role
 from rucio.core.message import add_message, add_messages
 from rucio.core.monitor import MetricManager
 from rucio.core.naming_convention import validate_name
 from rucio.db.sqla import filter_thread_work, models
-from rucio.db.sqla.constants import BadFilesStatus, DIDAvailability, DIDReEvaluation, DIDType, RuleState
+from rucio.db.sqla.constants import BadFilesStatus, DatabaseOperationType, DIDAvailability, DIDReEvaluation, DIDType, RuleState
 from rucio.db.sqla.session import read_session, stream_session, transactional_session
 from rucio.db.sqla.util import temp_table_mngr
 
@@ -1451,11 +1451,13 @@ def list_content(
     scope: "InternalScope",
     name: str,
     *,
-    session: "Session"
+    account: "InternalAccount | None" = None,
+    session: "Session",
 ) -> "Iterator[dict[str, Any]]":
     """
     List data identifier contents.
 
+    :param account: The issuer's account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param session: The database session in use.
@@ -1470,6 +1472,7 @@ def list_content(
         and_(models.DataIdentifierAssociation.scope == scope,
              models.DataIdentifierAssociation.name == name)
     )
+
     children_found = False
     for tmp_did in session.execute(stmt).yield_per(5).scalars():
         children_found = True
@@ -2733,10 +2736,13 @@ def add_dids_to_followed(
                 and_(models.DataIdentifier.scope == did['scope'],
                      models.DataIdentifier.name == did['name'])
             )
-            did = session.execute(stmt).scalar_one()
+            try:
+                followed_did = session.execute(stmt).scalar_one()
+            except NoResultFound as error:
+                raise exception.DataIdentifierNotFound("Data identifier '%s:%s' not found" % (did['scope'], did['name'])) from error
             # Add the queried to the followed table.
-            new_did_followed = models.DidFollowed(scope=did.scope, name=did.name, account=account,
-                                                  did_type=did.did_type)
+            new_did_followed = models.DidFollowed(scope=followed_did.scope, name=followed_did.name, account=account,
+                                                  did_type=followed_did.did_type)
 
             new_did_followed.save(session=session, flush=False)
 

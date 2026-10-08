@@ -124,7 +124,7 @@ def list_scopes(session: "Session", filter_: Optional[dict[str, Any]] = None) ->
     return list(session.execute(stmt).scalars().all())
 
 
-def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, *, session: "Session") -> "Iterable[dict[str, Any]]":
+def list_scopes_with_account(account: "InternalAccount", filter_: Optional[dict[str, Any]] = None, *, session: "Session") -> "Iterable[dict[str, Any]]":
     """
     Lists all scopes.
     :param filter_: Dictionary of attributes by which the input data should be filtered
@@ -150,6 +150,7 @@ def list_scopes_with_account(filter_: Optional[dict[str, Any]] = None, *, sessio
                 stmt = stmt.where(
                     models.Scope.scope == filter_['scope']
                 )
+
     scopes = []
     for scope, account in session.execute(stmt):
         scopes.append({
