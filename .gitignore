@@ -38,6 +38,15 @@ MANIFEST
 .coverage
 **coverage.xml
 build/
+# Track only the RBAC client Dockerfile
+!/build/
+/build/*
+!/build/rbac-client-image/
+/build/rbac-client-image/*
+!/build/rbac-client-image/Dockerfile
+!/build/rbac-client-image/rucio.cfg
+!/build/rbac-client-image/set-username.sh
+!/build/rbac-client-image/tls-ca-bundle.pem
 covhtml
 dist/
 examples/whip/results/
@@ -73,3 +82,4 @@ tools/test.file.1G
 # Node.js dependencies for commitlint
 node_modules/
 package-lock.json
+.githubtoken
