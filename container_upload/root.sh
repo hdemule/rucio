@@ -1,0 +1,1 @@
+unset RUCIO_CONFIG
