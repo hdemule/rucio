@@ -16,13 +16,17 @@ import errno
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess  # noqa: S404 -- subprocess used for external commands
 import sys
+import textwrap
 import traceback
 from configparser import NoOptionError, NoSectionError
+from datetime import datetime
+from enum import Enum
 from functools import wraps
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import click
 
@@ -46,8 +50,135 @@ from rucio.common.exception import (
 )
 from rucio.common.utils import extract_scope, setup_logger
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping, Sequence
+
+
 SUCCESS = 0
 FAILURE = 1
+
+
+# Client-side representation of the operations a role permission can grant.
+class RoleOperationType(Enum):
+    READ = 'read'
+    WRITE = 'write'
+    DELETE = 'delete'
+
+
+# The letter shown for each operation, in the order the operations are rendered.
+OPERATION_LETTERS: dict[RoleOperationType, str] = {
+    RoleOperationType.READ: 'r',
+    RoleOperationType.WRITE: 'w',
+    RoleOperationType.DELETE: 'd',
+}
+
+
+def format_operations(operations: "Iterable[str]") -> str:
+    """
+    Render the operations granted on a scope compactly, e.g. 'rw-' for read and write, 'r--' for read only.
+
+    :param operations: The operation values that are granted, e.g. 'read', 'write' and/or 'delete'.
+    :returns: One character per known operation, with '-' where the operation is not granted.
+    """
+    granted = set(operations)
+    return ''.join(
+        letter if operation.value in granted else '-'
+        for operation, letter in OPERATION_LETTERS.items()
+    )
+
+
+TREE_BRANCH = "|-- "
+TREE_LAST_BRANCH = "`-- "
+TREE_PLACEHOLDER_INDENT = "`-- "
+
+
+def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
+    """
+    Render a node and its branches as a tree, to be used as a single (multi-line) table cell.
+
+    Keeping the whole tree in one cell makes it start right below `root`, even if another column
+    of the same row wraps over several lines, and keeps the indentation of the branches, which
+    tabulate would strip from single-line cells.
+
+    :param root: The first line of the tree, e.g. a role name or a scope pattern.
+    :param branches: One line per branch, listed under `root` in the given order.
+    :param placeholder: The line listed under `root` if there is no branch.
+    :returns: The lines of the tree, joined by newlines.
+    """
+    if not branches:
+        return '\n'.join([root, f"{TREE_PLACEHOLDER_INDENT}{placeholder}"])
+
+    lines = [root]
+    for index, branch in enumerate(branches):
+        prefix = TREE_LAST_BRANCH if index == len(branches) - 1 else TREE_BRANCH
+        lines.append(f"{prefix}{branch}")
+    return '\n'.join(lines)
+
+
+def format_permission_tree(role: str, permissions: "Iterable[Mapping[str, str]]") -> str:
+    """
+    Render a role and its permissions as a tree, see :func:`format_tree`.
+
+    Each scope pattern is one branch, showing its operations as in :func:`format_operations`.
+
+    :param role: The name of the role, the root of the tree.
+    :param permissions: The permissions of the role, each with an 'operation' and a 'scope_pattern'.
+    :returns: The tree, to be used as a single table cell.
+    """
+    ops_by_scope_pattern: dict[str, set[str]] = {}
+    for permission in permissions:
+        ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
+
+    branches = [
+        f"{format_operations(operations)}  {scope_pattern}"
+        for scope_pattern, operations in sorted(ops_by_scope_pattern.items())
+    ]
+    return format_tree(role, branches, placeholder="(no permission assigned)")
+
+
+def wrap_table_column(
+    rows: "Sequence[Sequence[Any]]",
+    headers: "Sequence[str]",
+    column: int,
+    min_width: int = 24,
+) -> list[list[Any]]:
+    """
+    Wrap a free-text column so that a tabulated table still fits the terminal.
+
+    The other columns keep their natural width and whatever horizontal space is left over
+    is given to `column`, so that long values (e.g. a role description) wrap instead of
+    stretching the table far beyond the terminal. Line breaks already present in the text
+    are kept, so paragraphs stay intact.
+
+    :param rows: The rows that will be tabulated.
+    :param headers: The column headers of the table.
+    :param column: Index of the column to wrap.
+    :param min_width: Lower bound, so a narrow terminal yields a tall table rather than one character per line.
+    :returns: A new list of rows, with `column` wrapped.
+    """
+    natural_width = 0
+    for index, header in enumerate(headers):
+        if index == column:
+            continue
+        # a multi-line cell is as wide as its longest line
+        natural_width += max([len(header)] + [len(line) for row in rows for line in str(row[index]).splitlines()])
+
+    # every column is padded and separated by borders, e.g. '| a | b |' in the default 'psql' format
+    borders = 3 * len(headers) + 1
+    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    width = max(min_width, terminal_width - natural_width - borders)
+
+    wrapped_rows = []
+    for row in rows:
+        wrapped_row = list(row)
+        lines = []
+        for line in str(wrapped_row[column]).splitlines():
+            # an empty line wraps to nothing, keep it so blank lines between paragraphs survive
+            lines.extend(textwrap.wrap(line, width) or [''])
+        wrapped_row[column] = '\n'.join(lines)
+        wrapped_rows.append(wrapped_row)
+
+    return wrapped_rows
 
 
 def exception_handler(function):
@@ -260,17 +391,59 @@ class JSONType(click.ParamType):
             self.fail(f"Invalid JSON: {e}", param, ctx)
 
 
-def scope_exists(client: 'Client', scope: str) -> None:
-    possible_scopes = client.list_scopes()
-    if not len(list(possible_scopes)):
-        raise ScopeNotFound
-    if isinstance(list(possible_scopes)[0], str):  # TODO Backwards Compat - Remove in future releases - #8125
-        scopes = possible_scopes
-    else:
-        scopes = [s['scope'] for s in possible_scopes]  # type: ignore
+class OptionalDateTime(click.ParamType):
+    """A date, or None when the given value is `NEVER` (case insensitive)."""
 
-    if scope not in scopes:  # type: ignore - handled by the if isinstance
-        raise ScopeNotFound
+    name = "date"
+    FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
+    NEVER = "NEVER"
+
+    def convert(self, value, param, ctx) -> Optional[datetime]:
+        """Turn a command line value into a datetime, or None if it is `NEVER`."""
+        if value is None or isinstance(value, datetime):
+            return value
+        if value.strip().upper() == self.NEVER:
+            return None
+        for date_format in self.FORMATS:
+            try:
+                return datetime.strptime(value.strip(), date_format)
+            except ValueError:
+                continue
+        self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)} or {self.NEVER}", param, ctx)
+
+
+class RoleOperations(click.ParamType):
+    """
+    One or more role operations, in any order and combination.
+
+    Accepted forms, case insensitive:
+      - letters among r, w and d, e.g. 'r', 'rw', 'dw', 'rwd';
+      - the same letters with '-' placeholders, as shown by `role permission list`, e.g. 'rw-', 'r-d';
+      - comma-separated operation names, e.g. 'read', 'read,delete'.
+    """
+
+    name = "operations"
+    HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd', 'rwd' or 'read,write'"
+
+    def convert(self, value, param, ctx) -> list[RoleOperationType]:
+        """Turn a command line value into the requested operations, deduplicated and in canonical order."""
+        if isinstance(value, list):
+            return value
+        by_letter = {letter: operation for operation, letter in OPERATION_LETTERS.items()}
+        by_name = {operation.value: operation for operation in RoleOperationType}
+
+        requested: set[RoleOperationType] = set()
+        for token in value.lower().replace(' ', '').split(','):
+            if token in by_name:
+                requested.add(by_name[token])
+            elif token and all(char in by_letter or char == '-' for char in token):
+                requested.update(by_letter[char] for char in token if char != '-')
+            else:
+                self.fail(f"{token!r} is not a valid operation, expected {self.HELP}", param, ctx)
+
+        if not requested:
+            self.fail(f"{value!r} does not contain any operation, expected {self.HELP}", param, ctx)
+        return [operation for operation in OPERATION_LETTERS if operation in requested]
 
 
 def get_scope(did: str, client: Client) -> tuple[str, str]:
