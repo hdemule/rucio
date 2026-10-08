@@ -22,7 +22,6 @@ from alembic.op import create_check_constraint, create_foreign_key, create_prima
 
 from rucio.common.schema import get_schema_value
 from rucio.db.sqla.constants import RoleOperationType
-from rucio.db.sqla.types import GUID
 
 # Alembic revision identifiers
 revision = '5e5da3fb86c1'
@@ -77,26 +76,10 @@ def upgrade():
         create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_CREATED_NN', 'role_scope_permission_map', 'created_at is not null')
         create_check_constraint('ROLE_SCOPE_PERMISSION_MAP_UPDATED_NN', 'role_scope_permission_map', 'updated_at is not null')
 
-        create_table('role_rse_permission_map',
-                     sa.Column('role', sa.String(255)),
-                     sa.Column('rse_id', GUID()),
-                     sa.Column('limit_bytes', sa.BigInteger),
-                     sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
-                     sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
-        create_primary_key('ROLE_RSE_PERMISSION_MAP_PK', 'role_rse_permission_map', ['role', 'rse_id'])
-        create_foreign_key('ROLE_RSE_PERMISSION_MAP_ROLE_FK', 'role_rse_permission_map', 'roles', ['role'], ['role'], onupdate='CASCADE', ondelete='CASCADE')
-        create_foreign_key('ROLE_RSE_PERMISSION_MAP_RSE_FK', 'role_rse_permission_map', 'rses', ['rse_id'], ['id'], onupdate='CASCADE', ondelete='CASCADE')
-        create_check_constraint('ROLE_RSE_PERMISSION_MAP_ROLE_NN', 'role_rse_permission_map', 'role is not null')
-        create_check_constraint('ROLE_RSE_PERMISSION_MAP_RSE_NN', 'role_rse_permission_map', 'rse_id is not null')
-        create_check_constraint('ROLE_RSE_PERMISSION_MAP_LIMIT_BYTES_NN', 'role_rse_permission_map', 'limit_bytes is not null')
-        create_check_constraint('ROLE_RSE_PERMISSION_MAP_CREATED_NN', 'role_rse_permission_map', 'created_at is not null')
-        create_check_constraint('ROLE_RSE_PERMISSION_MAP_UPDATED_NN', 'role_rse_permission_map', 'updated_at is not null')
-
 
 def downgrade():
     """Downgrade the database to the previous revision."""
     if context.get_context().dialect.name in ['oracle', 'mysql', 'postgresql']:
-        drop_table('role_rse_permission_map')
         drop_table('role_scope_permission_map')
         drop_table('account_role_map')
         drop_table('roles')

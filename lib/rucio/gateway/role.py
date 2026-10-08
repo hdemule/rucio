@@ -4,7 +4,7 @@ from rucio.common.constants import DEFAULT_VO
 from rucio.common.exception import AccessDenied
 from rucio.common.types import InternalAccount
 from rucio.core import role as core_role
-from rucio.db.sqla.constants import DatabaseOperationType, RoleOperationType
+from rucio.db.sqla.constants import DatabaseOperationType, RoleResourceType
 from rucio.db.sqla.session import db_session
 from rucio.gateway.permission import has_permission
 
@@ -234,8 +234,9 @@ def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: s
 
         core_role.add_role_permission(
             role=role,
-            operation=RoleOperationType(operation),
-            scope_pattern=scope_pattern,
+            resource_type=RoleResourceType.SCOPE,
+            target=scope_pattern,
+            operation=operation,
             force=force,
             session=session,
         )
@@ -259,8 +260,9 @@ def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer
 
         core_role.delete_role_permission(
             role=role,
-            operation=RoleOperationType(operation),
-            scope_pattern=scope_pattern,
+            resource_type=RoleResourceType.SCOPE,
+            target=scope_pattern,
+            operation=operation,
             force=force,
             session=session,
         )

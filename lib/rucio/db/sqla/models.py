@@ -442,20 +442,6 @@ class RoleScopePermissionAssociation(BASE, ModelBase):
                    CheckConstraint('OPERATION IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_NN'))
 
 
-class RoleRSEPermissionAssociation(BASE, ModelBase):
-    """Represents a role's permission (RSE + limit) for Role-Based Access Control (RBAC)"""
-    __tablename__ = 'role_rse_permission_map'
-    role: Mapped[str] = mapped_column(String(255))
-    rse_id: Mapped[GUID] = mapped_column(GUID())
-    limit_bytes: Mapped[int] = mapped_column(BigInteger)
-    _table_args = (PrimaryKeyConstraint('role', 'rse_id', name='ROLE_RSE_PERMISSION_MAP_PK'),
-                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_RSE_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
-                   ForeignKeyConstraint(['rse_id'], ['rses.id'], name='ROLE_RSE_PERMISSION_MAP_RSE_FK', onupdate='CASCADE', ondelete='CASCADE'),
-                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_RSE_PERMISSION_MAP_ROLE_NN'),
-                   CheckConstraint('RSE_ID IS NOT NULL', name='ROLE_RSE_PERMISSION_MAP_RSE_NN'),
-                   CheckConstraint('LIMIT_BYTES IS NOT NULL', name='ROLE_RSE_PERMISSION_MAP_LIMIT_BYTES_NN'))
-
-
 class DataIdentifier(BASE, ModelBase):
     """Represents a dataset"""
     __tablename__ = 'dids'

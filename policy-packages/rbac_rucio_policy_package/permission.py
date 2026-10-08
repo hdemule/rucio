@@ -210,10 +210,9 @@ def _can_operate_on_scope(issuer: "InternalAccount", scope: "InternalScope | Non
     if scope_core.is_scope_owner(scope=scope, account=issuer, session=session):
         return True
 
-    return role_core.has_role_scope_access(
+    return role_core.has_role_permission(
         account=issuer,
-        scope=scope,
-        operation=operation,
+        request=role_core.ScopePermissionRequest(operation=operation, scope=scope),
         session=session,
     )
 

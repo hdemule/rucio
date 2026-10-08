@@ -12,38 +12,61 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Role-Based Access Control (RBAC).
+
+The module is organised as follows:
+
+- Roles: create, update, delete and list roles, including the reserved ones, see `RESERVED_ROLES`.
+- Account role assignments: which account holds which role, and until when.
+- Permission resources: the resource types a role can be granted permissions on. Each resource
+  type has its own `role_<resource>_permission_map` table, a :class:`PermissionRequest` describing
+  what is checked against it, and a :class:`ResourcePermissionHandler` registered for it.
+- Role permissions: grant, revoke and list the permissions of a role, on any resource type.
+- Permission checks: tell whether an account may perform a request, on any resource type,
+  with :func:`has_permission` as the single entry point, and filter listings accordingly.
+- Synchronisation: of the roles with the policy package, and of an account's roles with an IdP.
+"""
+
+import logging
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, Union, cast
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from rucio.common.constants import DEFAULT_VO, RESERVED_ROLES
-from rucio.common.exception import AccountNotFound, Duplicate, InputValidationError, RoleAssignmentDisabled, RoleAssignmentNotFound, RoleInUse, RoleLocked, RoleNotFound, RolePermissionNotFound, RoleReserved
+from rucio.common.constants import ADMIN_ROLE, DEFAULT_VO, RESERVED_ROLES
+from rucio.common.exception import (
+    AccountNotFound,
+    Duplicate,
+    InputValidationError,
+    RoleAssignmentDisabled,
+    RoleAssignmentNotFound,
+    RoleInUse,
+    RoleLocked,
+    RoleNotFound,
+    RolePermissionNotFound,
+    RoleReserved,
+)
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
-from rucio.core.account import has_account_attribute
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import RoleOperationType
+from rucio.db.sqla.constants import RoleOperationType, RoleResourceType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from sqlalchemy.orm import Session
+    from sqlalchemy.orm import InstrumentedAttribute, Session
     from sqlalchemy.sql.elements import ColumnElement
 
 
-# the only wildcard a scope pattern may use, see `_validate_scope_pattern`
-SCOPE_WILDCARD = "*"
-
-
-def is_reserved_role(role: str) -> bool:
-    """Tell whether a role is reserved by Rucio, see `RESERVED_ROLES`."""
-    return role in RESERVED_ROLES
-
+# ----------------------------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------------------------
 
 def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
     """Best-effort match of a named DB constraint against the raised IntegrityError text."""
@@ -101,6 +124,83 @@ def _normalize_expires_at(expires_at: Optional[Union[str, datetime]]) -> Optiona
             continue
 
     raise InputValidationError("'expires_at' value '%s' is not a valid date, expected either the Rucio date format ('%s') or ISO 8601." % (expires_at, DATE_FORMAT))
+
+
+def _normalize_operation(operation: Union[RoleOperationType, str]) -> RoleOperationType:
+    """
+    Turn an operation given as a `RoleOperationType` or as its value ('read', 'write', 'delete') into a `RoleOperationType`.
+
+    :raises InputValidationError: If the operation is not a known one.
+    """
+    if isinstance(operation, RoleOperationType):
+        return operation
+    try:
+        return RoleOperationType(operation)
+    except ValueError:
+        raise InputValidationError("Operation '%s' is not supported, expected one of: %s." % (operation, ", ".join(op.value for op in RoleOperationType)))
+
+
+def _assignment_not_expired() -> "ColumnElement[bool]":
+    """SQL condition keeping only the account role assignments which have not expired yet."""
+    return or_(
+        models.AccountRoleAssociation.expires_at.is_(None),
+        # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
+        models.AccountRoleAssociation.expires_at > datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def _ensure_role_exists(role: str, session: "Session") -> None:
+    """
+    :raises RoleNotFound: If the role does not exist.
+    """
+    if session.execute(select(models.Roles.role).where(models.Roles.role == role)).scalar_one_or_none() is None:
+        raise RoleNotFound("Role '%s' does not exist." % role)
+
+
+def _ensure_account_exists(account: "InternalAccount", session: "Session") -> None:
+    """
+    :raises AccountNotFound: If the account does not exist.
+    """
+    if session.execute(select(models.Account.account).where(models.Account.account == account)).scalar_one_or_none() is None:
+        raise AccountNotFound("Account '%s' does not exist." % account)
+
+
+def _ensure_unlocked(role: str, force: bool, session: "Session", action: str = "altered") -> None:
+    """
+    Refuse to touch a locked role, unless forced. Does nothing for a role which does not exist.
+
+    :param role: The role about to be touched.
+    :param force: Touch the role even if it is locked.
+    :param session: The database session.
+    :param action: What is about to be done to the role, for the error message.
+    :raises RoleLocked: If the role is locked and `force` is not given.
+    """
+    if force:
+        return
+
+    stmt = select(models.Roles.locked).where(models.Roles.role == role)
+    if session.execute(stmt).scalar_one_or_none():
+        raise RoleLocked("Role '%s' is locked, so it cannot be %s." % (role, action))
+
+
+def _role_not_assignable(role: str, session: "Session") -> bool:
+    """Tell whether a role is not assignable. False (also) for a role which does not exist."""
+    stmt = select(models.Roles.assignable).where(models.Roles.role == role)
+    return session.execute(stmt).scalar_one_or_none() is False
+
+
+def _is_root_or_admin(account: "InternalAccount", session: "Session") -> bool:
+    """Tell whether the account is root or holds the reserved admin role, either of which grants it every permission."""
+    return account.external == "root" or has_account_valid_role(account=account, role=ADMIN_ROLE, session=session)
+
+
+# ----------------------------------------------------------------------------------------------
+# Roles
+# ----------------------------------------------------------------------------------------------
+
+def is_reserved_role(role: str) -> bool:
+    """Tell whether a role is reserved by Rucio, see `RESERVED_ROLES`."""
+    return role in RESERVED_ROLES
 
 
 def list_roles(session: "Session") -> list[dict[str, Any]]:
@@ -239,7 +339,6 @@ def setup_reserved_roles(*, session: "Session") -> list[str]:
     :param session: The database session.
     :returns: The names of the roles which were created.
     """
-    import logging
     stmt = select(models.Roles.role).where(models.Roles.role.in_(RESERVED_ROLES))
     existing = set(session.execute(stmt).scalars().all())
 
@@ -254,6 +353,28 @@ def setup_reserved_roles(*, session: "Session") -> list[str]:
     session.commit()
     return created
 
+
+def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
+    """
+    Delete a role together with its account assignments, without committing.
+
+    `account_role_map.role` references `roles.role` with ON DELETE RESTRICT, so the account
+    assignments are removed first. The permissions of the role go along with it, since the `role`
+    of every `role_<resource>_permission_map` table references `roles.role` with ON DELETE CASCADE.
+
+    :param role: The role to delete.
+    :param session: The database session.
+    :returns: The number of account assignments removed along with the role.
+    """
+    result = session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role == role))
+    unassigned = cast(Any, result).rowcount
+    session.execute(delete(models.Roles).where(models.Roles.role == role))
+    return unassigned
+
+
+# ----------------------------------------------------------------------------------------------
+# Account role assignments
+# ----------------------------------------------------------------------------------------------
 
 def list_account_roles(account: "InternalAccount", session: "Session") -> list[dict[str, Any]]:
     """
@@ -281,8 +402,7 @@ def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
 
     :raises RoleNotFound: If the role does not exist.
     """
-    if session.execute(select(models.Roles.role).where(models.Roles.role == role)).scalar_one_or_none() is None:
-        raise RoleNotFound("Role '%s' does not exist." % role)
+    _ensure_role_exists(role, session)
 
     stmt = (
         select(models.AccountRoleAssociation.account, models.AccountRoleAssociation.expires_at)
@@ -292,28 +412,20 @@ def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
     return [{"account": account, "expires_at": expires_at} for account, expires_at in session.execute(stmt).all()]
 
 
-def _ensure_unlocked(role: str, force: bool, session: "Session", action: str = "altered") -> None:
+def has_account_valid_role(account: "InternalAccount", role: str, session: "Session") -> bool:
     """
-    Refuse to touch a locked role, unless forced. Does nothing for a role which does not exist.
+    Tell whether the account holds the role through an assignment which has not expired yet.
 
-    :param role: The role about to be touched.
-    :param force: Touch the role even if it is locked.
+    :param account: The account to check.
+    :param role: The role to check.
     :param session: The database session.
-    :param action: What is about to be done to the role, for the error message.
-    :raises RoleLocked: If the role is locked and `force` is not given.
     """
-    if force:
-        return
-
-    stmt = select(models.Roles.locked).where(models.Roles.role == role)
-    if session.execute(stmt).scalar_one_or_none():
-        raise RoleLocked("Role '%s' is locked, so it cannot be %s." % (role, action))
-
-
-def _role_not_assignable(role: str, session: "Session") -> bool:
-    """Tell whether a role is not assignable. False (also) for a role which does not exist."""
-    stmt = select(models.Roles.assignable).where(models.Roles.role == role)
-    return session.execute(stmt).scalar_one_or_none() is False
+    stmt = select(models.AccountRoleAssociation.role).where(
+        models.AccountRoleAssociation.account == account,
+        models.AccountRoleAssociation.role == role,
+        _assignment_not_expired(),
+    )
+    return session.execute(stmt).first() is not None
 
 
 def add_account_role(account: "InternalAccount", role: str, expires_at: Optional[Union[str, datetime]] = None, force: bool = False, *, session: "Session") -> None:
@@ -387,6 +499,127 @@ def set_account_role_expires_at(account: "InternalAccount", role: str, expires_a
     return normalized
 
 
+# ----------------------------------------------------------------------------------------------
+# Permission resources
+#
+# A role is granted permissions on resources of several types. Each resource type comes with:
+#
+# - a `RoleResourceType` member;
+# - a `role_<resource>_permission_map` table holding `role`, `operation` and one target column
+#   (e.g. a scope pattern), which together form its primary key, and whose `role` references
+#   `roles.role` with ON DELETE CASCADE;
+# - a `PermissionRequest` subclass, naming the concrete resource an account asks to operate on;
+# - a `ResourcePermissionHandler` subclass, registered with `_register_permission_handler`,
+#   tying the two together.
+#
+# Nothing else in this module has to change to support a new resource type.
+# ----------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PermissionRequest:
+    """
+    A request to perform an operation on a concrete resource, checked by :func:`has_permission`.
+
+    Each resource type subclasses it with the fields naming the resource and sets `resource_type`.
+    A request is hashable, so that a decision on it can be cached, see :func:`permission_checker`.
+    """
+    resource_type: ClassVar[RoleResourceType]
+    operation: RoleOperationType
+
+
+RequestT = TypeVar("RequestT", bound=PermissionRequest)
+
+
+class ResourcePermissionHandler(Generic[RequestT]):
+    """
+    Everything the generic permission functions need to know about one resource type.
+
+    A subclass names its table (`model`), the column of that table holding the target of a
+    permission (`target_attribute`) and the request checked against it (`request_type`), and
+    implements :meth:`matches`. The other methods have defaults which suit most resource types.
+    """
+    resource_type: ClassVar[RoleResourceType]
+    # the `role_<resource>_permission_map` model
+    model: ClassVar[Any]
+    request_type: ClassVar[type[PermissionRequest]]
+    # the column holding the target of a permission, also the key of the target in a listing
+    target_attribute: ClassVar[str]
+    # how the target is called in messages
+    target_label: ClassVar[str]
+
+    @property
+    def target_column(self) -> "InstrumentedAttribute[Any]":
+        """The column of `model` holding the target of a permission."""
+        return getattr(self.model, self.target_attribute)
+
+    @property
+    def constraint_prefix(self) -> str:
+        """The prefix of the names of the constraints of `model`, e.g. 'ROLE_SCOPE_PERMISSION_MAP'."""
+        return self.model.__tablename__.upper()
+
+    def normalize_target(self, target: Any, *, session: "Session") -> Any:
+        """
+        Validate a target given when granting or revoking a permission, and turn it into what is stored.
+
+        :raises InputValidationError: If the target is not valid for this resource type.
+        """
+        return target
+
+    def describe_target(self, target: Any, *, session: "Session") -> str:
+        """Render a stored target for a listing or a message."""
+        return str(target)
+
+    def matches(self, request: RequestT, target: Any) -> bool:
+        """Tell whether a stored target covers the resource of the request."""
+        raise NotImplementedError
+
+    def implicit_access(self, account: "InternalAccount", request: RequestT, *, session: "Session") -> bool:
+        """Tell whether the account may perform the request without holding any role, e.g. as the owner of the resource."""
+        return False
+
+
+_PERMISSION_HANDLERS: dict[RoleResourceType, ResourcePermissionHandler[Any]] = {}
+
+
+def _register_permission_handler(handler_class: "type[ResourcePermissionHandler[Any]]") -> "type[ResourcePermissionHandler[Any]]":
+    """Class decorator registering the handler of a resource type, see :class:`ResourcePermissionHandler`."""
+    _PERMISSION_HANDLERS[handler_class.resource_type] = handler_class()
+    return handler_class
+
+
+def _permission_handler(resource_type: Optional[Union[RoleResourceType, str]]) -> ResourcePermissionHandler[Any]:
+    """
+    Find the handler of a resource type, given as a `RoleResourceType` or as its value (e.g. 'scope').
+
+    :raises InputValidationError: If no handler is registered for the resource type.
+    """
+    try:
+        return _PERMISSION_HANDLERS[RoleResourceType(resource_type)]
+    except (ValueError, KeyError):
+        raise InputValidationError("Resource type '%s' is not supported, expected one of: %s."
+                                   % (getattr(resource_type, "value", resource_type), ", ".join(sorted(t.value for t in _PERMISSION_HANDLERS))))
+
+
+def _request_handler(request: PermissionRequest) -> ResourcePermissionHandler[Any]:
+    """
+    Find the handler a permission request is checked by.
+
+    :raises InputValidationError: If the request is not one of a registered resource type, or its operation is not a `RoleOperationType`.
+    """
+    handler = _permission_handler(getattr(type(request), "resource_type", None))
+    if not isinstance(request, handler.request_type):
+        raise InputValidationError("A '%s' request must be a %s, got '%s'." % (handler.resource_type.value, handler.request_type.__name__, type(request).__name__))
+    if not isinstance(request.operation, RoleOperationType):
+        raise InputValidationError("The operation of a permission request must be a RoleOperationType, got '%s'." % type(request.operation).__name__)
+    return handler
+
+
+# --- Scopes -----------------------------------------------------------------------------------
+
+# the only wildcard a scope pattern may use, see `_validate_scope_pattern`
+SCOPE_WILDCARD = "*"
+
+
 def _validate_scope_pattern(scope_pattern: str) -> str:
     """
     Validate a scope pattern of a role permission.
@@ -434,167 +667,246 @@ def _scope_pattern_matches(scope: "InternalScope", scope_pattern: str) -> bool:
     return external == scope_pattern
 
 
+@dataclass(frozen=True)
+class ScopePermissionRequest(PermissionRequest):
+    """A request to perform `operation` on the content of `scope`."""
+    resource_type: ClassVar[RoleResourceType] = RoleResourceType.SCOPE
+    scope: InternalScope
+
+
+@_register_permission_handler
+class ScopePermissionHandler(ResourcePermissionHandler[ScopePermissionRequest]):
+    """
+    Permissions on scopes, granted on scope patterns, see :func:`_validate_scope_pattern`.
+
+    The owner of a scope may perform any operation on it without holding any role.
+    """
+    resource_type = RoleResourceType.SCOPE
+    model = models.RoleScopePermissionAssociation
+    request_type = ScopePermissionRequest
+    target_attribute = "scope_pattern"
+    target_label = "scope pattern"
+
+    def normalize_target(self, target: Any, *, session: "Session") -> str:
+        return _validate_scope_pattern(target)
+
+    def matches(self, request: ScopePermissionRequest, target: str) -> bool:
+        return _scope_pattern_matches(request.scope, target)
+
+    def implicit_access(self, account: "InternalAccount", request: ScopePermissionRequest, *, session: "Session") -> bool:
+        return is_scope_owner(scope=request.scope, account=account, session=session)
+
+
+# ----------------------------------------------------------------------------------------------
+# Role permissions
+# ----------------------------------------------------------------------------------------------
+
 def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
     """
-    List the permissions granted to a role, each as an operation on a scope pattern.
+    List the permissions granted to a role, over every resource type.
+
+    Each permission is given as its `resource_type`, its `operation` and its target, the latter
+    under the key the resource type names it by (e.g. 'scope_pattern' for a scope).
 
     :raises RoleNotFound: If the role does not exist.
     """
-    if session.execute(select(models.Roles.role).where(models.Roles.role == role)).scalar_one_or_none() is None:
-        raise RoleNotFound("Role '%s' does not exist." % role)
+    _ensure_role_exists(role, session)
 
-    stmt = (
-        select(models.RoleScopePermissionAssociation)
-        .where(models.RoleScopePermissionAssociation.role == role)
-        .order_by(models.RoleScopePermissionAssociation.scope_pattern, models.RoleScopePermissionAssociation.operation)
-    )
-    return [{"operation": permission.operation.value, "scope_pattern": permission.scope_pattern} for permission in session.execute(stmt).scalars()]
+    permissions = []
+    for resource_type, handler in _PERMISSION_HANDLERS.items():
+        stmt = (
+            select(handler.target_column, handler.model.operation)
+            .where(handler.model.role == role)
+            .order_by(handler.target_column, handler.model.operation)
+        )
+        permissions.extend(
+            {"resource_type": resource_type.value, "operation": operation.value, handler.target_attribute: handler.describe_target(target, session=session)}
+            for target, operation in session.execute(stmt).all()
+        )
+    return permissions
 
 
-def add_role_permission(role: str, scope_pattern: str, operation: "RoleOperationType", force: bool = False, *, session: "Session") -> None:
+def add_role_permission(
+        role: str,
+        resource_type: Union[RoleResourceType, str],
+        target: Any,
+        operation: Union[RoleOperationType, str],
+        force: bool = False,
+        *,
+        session: "Session") -> None:
     """
-    Grant a role a permission on a scope pattern.
+    Grant a role a permission to perform an operation on a target of a resource type.
 
     :param role: The role to grant the permission to.
-    :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted, see :func:`_validate_scope_pattern`.
+    :param resource_type: The resource type of the target, e.g. `RoleResourceType.SCOPE`.
+    :param target: What the permission is granted on, as the resource type expects it, e.g. a scope pattern.
     :param operation: The operation to grant.
     :param force: Grant the permission even if the role is locked.
     :param session: The database session.
-    :raises InputValidationError: If the scope pattern is not a trailing wildcard.
+    :raises InputValidationError: If the resource type, the target or the operation is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RoleNotFound: If the role does not exist.
-    :raises Duplicate: If the role already has that permission on that scope pattern.
+    :raises Duplicate: If the role already has that permission.
     :raises RoleReserved: If the role is reserved, whether or not `force` is given.
     """
-    scope_pattern = _validate_scope_pattern(scope_pattern)
+    handler = _permission_handler(resource_type)
+    operation = _normalize_operation(operation)
+    target = handler.normalize_target(target, session=session)
     if is_reserved_role(role):
         raise RoleReserved("Role '%s' is reserved, so no permission can be granted to it." % role)
     _ensure_unlocked(role, force, session)
 
-    session.add(models.RoleScopePermissionAssociation(role=role, scope_pattern=scope_pattern, operation=operation))
+    session.add(handler.model(role=role, operation=operation, **{handler.target_attribute: target}))
     try:
         session.commit()
     except IntegrityError as error:
         session.rollback()
-        if _violates_constraint(error, "ROLE_SCOPE_PERMISSION_MAP_ROLE_FK"):
+        described = "%s '%s'" % (handler.target_label, handler.describe_target(target, session=session))
+        if _violates_constraint(error, "%s_ROLE_FK" % handler.constraint_prefix):
             raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, "ROLE_SCOPE_PERMISSION_MAP_PK"):
-            raise Duplicate("Role '%s' already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
-        raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
+        if _violates_constraint(error, "%s_PK" % handler.constraint_prefix):
+            raise Duplicate("Role '%s' already has '%s' permission on %s." % (role, operation.value, described))
+        raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on %s." % (role, operation.value, described))
 
 
-def delete_role_permission(role: str, scope_pattern: str, operation: "RoleOperationType", force: bool = False, *, session: "Session") -> None:
+def delete_role_permission(
+        role: str,
+        resource_type: Union[RoleResourceType, str],
+        target: Any,
+        operation: Union[RoleOperationType, str],
+        force: bool = False,
+        *,
+        session: "Session") -> None:
     """
     Remove a permission from a role.
 
     :param role: The role to remove the permission from.
-    :param scope_pattern: The scope pattern of the permission.
+    :param resource_type: The resource type of the target, e.g. `RoleResourceType.SCOPE`.
+    :param target: What the permission was granted on, as the resource type expects it, e.g. a scope pattern.
     :param operation: The operation of the permission.
     :param force: Remove the permission even if the role is locked.
     :param session: The database session.
+    :raises InputValidationError: If the resource type, the target or the operation is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RolePermissionNotFound: If the role does not have that permission.
     :raises RoleReserved: If the role is reserved, whether or not `force` is given.
     """
+    handler = _permission_handler(resource_type)
+    operation = _normalize_operation(operation)
+    target = handler.normalize_target(target, session=session)
     if is_reserved_role(role):
         raise RoleReserved("Role '%s' is reserved, so no permission can be removed from it." % role)
     _ensure_unlocked(role, force, session)
 
-    mapping = session.get(models.RoleScopePermissionAssociation, (role, scope_pattern, operation))
+    stmt = select(handler.model).where(
+        handler.model.role == role,
+        handler.target_column == target,
+        handler.model.operation == operation,
+    )
+    mapping = session.execute(stmt).scalar_one_or_none()
     if mapping is None:
-        raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have '%s' permission on scope pattern '%s'." % (role, operation.value, scope_pattern))
+        raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have '%s' permission on %s '%s'."
+                                     % (role, operation.value, handler.target_label, handler.describe_target(target, session=session)))
 
     session.delete(mapping)
     session.commit()
 
 
-def _assignment_not_expired() -> "ColumnElement[bool]":
-    """SQL condition keeping only the account role assignments which have not expired yet."""
-    return or_(
-        models.AccountRoleAssociation.expires_at.is_(None),
-        # expires_at is stored as a naive UTC datetime, so compare it against a naive UTC now
-        models.AccountRoleAssociation.expires_at > datetime.now(timezone.utc).replace(tzinfo=None),
-    )
+# ----------------------------------------------------------------------------------------------
+# Permission checks
+# ----------------------------------------------------------------------------------------------
 
-
-def has_account_valid_role(account: "InternalAccount", role: str, session: "Session") -> bool:
+def _granted_targets(account: "InternalAccount", handler: ResourcePermissionHandler[Any], operation: RoleOperationType, session: "Session") -> list[Any]:
     """
-    Tell whether the account holds the role through an assignment which has not expired yet.
+    List the targets of one resource type on which the account's roles grant an operation.
 
-    :param account: The account to check.
-    :param role: The role to check.
-    :param session: The database session.
-    """
-    stmt = select(models.AccountRoleAssociation.role).where(
-        models.AccountRoleAssociation.account == account,
-        models.AccountRoleAssociation.role == role,
-        _assignment_not_expired(),
-    )
-    return session.execute(stmt).first() is not None
-
-
-def has_role_scope_access(
-    account: "InternalAccount",
-    scope: "InternalScope",
-    operation: "RoleOperationType",
-    session: "Session",
-) -> bool:
-    """
-    Returns True if the account has the specified operation permission
-    on the given scope, according to the RBAC tables.
-
-    A role's permission is granted on a scope pattern rather than a single scope, so this
-    matches the given scope against the patterns of the account's roles in Python, see
-    :func:`_scope_pattern_matches`.
-
-    Role assignments whose `expires_at` is in the past are ignored, so at least one
-    matching permission must come from a role assignment that has not expired yet.
-
-    This only check the RBAC tables and does not consider ownership or admin/root privileges.
-    For checking ownership or admin/root privileges, use the :func:`has_scope_access` function instead.
+    Role assignments whose `expires_at` is in the past are ignored.
     """
     stmt = (
-        select(models.RoleScopePermissionAssociation.scope_pattern)
+        select(handler.target_column)
         .select_from(models.AccountRoleAssociation)
-        .join(
-            models.RoleScopePermissionAssociation,
-            models.RoleScopePermissionAssociation.role == models.AccountRoleAssociation.role,
-        )
+        .join(handler.model, handler.model.role == models.AccountRoleAssociation.role)
         .where(
             models.AccountRoleAssociation.account == account,
-            models.RoleScopePermissionAssociation.operation == operation,
+            handler.model.operation == operation,
             _assignment_not_expired(),
         )
     )
+    return list(session.execute(stmt).scalars())
 
-    return any(_scope_pattern_matches(scope, scope_pattern) for scope_pattern in session.execute(stmt).scalars())
 
-
-def has_scope_access(
-    account: "InternalAccount",
-    scope: "InternalScope",
-    operation: "RoleOperationType",
-    *,
-    session: "Session",
-) -> bool:
+def has_role_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
     """
-    Returns True if the account has the specified operation permission
-    on the given scope, either through ownership, RBAC or admin/root privileges.
+    Tell whether the account's roles grant it the request, according to the RBAC tables only.
+
+    At least one permission covering the request must come from a role assignment which has not
+    expired yet. Neither admin/root privileges nor implicit access (e.g. scope ownership) are
+    considered here, see :func:`has_permission` for that.
+
+    :param account: The account to check.
+    :param request: What the account asks to do, e.g. a :class:`ScopePermissionRequest`.
+    :param session: The database session.
+    :raises InputValidationError: If the request is not one of a registered resource type.
     """
+    handler = _request_handler(request)
+    return any(handler.matches(request, target) for target in _granted_targets(account, handler, request.operation, session))
 
-    # Check for admin privileges
-    if account.external == "root" or has_account_attribute(account=account, key='admin', session=session):
+
+def has_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
+    """
+    Tell whether the account may perform the request, on any resource type.
+
+    This is the single entry point of a permission check: an account may perform the request if
+    it is root or admin, if it has implicit access to the resource (e.g. as the owner of a scope),
+    or if one of its roles grants it, see :func:`has_role_permission`.
+
+        has_permission(account, ScopePermissionRequest(operation=RoleOperationType.READ, scope=scope), session=session)
+
+    :param account: The account to check.
+    :param request: What the account asks to do, e.g. a :class:`ScopePermissionRequest`.
+    :param session: The database session.
+    :raises InputValidationError: If the request is not one of a registered resource type.
+    """
+    handler = _request_handler(request)
+    if _is_root_or_admin(account, session):
         return True
-
-    if is_scope_owner(scope=scope, account=account, session=session):
+    if handler.implicit_access(account, request, session=session):
         return True
+    return has_role_permission(account, request, session=session)
 
-    return has_role_scope_access(
-        account=account,
-        scope=scope,
-        operation=operation,
-        session=session,
-    )
+
+def permission_checker(*, account: "InternalAccount", session: "Session") -> "Callable[[PermissionRequest], bool]":
+    """
+    Build a callable telling whether the account may perform a request, as :func:`has_permission` does.
+
+    This is meant for checking many requests in a row, e.g. to filter a listing: admin/root
+    privileges are looked up once, the targets granted by the account's roles once per resource type
+    and operation, and each distinct request is decided once, for the lifetime of the callable.
+
+    :param account: The account for which to check the requests.
+    :param session: The database session.
+    :returns: A callable taking a request and returning True if the account may perform it.
+    """
+    privileged = _is_root_or_admin(account, session)
+    granted: dict[tuple[RoleResourceType, RoleOperationType], list[Any]] = {}
+    decisions: dict[PermissionRequest, bool] = {}
+
+    def _decide(request: PermissionRequest) -> bool:
+        handler = _request_handler(request)
+        if privileged or handler.implicit_access(account, request, session=session):
+            return True
+
+        key = (handler.resource_type, request.operation)
+        if key not in granted:
+            granted[key] = _granted_targets(account, handler, request.operation, session)
+        return any(handler.matches(request, target) for target in granted[key])
+
+    def _check(request: PermissionRequest) -> bool:
+        if request not in decisions:
+            decisions[request] = _decide(request)
+        return decisions[request]
+
+    return _check
 
 
 def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session: "Session") -> bool:
@@ -645,16 +957,14 @@ def scope_access_checker(
     *,
     account: "InternalAccount",
     session: "Session",
-    operation: "RoleOperationType" = RoleOperationType.READ,
+    operation: RoleOperationType = RoleOperationType.READ,
     skip_filtering: bool = False,
 ) -> "Callable[[Optional[InternalScope]], bool]":
     """
-    Build a callable telling whether the account may access a given scope in terms of RBAC, ownership and admin/root privileges.
+    Build a callable telling whether the account may perform an operation on a given scope, see :func:`permission_checker`.
 
-    Access decisions are cached for the lifetime of the returned callable, so each
-    distinct scope is checked at most once. This is meant for responses where the
-    scope is not stored under a single dictionary key (e.g. 'scope:name' strings or
-    nested dictionaries), for which :func:`filter_iterable_by_scope_access` does not fit.
+    This is meant for responses where the scope is not stored under a single dictionary key
+    (e.g. 'scope:name' strings or nested dictionaries), for which :func:`filter_iterable_by_scope_access` does not fit.
 
     :param account: The account for which to check access.
     :param session: The database session.
@@ -665,20 +975,12 @@ def scope_access_checker(
     if skip_filtering:
         return lambda scope: True
 
-    access_by_scope: dict["InternalScope", bool] = {}
+    check = permission_checker(account=account, session=session)
 
     def _can_access(scope: "Optional[InternalScope]") -> bool:
         if scope is None or not isinstance(scope, InternalScope):
             return False
-
-        if scope not in access_by_scope:
-            access_by_scope[scope] = has_scope_access(
-                account=account,
-                scope=scope,
-                operation=operation,
-                session=session,
-            )
-        return access_by_scope[scope]
+        return check(ScopePermissionRequest(operation=operation, scope=scope))
 
     return _can_access
 
@@ -688,22 +990,19 @@ def filter_iterable_by_scope_access(
     *,
     account: "InternalAccount",
     session: "Session",
-    operation: "RoleOperationType" = RoleOperationType.READ,
+    operation: RoleOperationType = RoleOperationType.READ,
     scope_keyword: str = "scope",
     skip_filtering: bool = False,
 ) -> "Iterator[dict[str, Any]]":
     """
-    Yield only items whose scope the account may access in terms of RBAC, ownership and admin/root privileges.
-
-    Access decisions are cached for the lifetime of this iterator, so each
-    distinct scope is checked at most once.
+    Yield only items whose scope the account may perform an operation on, see :func:`scope_access_checker`.
 
     :param items: An iterable of dictionaries representing items with associated scopes.
     :param account: The account for which to check access.
     :param session: The database session.
     :param operation: The type of operation to check access for.
     :param scope_keyword: The key in the item dictionaries that contains the associated scope.
-    :param skip_filtering: Yield every item, without checking its scope, see :func:`scope_access_checker`.
+    :param skip_filtering: Yield every item, without checking its scope, see :func:`is_filter_disabled`.
     :returns: An iterator over the items that the account has access to.
     """
     can_access = scope_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering)
@@ -712,6 +1011,10 @@ def filter_iterable_by_scope_access(
         if can_access(item.get(scope_keyword)):
             yield item
 
+
+# ----------------------------------------------------------------------------------------------
+# Synchronisation reports
+# ----------------------------------------------------------------------------------------------
 
 def _format_table(headers: list[str], rows: list[list[Any]], indent: str = "  ") -> list[str]:
     """Render a small left-aligned table as lines, or a placeholder if there is nothing to show."""
@@ -739,62 +1042,9 @@ def _format_expires_at(expires_at: Optional[datetime]) -> str:
     return "never" if expires_at is None else str(expires_at)
 
 
-def _parse_idp_roles(roles: Any) -> dict[str, Optional[datetime]]:
-    """
-    Normalise the roles supplied by an IdP into a mapping of role name to expiry date.
-
-    Accepted forms are a mapping of role name to expiry date, or an iterable of role names
-    and/or dictionaries carrying a 'role' (or 'name') and an optional 'expires_at'. An
-    expiry date of None means that the assignment does not expire.
-
-    :param roles: The roles as supplied by the IdP.
-    :returns: The expiry date of each role the account should hold.
-    :raises InputValidationError: If the roles are not in one of the accepted forms.
-    """
-    if roles is None:
-        return {}
-
-    if isinstance(roles, Mapping):
-        return {str(role): _normalize_expires_at(expires_at) for role, expires_at in roles.items()}
-
-    if isinstance(roles, (str, bytes)) or not isinstance(roles, Iterable):
-        raise InputValidationError("The roles supplied by the IdP must be a mapping or a list, got '%s'." % type(roles).__name__)
-
-    parsed: dict[str, Optional[datetime]] = {}
-    for entry in roles:
-        if isinstance(entry, str):
-            parsed[entry.strip()] = None
-            continue
-
-        if not isinstance(entry, Mapping):
-            raise InputValidationError("The role %r supplied by the IdP is neither a name nor a mapping." % (entry,))
-
-        role = entry.get("role", entry.get("name"))
-        if not isinstance(role, str) or not role.strip():
-            raise InputValidationError("The role %r supplied by the IdP has no name." % (entry,))
-
-        parsed[role.strip()] = _normalize_expires_at(entry.get("expires_at"))
-
-    return parsed
-
-
-def _not_assignable(role: str, known_roles: dict[str, Any]) -> bool:
-    """
-    Tell whether a role is not assignable. False for a role which does not exist.
-
-    The assignments of such a role may only be altered from within Rucio: an identity
-    provider can neither have it assigned to an account nor taken away from one.
-    """
-    entry = known_roles.get(role)
-    return bool(entry) and not entry["assignable"]
-
-
-def _format_assignable(role: str, known_roles: dict[str, Any]) -> str:
-    """Render whether a role is assignable, '-' if the role does not exist."""
-    if role not in known_roles:
-        return "-"
-    return "no" if _not_assignable(role, known_roles) else "yes"
-
+# ----------------------------------------------------------------------------------------------
+# Synchronisation with the policy package
+# ----------------------------------------------------------------------------------------------
 
 def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Session") -> None:
     """
@@ -881,24 +1131,6 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
     print()
     print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d locked and %d reserved role(s) untouched."
           % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved))
-
-
-def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
-    """
-    Delete a role together with the rows referencing it.
-
-    `account_role_map.role` and `role_scope_permission_map.role` reference `roles.role`, so the
-    database refuses to delete a role which is still assigned to an account or still carries
-    permissions. Those rows are therefore removed first, which keeps the deletion working
-    whatever referential action the foreign keys are declared with.
-
-    :param role: The role to delete.
-    :param session: The database session.
-    :returns: The number of permissions and of account assignments removed along with the role.
-    """
-    unassigned = session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role == role)).rowcount
-    session.execute(delete(models.Roles).where(models.Roles.role == role))
-    return unassigned
 
 
 def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") -> None:
@@ -996,12 +1228,65 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
           % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved, revoked, unassigned))
 
 
-def _ensure_account_exists(account: "InternalAccount", session: "Session") -> None:
+# ----------------------------------------------------------------------------------------------
+# Synchronisation with an IdP
+# ----------------------------------------------------------------------------------------------
+
+def _parse_idp_roles(roles: Any) -> dict[str, Optional[datetime]]:
     """
-    :raises AccountNotFound: If the account does not exist.
+    Normalise the roles supplied by an IdP into a mapping of role name to expiry date.
+
+    Accepted forms are a mapping of role name to expiry date, or an iterable of role names
+    and/or dictionaries carrying a 'role' (or 'name') and an optional 'expires_at'. An
+    expiry date of None means that the assignment does not expire.
+
+    :param roles: The roles as supplied by the IdP.
+    :returns: The expiry date of each role the account should hold.
+    :raises InputValidationError: If the roles are not in one of the accepted forms.
     """
-    if session.execute(select(models.Account.account).where(models.Account.account == account)).scalar_one_or_none() is None:
-        raise AccountNotFound("Account '%s' does not exist." % account)
+    if roles is None:
+        return {}
+
+    if isinstance(roles, Mapping):
+        return {str(role): _normalize_expires_at(expires_at) for role, expires_at in roles.items()}
+
+    if isinstance(roles, (str, bytes)) or not isinstance(roles, Iterable):
+        raise InputValidationError("The roles supplied by the IdP must be a mapping or a list, got '%s'." % type(roles).__name__)
+
+    parsed: dict[str, Optional[datetime]] = {}
+    for entry in roles:
+        if isinstance(entry, str):
+            parsed[entry.strip()] = None
+            continue
+
+        if not isinstance(entry, Mapping):
+            raise InputValidationError("The role %r supplied by the IdP is neither a name nor a mapping." % (entry,))
+
+        role = entry.get("role", entry.get("name"))
+        if not isinstance(role, str) or not role.strip():
+            raise InputValidationError("The role %r supplied by the IdP has no name." % (entry,))
+
+        parsed[role.strip()] = _normalize_expires_at(entry.get("expires_at"))
+
+    return parsed
+
+
+def _not_assignable(role: str, known_roles: dict[str, Any]) -> bool:
+    """
+    Tell whether a role is not assignable. False for a role which does not exist.
+
+    The assignments of such a role may only be altered from within Rucio: an identity
+    provider can neither have it assigned to an account nor taken away from one.
+    """
+    entry = known_roles.get(role)
+    return bool(entry) and not entry["assignable"]
+
+
+def _format_assignable(role: str, known_roles: dict[str, Any]) -> str:
+    """Render whether a role is assignable, '-' if the role does not exist."""
+    if role not in known_roles:
+        return "-"
+    return "no" if _not_assignable(role, known_roles) else "yes"
 
 
 def _new_sync_report(
