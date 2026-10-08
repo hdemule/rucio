@@ -27,6 +27,7 @@ services:
       - ../../../tools:/opt/rucio/tools:Z
       - ../../../bin:/opt/rucio/bin:Z
       - ../../../lib:/opt/rucio/lib:Z
+      - ../../../policy-packages:/opt/rucio/policy-packages:Z
       - ../../../tests:/opt/rucio/tests:Z
       - ../../../:/rucio_source:Z
     environment:
@@ -55,6 +56,7 @@ services:
       - ../../../tools:/opt/rucio/tools:Z
       - ../../../bin:/opt/rucio/bin:Z
       - ../../../lib:/opt/rucio/lib:Z
+      - ../../../policy-packages:/opt/rucio/policy-packages:Z
       - ../../../tests:/opt/rucio/tests:Z
       - ../../../:/rucio_source
     environment:
