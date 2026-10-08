@@ -211,3 +211,9 @@ class SubscriptionState(Enum):
 class DatabaseOperationType(Enum):
     READ = 'read'
     WRITE = 'write'
+
+
+class RoleOperationType(Enum):
+    READ = 'read'
+    WRITE = 'write'
+    DELETE = 'delete'
