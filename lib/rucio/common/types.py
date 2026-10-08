@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from rucio.common.constants import SUPPORTED_PROTOCOLS_LITERAL
-    from rucio.db.sqla.constants import AccountType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RSEType
+    from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RSEType
 
 
 class InternalType:
