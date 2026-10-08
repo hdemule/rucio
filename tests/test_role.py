@@ -24,7 +24,7 @@ from rucio.common.utils import generate_uuid
 from rucio.core import permission
 from rucio.core import role as core_role
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import RoleOperationType
+from rucio.db.sqla.constants import RoleOperationType, RoleResourceType
 from rucio.tests.common import auth, headers
 
 pytestmark = pytest.mark.noparallel(reason='synchronises the roles shared by the whole instance with a policy package')
@@ -93,7 +93,7 @@ def test_update_reserved_role_assignable(reserved_role, db_session):
 def test_add_reserved_role_permission(reserved_role, db_session, force):
     """ROLE (CORE): A reserved role cannot be granted a permission, even forced."""
     with pytest.raises(RoleReserved):
-        core_role.add_role_permission(reserved_role, 'user.*', RoleOperationType.READ, force=force, session=db_session)
+        core_role.add_role_permission(reserved_role, RoleResourceType.SCOPE, 'user.*', RoleOperationType.READ, force=force, session=db_session)
     assert core_role.list_role_permissions(reserved_role, session=db_session) == []
 
 
@@ -101,7 +101,7 @@ def test_add_reserved_role_permission(reserved_role, db_session, force):
 def test_delete_reserved_role_permission(reserved_role, db_session, force):
     """ROLE (CORE): A reserved role cannot have a permission removed, even forced."""
     with pytest.raises(RoleReserved):
-        core_role.delete_role_permission(reserved_role, 'user.*', RoleOperationType.READ, force=force, session=db_session)
+        core_role.delete_role_permission(reserved_role, RoleResourceType.SCOPE, 'user.*', RoleOperationType.READ, force=force, session=db_session)
 
 
 def test_list_account_roles_reserved_role(reserved_role, db_session, root_account):

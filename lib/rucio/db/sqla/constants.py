@@ -217,3 +217,8 @@ class RoleOperationType(Enum):
     READ = 'read'
     WRITE = 'write'
     DELETE = 'delete'
+
+
+class RoleResourceType(Enum):
+    """The resource types a role can be granted permissions on, each stored in its own `role_<resource>_permission_map` table."""
+    SCOPE = 'scope'
