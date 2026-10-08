@@ -30,6 +30,7 @@ from rucio.client.opendataclient import OpenDataClient
 from rucio.client.pingclient import PingClient
 from rucio.client.replicaclient import ReplicaClient
 from rucio.client.requestclient import RequestClient
+from rucio.client.roleclient import RoleClient
 from rucio.client.rseclient import RSEClient
 from rucio.client.ruleclient import RuleClient
 from rucio.client.scopeclient import ScopeClient
@@ -46,6 +47,7 @@ class Client(AccountClient,
              ScopeClient,
              DIDClient,
              OpenDataClient,
+             RoleClient,
              RuleClient,
              SubscriptionClient,
              LockClient,
