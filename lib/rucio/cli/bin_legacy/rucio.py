@@ -36,7 +36,7 @@ from tabulate import tabulate
 
 # rucio module has the same name as this executable module, so this rule fails. pylint: disable=no-name-in-module
 from rucio import version
-from rucio.cli.utils import exception_handler, get_client, get_scope, scope_exists, setup_gfal2_logger, signal_handler
+from rucio.cli.utils import exception_handler, get_client, get_scope, setup_gfal2_logger, signal_handler
 from rucio.client.richclient import MAX_TRACEBACK_WIDTH, MIN_CONSOLE_WIDTH, CLITheme, generate_table, get_cli_config, get_pager, print_output, setup_rich_logger
 from rucio.common.client import detect_client_location
 from rucio.common.config import config_get, config_get_float
@@ -447,8 +447,6 @@ def list_dids(args, client, logger, console, spinner):
     except InvalidObject:
         scope = args.did[0]
         name = '*'
-
-    scope_exists(client, scope)
 
     if args.recursive and '*' in name:
         raise InputValidationError('Option recursive cannot be used with wildcards.')
