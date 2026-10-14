@@ -20,6 +20,9 @@ fi
 
 mkdir -p "$RUCIO_HOME/etc"
 
+echo "Installing local RBAC policy package"
+python3 -m pip install --disable-pip-version-check --no-build-isolation --no-deps --force-reinstall /opt/rucio/policy-packages
+
 generate_rucio_cfg(){
   	local override=$1
   	local destination=$2
