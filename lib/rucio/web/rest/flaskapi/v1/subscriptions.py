@@ -463,10 +463,10 @@ class Rules(ErrorHandlingMethodView):
             def generate(vo):
                 if len(subscriptions) > 0:
                     if state:
-                        for rule in list_replication_rules({'subscription_id': subscriptions[0], 'state': state}, vo=vo):
+                        for rule in list_replication_rules(issuer=request.environ['issuer'], filters={'subscription_id': subscriptions[0], 'state': state}, vo=vo):
                             yield render_json(**rule) + '\n'
                     else:
-                        for rule in list_replication_rules({'subscription_id': subscriptions[0]}, vo=vo):
+                        for rule in list_replication_rules(issuer=request.environ['issuer'], filters={'subscription_id': subscriptions[0]}, vo=vo):
                             yield render_json(**rule) + '\n'
 
             return try_stream(generate(vo=request.environ['vo']))
