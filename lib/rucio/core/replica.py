@@ -80,6 +80,7 @@ def get_bad_replicas_summary(
     to_date: Optional[datetime] = None,
     filter_: Optional[dict[str, Any]] = None,
     *,
+    by_scope: bool = False,
     session: "Session"
 ) -> list[dict[str, Any]]:
     """
@@ -88,6 +89,7 @@ def get_bad_replicas_summary(
     :param from_date: The start date.
     :param to_date: The end date.
     :param filter_: Dictionary of attributes by which the RSE results should be filtered. e.g.: {'availability_write': True}
+    :param by_scope: If True, the summary is also broken down by scope, and each incident holds its 'scope'.
     :param session: The database session in use.
     """
     result = []
@@ -110,12 +112,13 @@ def get_bad_replicas_summary(
     else:
         to_days = func.strftime(models.BadReplica.created_at, '%Y-%m-%d')
 
+    columns = [to_days, models.BadReplica.rse_id, models.BadReplica.state, models.BadReplica.reason]
+    if by_scope:
+        columns.append(models.BadReplica.scope)
+
     stmt = select(
         func.count(),
-        to_days,
-        models.BadReplica.rse_id,
-        models.BadReplica.state,
-        models.BadReplica.reason
+        *columns
     ).select_from(
         models.BadReplica
     )
@@ -126,11 +129,11 @@ def get_bad_replicas_summary(
         stmt = stmt.where(models.BadReplica.created_at > from_date)
     if to_date:
         stmt = stmt.where(models.BadReplica.created_at < to_date)
-    stmt = stmt.group_by(to_days, models.BadReplica.rse_id, models.BadReplica.reason, models.BadReplica.state)
-    for count, to_days, rse_id, state, reason in session.execute(stmt):
-        if (rse_id, to_days, reason) not in incidents:
-            incidents[(rse_id, to_days, reason)] = {}
-        incidents[(rse_id, to_days, reason)][str(state.name)] = count
+    stmt = stmt.group_by(*columns)
+    for count, to_days, rse_id, state, reason, *scope in session.execute(stmt):
+        if (rse_id, to_days, reason, *scope) not in incidents:
+            incidents[(rse_id, to_days, reason, *scope)] = {}
+        incidents[(rse_id, to_days, reason, *scope)][str(state.name)] = count
 
     for incident in incidents:
         res = incidents[incident]
@@ -138,6 +141,8 @@ def get_bad_replicas_summary(
         res['rse'] = get_rse_name(rse_id=incident[0], session=session)
         res['created_at'] = incident[1]
         res['reason'] = incident[2]
+        if by_scope:
+            res['scope'] = incident[3]
         result.append(res)
 
     return result
@@ -289,18 +294,34 @@ def list_bad_replicas_status(
             else:
                 result.append({'scope': badfile.scope, 'name': badfile.name, 'rse': get_rse_name(rse_id=badfile.rse_id, session=session), 'rse_id': badfile.rse_id, 'state': badfile.state, 'created_at': badfile.created_at, 'updated_at': badfile.updated_at})
     if list_pfns:
-        reps = []
-        for rep in list_replicas(result, schemes=None, unavailable=False, request_id=None, ignore_availability=True, all_states=True, session=session):
-            pfn = None
-            if rse_id in rep['rses'] and rep['rses'][rse_id]:
-                pfn = rep['rses'][rse_id][0]
-                if pfn and pfn not in reps:
-                    reps.append(pfn)
-            else:
-                reps.extend([item for row in rep['rses'].values() for item in row])
-        list(set(reps))
-        result = reps
+        result = list_bad_replicas_pfns(result, rse_id=rse_id, session=session)
     return result
+
+
+@read_session
+def list_bad_replicas_pfns(
+    replicas: "Iterable[dict[str, Any]]",
+    rse_id: Optional[str] = None,
+    *,
+    session: "Session"
+) -> list[str]:
+    """
+    List the PFNs of bad file replicas, as returned by list_bad_replicas_status.
+    :param replicas: The bad file replicas, as dictionaries holding their 'scope' and 'name'.
+    :param rse_id: The RSE id. If given, only the first PFN on this RSE is listed for a replica found on it, otherwise all its PFNs are listed.
+    :param session: The database session in use.
+    """
+    dids = [{'scope': r['scope'], 'name': r['name'], 'type': DIDType.FILE} for r in replicas]
+    reps = []
+    for rep in list_replicas(dids, schemes=None, unavailable=False, request_id=None, ignore_availability=True, all_states=True, session=session):
+        pfn = None
+        if rse_id in rep['rses'] and rep['rses'][rse_id]:
+            pfn = rep['rses'][rse_id][0]
+            if pfn and pfn not in reps:
+                reps.append(pfn)
+        else:
+            reps.extend([item for row in rep['rses'].values() for item in row])
+    return reps
 
 
 @transactional_session
