@@ -1,0 +1,8 @@
+# %ECSV 1.0
+# DUMMY FILE, NOT REAL DATA: PKS 2155-304 flux points (CTAO-2026-042)
+e_ref_tev,e2dnde_erg_cm2_s,e2dnde_err
+0.1,4.1e-11,0.3e-11
+0.3,3.2e-11,0.2e-11
+1.0,1.9e-11,0.2e-11
+3.0,0.8e-11,0.1e-11
+10.0,0.2e-11,0.1e-11

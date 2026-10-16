@@ -1,0 +1,5 @@
+# %ECSV 1.0
+# DUMMY FILE: eve's light curve from the public Crab data
+obs_id,flux_cm2_s,flux_err
+1001,2.05e-10,0.09e-10
+1002,2.11e-10,0.10e-10

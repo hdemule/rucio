@@ -1,0 +1,4 @@
+# DUMMY FILE: eli's test-statistic map configuration
+kernel: {type: PointSpatialModel}
+binsz: 0.02 deg
+width: [4 deg, 4 deg]

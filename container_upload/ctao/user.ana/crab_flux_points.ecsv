@@ -1,0 +1,6 @@
+# %ECSV 1.0
+# DUMMY FILE: ana's Crab flux points
+e_ref_tev,dnde,dnde_err
+0.1,1.2e-9,0.1e-9
+1.0,3.4e-11,0.2e-11
+10.0,4.9e-14,0.8e-14

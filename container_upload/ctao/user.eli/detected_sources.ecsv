@@ -1,0 +1,5 @@
+# %ECSV 1.0
+# DUMMY FILE: eli's detected sources
+name,ra_deg,dec_deg,ts
+J0534+220,83.63,22.01,5321.4
+J0536+219,84.02,21.95,28.7

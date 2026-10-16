@@ -1,0 +1,8 @@
+SIMPLE  =                    T / DUMMY FILE, NOT REAL DATA
+TELESCOP= 'CTAO-North'
+RELEASE = 'DR1'
+DATALEVL= 'DL3'
+OBS_ID  =                 1001
+OBJECT  = 'Crab Nebula'
+LIVETIME=                1740.0
+END

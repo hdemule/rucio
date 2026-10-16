@@ -1,0 +1,5 @@
+# DUMMY FILE: chen's 3D background model configuration
+method: field-of-view
+exclusion_radius: 0.3 deg
+energy_bins: 12
+offset_max: 2.5 deg

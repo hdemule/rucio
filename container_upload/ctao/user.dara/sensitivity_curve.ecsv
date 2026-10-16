@@ -1,0 +1,7 @@
+# %ECSV 1.0
+# DUMMY FILE: dara's differential sensitivity curve
+e_ref_tev,e2_flux_erg_cm2_s
+0.03,1.1e-11
+0.3,1.6e-12
+3.0,1.2e-12
+30.0,4.5e-12
