@@ -55,7 +55,7 @@ from rucio.common.constants import DEFAULT_VO  # noqa: E402
 from rucio.common.exception import RucioException  # noqa: E402
 from rucio.common.types import InternalAccount, InternalScope  # noqa: E402
 from rucio.db.sqla import models  # noqa: E402
-from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RoleOperationType  # noqa: E402
+from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RoleOperationType, RoleResourceType  # noqa: E402
 from rucio.db.sqla.session import db_session, get_engine  # noqa: E402
 
 POLICY_PACKAGE = 'rbac_rucio_policy_package'
@@ -349,8 +349,8 @@ def check_role(role: str) -> Optional[str]:
 
 def check_role_permissions(role: str, expected: set[tuple[str, str]]) -> Callable[[], Optional[str]]:
     def check() -> Optional[str]:
-        rows = _read(select(models.RolePermissionAssociation.operation, models.RolePermissionAssociation.scope_pattern).where(
-            models.RolePermissionAssociation.role == role))
+        rows = _read(select(models.RoleScopePermissionAssociation.operation, models.RoleScopePermissionAssociation.scope_pattern).where(
+            models.RoleScopePermissionAssociation.role == role))
         missing = expected - {(row[0].value, row[1]) for row in rows}
         if missing:
             return 'missing %s' % ', '.join('%s on %s' % permission for permission in sorted(missing))
@@ -574,7 +574,7 @@ def _provision_roles() -> None:
     with db_session(DatabaseOperationType.WRITE) as session:
         for role, (permissions, holders) in ROLES.items():
             for operation, scope_pattern in sorted(permissions):
-                role_core.add_role_permission(role, scope_pattern, RoleOperationType(operation), session=session)
+                role_core.add_role_permission(role, RoleResourceType.SCOPE, scope_pattern, RoleOperationType(operation), session=session)
             for account in sorted(holders):
                 role_core.add_account_role(_account(account), role, session=session)
 
