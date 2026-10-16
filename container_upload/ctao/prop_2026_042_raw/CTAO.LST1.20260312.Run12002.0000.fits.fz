@@ -1,0 +1,14 @@
+SIMPLE  =                    T / DUMMY FILE, NOT REAL DATA
+TELESCOP= 'CTAO-North LST-1'
+ORIGIN  = 'CTAO'
+PROPOSAL= 'CTAO-2026-042'
+DATALEVL= 'R1'
+OBS_ID  =                12002
+SUBRUN  =                 0000
+OBJECT  = 'Crab Nebula'
+RA_PNT  =              83.6331
+DEC_PNT =              22.0145
+DATE-OBS= '2026-03-12T22:00:00'
+EXPOSURE=                 300.0
+N_EVENTS=              84014
+END

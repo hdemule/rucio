@@ -1,0 +1,11 @@
+SIMPLE  =                    T / DUMMY FILE, NOT REAL DATA
+TELESCOP= 'CTAO-South'
+PROPOSAL= 'CTAO-2026-042'
+DATALEVL= 'DL3'
+HDUCLASS= 'GADF'
+OBS_ID  =                23001
+OBJECT  = 'PKS 2155-304'
+RA_OBJ  =             329.7169
+DEC_OBJ =             -30.2256
+LIVETIME=                1680.0
+END

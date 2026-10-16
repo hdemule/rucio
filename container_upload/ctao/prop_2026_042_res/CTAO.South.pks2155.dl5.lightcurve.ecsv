@@ -1,0 +1,6 @@
+# %ECSV 1.0
+# DUMMY FILE, NOT REAL DATA: PKS 2155-304 nightly light curve above 200 GeV (CTAO-2026-042)
+night,obs_id,flux_cm2_s,flux_err
+2026-07-02,23001,2.31e-10,0.12e-10
+2026-07-03,23002,3.87e-10,0.15e-10
+2026-07-04,23003,1.95e-10,0.11e-10

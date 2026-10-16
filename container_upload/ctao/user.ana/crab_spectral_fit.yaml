@@ -1,0 +1,4 @@
+# DUMMY FILE: ana's Crab spectral fit on proposal 2026-042 data
+datasets: [prop_2026_042_raw:obs_12001_r1, prop_2026_042_raw:obs_12002_r1]
+model: {type: LogParabolaSpectralModel, amplitude: 3.5e-11 cm-2 s-1 TeV-1, reference: 1 TeV, alpha: 2.5, beta: 0.1}
+energy_range: [0.05 TeV, 30 TeV]

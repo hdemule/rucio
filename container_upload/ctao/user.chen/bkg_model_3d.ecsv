@@ -1,0 +1,7 @@
+# %ECSV 1.0
+# DUMMY FILE: chen's 3D background model
+energy_tev,offset_deg,rate_s_mev_sr
+0.1,0.5,2.1e-3
+0.1,1.5,1.4e-3
+1.0,0.5,8.7e-5
+1.0,1.5,6.2e-5

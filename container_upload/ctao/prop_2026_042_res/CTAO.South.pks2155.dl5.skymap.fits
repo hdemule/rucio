@@ -1,0 +1,8 @@
+SIMPLE  =                    T / DUMMY FILE, NOT REAL DATA
+EXTNAME = 'SIGNIFICANCE'
+OBJECT  = 'PKS 2155-304'
+CTYPE1  = 'RA---CAR'
+CTYPE2  = 'DEC--CAR'
+CDELT1  =                -0.02
+CDELT2  =                 0.02
+END
