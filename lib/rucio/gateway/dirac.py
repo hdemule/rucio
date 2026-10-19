@@ -67,7 +67,7 @@ def add_files(
         # Check if the issuer can add DIDs and use skip_availabitlity
         for rse in rses:
             rse_id = rses[rse]
-            kwargs = {'rse': rse, 'rse_id': rse_id}
+            kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({did['scope'] for did in dids})}
             auth_result = has_permission(issuer=issuer, action='add_replicas', kwargs=kwargs, vo=vo, session=session)
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not add file replicas on %s for VO %s. %s' % (issuer, rse, vo, auth_result.message))
