@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Any
 
 import rucio.core.scope
 from rucio.common.constants import ADMIN_ROLE, RseAttr
-from rucio.common.types import InternalAccount
+from rucio.common.types import InternalAccount, InternalScope
 from rucio.core import role as role_core
 from rucio.core import scope as scope_core
 from rucio.core.account import has_account_attribute, list_account_attributes
@@ -10,14 +10,24 @@ from rucio.core.identity import exist_identity_account
 from rucio.core.lifetime_exception import list_exceptions
 from rucio.core.rse import list_rse_attributes
 from rucio.core.rse_expression_parser import parse_expression
+from rucio.core.rule import get_rule
 from rucio.db.sqla.constants import IdentityType, RoleOperationType
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import Optional
 
     from sqlalchemy.orm import Session
 
-    from rucio.common.types import InternalScope
+# Metadata keys whose update leads to the removal of the DID (e.g. `rucio did remove` sets the lifetime),
+# so setting them requires a DELETE permission instead of a WRITE one.
+DELETE_METADATA_KEYS = {'lifetime'}
+
+# Options of a replication rule a non-admin account can update, provided it can DELETE in the scope of the rule.
+USER_UPDATABLE_RULE_OPTIONS = {'lifetime', 'comment', 'notify', 'purge_replicas'}
+
+# Suffixes of the RSEs on which non-admin accounts can register, update and delete replicas.
+USER_REPLICA_RSE_SUFFIXES = ('SCRATCHDISK', 'USERDISK', 'MOCK', 'LOCALGROUPDISK')
 
 
 def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any], session: "Session") -> "Optional[bool]":
@@ -216,6 +226,83 @@ def _can_operate_on_scope(issuer: "InternalAccount", scope: "InternalScope | Non
         operation=operation,
         session=session,
     )
+
+
+def _can_operate_on_scopes(issuer: "InternalAccount", scopes: "Iterable[InternalScope | str]", operation: RoleOperationType, session: "Session") -> bool:
+    """
+    Checks if an account can operate on all the given scopes, see :func:`_can_operate_on_scope`.
+
+    :param issuer: Account identifier which issues the command.
+    :param scopes: The scopes to check. External scope names are resolved in the VO of the issuer.
+    :param operation: The operation to check (READ, WRITE, DELETE)
+    :param session: The DB session to use
+    :returns: True if account is allowed on every scope, otherwise False
+    """
+    internal_scopes = {scope if isinstance(scope, InternalScope) else InternalScope(scope, vo=issuer.vo) for scope in scopes}
+    return all(_can_operate_on_scope(issuer=issuer, scope=scope, operation=operation, session=session) for scope in internal_scopes)
+
+
+def _metadata_operations(keys: "Iterable[str]") -> set[RoleOperationType]:
+    """
+    Returns the operations needed to set the given metadata keys on a DID: DELETE for the keys
+    leading to the removal of the DID, WRITE for the others.
+
+    :param keys: The metadata keys to set.
+    :returns: The operations needed.
+    """
+    return {RoleOperationType.DELETE if key in DELETE_METADATA_KEYS else RoleOperationType.WRITE for key in keys}
+
+
+def _can_attach(issuer: "InternalAccount", scope: "InternalScope", attachment: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can attach DIDs to a collection: attaching adds content to the collection,
+    so it requires WRITE on the scope of the collection, and READ on the scopes of the attached DIDs.
+    When an RSE is given, the attached files are registered as replicas (and created if missing),
+    so WRITE is required on their scopes instead.
+
+    :param issuer: Account identifier which issues the command.
+    :param scope: The scope of the collection.
+    :param attachment: The attachment, holding the attached 'dids' and optionally the 'rse_id'.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    if not _can_operate_on_scope(issuer=issuer, scope=scope, operation=RoleOperationType.WRITE, session=session):
+        return False
+
+    child_operation = RoleOperationType.WRITE if attachment.get('rse_id') else RoleOperationType.READ
+    return _can_operate_on_scopes(issuer=issuer, scopes=[did['scope'] for did in attachment.get('dids', [])], operation=child_operation, session=session)
+
+
+def _can_operate_on_rule(issuer: "InternalAccount", rule_id: str, operations: "Iterable[RoleOperationType]", session: "Session") -> bool:
+    """
+    Checks if an account can operate on the scope of a replication rule.
+
+    :param issuer: Account identifier which issues the command.
+    :param rule_id: The id of the rule.
+    :param operations: The operations needed on the scope of the rule.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    :raises RuleNotFound: If the rule does not exist.
+    """
+    if _is_root(issuer) or _is_admin(issuer, session):
+        return True
+
+    scope = get_rule(rule_id=rule_id, session=session)['scope']
+    return all(_can_operate_on_scope(issuer=issuer, scope=scope, operation=operation, session=session) for operation in operations)
+
+
+def _is_user_replica_rse(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can manage replicas on an RSE, regardless of their scopes.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action, holding the 'rse'.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return str(kwargs.get('rse', '')).endswith(USER_REPLICA_RSE_SUFFIXES)\
+        or _is_root(issuer)\
+        or _is_admin(issuer=issuer, session=session)
 
 
 def perm_list_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -668,17 +755,18 @@ def perm_update_rse(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
 
 def perm_add_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can add a replication rule.
+    Checks if an account can add a replication rule. A rule adds replicas of its DIDs,
+    so it requires WRITE on their scopes.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if kwargs['account'] == issuer and not kwargs['locked']:
-        return True
     if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
+    if kwargs['account'] == issuer and not kwargs['locked']:
+        return _can_operate_on_scopes(issuer=issuer, scopes=[did['scope'] for did in kwargs['dids']], operation=RoleOperationType.WRITE, session=session)
     return False
 
 
@@ -894,9 +982,7 @@ def perm_add_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
             if rule['account'] != issuer:
                 return False
 
-    return _is_root(issuer)\
-        or _is_admin(issuer=issuer, session=session)\
-        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+    return _can_operate_on_scope(issuer=issuer, scope=kwargs['scope'], operation=RoleOperationType.WRITE, session=session)\
         or kwargs['scope'].external == 'mock'
 
 
@@ -922,9 +1008,7 @@ def perm_attach_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer)\
-        or _is_admin(issuer=issuer, session=session)\
-        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+    return _can_attach(issuer=issuer, scope=kwargs['scope'], attachment=kwargs['attachment'], session=session)\
         or kwargs['scope'].external == 'mock'
 
 
@@ -937,50 +1021,39 @@ def perm_attach_dids_to_dids(issuer: "InternalAccount", kwargs: dict[str, Any], 
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
-        return True
-    else:
-        attachments = kwargs['attachments']
-        scopes = [did['scope'] for did in attachments]
-        scopes = list(set(scopes))
-        for scope in scopes:
-            if not rucio.core.scope.is_scope_owner(scope, issuer, session=session):
-                return False
-        return True
+    return all(_can_attach(issuer=issuer, scope=attachment['scope'], attachment=attachment, session=session) for attachment in kwargs['attachments'])
 
 
 def perm_create_did_sample(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can create a sample of a data identifier collection.
+    The sample is a new dataset, so it requires WRITE on the output scope.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer)\
-        or _is_admin(issuer=issuer, session=session)\
-        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+    return _can_operate_on_scope(issuer=issuer, scope=kwargs['scope'], operation=RoleOperationType.WRITE, session=session)\
         or kwargs['scope'].external == 'mock'
 
 
 def perm_del_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an issuer can delete a replication rule.
+    Checks if an issuer can delete a replication rule. It requires DELETE on the scope of the rule.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
-        return True
-    return False
+    return _can_operate_on_rule(issuer=issuer, rule_id=kwargs['rule_id'], operations=[RoleOperationType.DELETE], session=session)
 
 
 def perm_update_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an issuer can update a replication rule.
+    Checks if an issuer can update a replication rule. Non-admin accounts can only update the
+    options in USER_UPDATABLE_RULE_OPTIONS, and it requires DELETE on the scope of the rule.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
@@ -989,7 +1062,9 @@ def perm_update_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     """
     if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
-    return False
+    if not set(kwargs.get('options', {})).issubset(USER_UPDATABLE_RULE_OPTIONS):
+        return False
+    return _can_operate_on_rule(issuer=issuer, rule_id=kwargs['rule_id'], operations=[RoleOperationType.DELETE], session=session)
 
 
 def perm_approve_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1008,21 +1083,21 @@ def perm_approve_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session
 
 def perm_reduce_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an issuer can reduce a replication rule.
+    Checks if an issuer can reduce a replication rule. It requires DELETE on the scope of the rule.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed to call the API call, otherwise False
     """
-    if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
-        return True
-    return False
+    return _can_operate_on_rule(issuer=issuer, rule_id=kwargs['rule_id'], operations=[RoleOperationType.DELETE], session=session)
 
 
 def perm_move_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an issuer can move a replication rule.
+    Checks if an issuer can move a replication rule. Moving creates a new rule and deletes the
+    original one, so it requires WRITE and DELETE on the scope of the rule. As for adding a rule,
+    non-admin accounts cannot lock the new rule nor give it to another account.
 
     :param issuer:   Account identifier which issues the command.
     :param kwargs:   List of arguments for the action.
@@ -1031,7 +1106,10 @@ def perm_move_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     """
     if _is_root(issuer) or _is_admin(issuer=issuer, session=session):
         return True
-    return False
+    override = kwargs.get('override', {})
+    if override.get('locked') or override.get('account', issuer) != issuer:
+        return False
+    return _can_operate_on_rule(issuer=issuer, rule_id=kwargs['rule_id'], operations=[RoleOperationType.WRITE, RoleOperationType.DELETE], session=session)
 
 
 def perm_update_subscription(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1052,42 +1130,49 @@ def perm_update_subscription(issuer: "InternalAccount", kwargs: dict[str, Any], 
 def perm_detach_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can detach an data identifier from the other data identifier.
+    Detaching removes content from the collection, so it requires DELETE on the scope of the collection.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return perm_attach_dids(issuer, kwargs, session=session)
+    return _can_operate_on_scope(issuer=issuer, scope=kwargs['scope'], operation=RoleOperationType.DELETE, session=session)\
+        or kwargs['scope'].external == 'mock'
 
 
 def perm_set_metadata_bulk(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can set a metadata on a data identifier.
+    It requires DELETE on the scope if a key leads to the removal of the DID (see DELETE_METADATA_KEYS), WRITE otherwise.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or _is_admin(issuer=issuer, session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return all(_can_operate_on_scope(issuer=issuer, scope=kwargs['scope'], operation=operation, session=session)
+               for operation in _metadata_operations(kwargs['meta']))
 
 
 def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can set a metadata on a data identifier.
+    It requires DELETE on the scope if the key leads to the removal of the DID (see DELETE_METADATA_KEYS), WRITE otherwise.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or _is_admin(issuer=issuer, session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return all(_can_operate_on_scope(issuer=issuer, scope=kwargs['scope'], operation=operation, session=session)
+               for operation in _metadata_operations([kwargs['key']]))
 
 
 def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can set status on an data identifier.
+    Only admins can reopen a collection; closing it updates existing content, so it requires DELETE on the scope.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
@@ -1098,7 +1183,7 @@ def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
         if not _is_root(issuer) and not _is_admin(issuer=issuer, session=session):
             return False
 
-    return _is_root(issuer) or _is_admin(issuer=issuer, session=session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return _can_operate_on_scope(issuer=issuer, scope=kwargs['scope'], operation=RoleOperationType.DELETE, session=session)
 
 
 def perm_add_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1187,19 +1272,15 @@ def perm_declare_suspicious_file_replicas(issuer: "InternalAccount", kwargs: dic
 
 def perm_add_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can add replicas.
+    Checks if an account can add replicas. It requires WRITE on the scopes of the files.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return str(kwargs.get('rse', '')).endswith('SCRATCHDISK')\
-        or str(kwargs.get('rse', '')).endswith('USERDISK')\
-        or str(kwargs.get('rse', '')).endswith('MOCK')\
-        or str(kwargs.get('rse', '')).endswith('LOCALGROUPDISK')\
-        or _is_root(issuer)\
-        or _is_admin(issuer=issuer, session=session)
+    return _is_user_replica_rse(issuer=issuer, kwargs=kwargs, session=session)\
+        and _can_operate_on_scopes(issuer=issuer, scopes=kwargs.get('scopes', []), operation=RoleOperationType.WRITE, session=session)
 
 
 def perm_skip_availability_check(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1216,26 +1297,28 @@ def perm_skip_availability_check(issuer: "InternalAccount", kwargs: dict[str, An
 
 def perm_delete_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can delete replicas.
+    Checks if an account can delete replicas. It requires DELETE on the scopes of the files.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return False
+    return _is_user_replica_rse(issuer=issuer, kwargs=kwargs, session=session)\
+        and _can_operate_on_scopes(issuer=issuer, scopes=kwargs.get('scopes', []), operation=RoleOperationType.DELETE, session=session)
 
 
 def perm_update_replicas_states(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can delete replicas.
+    Checks if an account can update the states of replicas. It requires DELETE on the scopes of the files.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or _is_admin(issuer=issuer, session=session)
+    return _is_user_replica_rse(issuer=issuer, kwargs=kwargs, session=session)\
+        and _can_operate_on_scopes(issuer=issuer, scopes=kwargs.get('scopes', []), operation=RoleOperationType.DELETE, session=session)
 
 
 def perm_queue_requests(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
