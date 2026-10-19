@@ -581,7 +581,7 @@ def set_metadata(
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='set_metadata', kwargs=kwargs, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s can not add metadata to data identifier %s:%s. %s' % (issuer, scope, name, auth_result.message))
+            raise AccessDenied('Account %s can not add metadata to data identifier %s:%s. The requested DID either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope, name))
 
         internal_scope = InternalScope(scope, vo=vo)
         return did.set_metadata(scope=internal_scope, name=name, key=key, value=value, recursive=recursive, session=session)
