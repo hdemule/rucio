@@ -220,14 +220,14 @@ def remove(ctx: click.Context, dids: tuple[str, ...], undo: bool) -> None:
                 ctx.obj.logger.warning('Cannot undo erase operation on DID. DID not existent or grace period of 24 hours already expired.')
                 ctx.obj.logger.warning('    DID: {0}:{1}'.format(scope, name))
         else:
-            try:
-                # set lifetime to expire in 24 hours (value is in seconds).
-                ctx.obj.client.set_metadata(scope=scope, name=name, key='lifetime', value=86400)
-                ctx.obj.logger.info('CAUTION! erase operation is irreversible after 24 hours. To cancel this operation you can run the following command:')
-                print("rucio erase --undo {0}:{1}".format(scope, name))  # TODO: replace with f-strings
-            except RucioException as error:
-                ctx.obj.logger.warning('Failed to erase DID: %s' % did)
-                ctx.obj.logger.debug('Error: %s' % error)
+            # try:
+            # set lifetime to expire in 24 hours (value is in seconds).
+            ctx.obj.client.set_metadata(scope=scope, name=name, key='lifetime', value=86400)
+            ctx.obj.logger.info('CAUTION! erase operation is irreversible after 24 hours. To cancel this operation you can run the following command:')
+            print("rucio erase --undo {0}:{1}".format(scope, name))  # TODO: replace with f-strings
+            # except RucioException as error:
+            #     ctx.obj.logger.warning('Failed to erase DID: %s' % did)
+            #     ctx.obj.logger.debug('Error: %s' % error)
 
 
 @did.group()
