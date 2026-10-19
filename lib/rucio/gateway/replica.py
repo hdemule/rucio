@@ -367,7 +367,7 @@ def add_replicas(
     with db_session(DatabaseOperationType.WRITE) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'rse': rse, 'rse_id': rse_id}
+        kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({f['scope'] for f in files})}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='add_replicas', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied('Account %s can not add file replicas on %s. %s' % (issuer, rse, auth_result.message))
@@ -420,7 +420,7 @@ def delete_replicas(
     with db_session(DatabaseOperationType.WRITE) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'rse': rse, 'rse_id': rse_id}
+        kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({f['scope'] for f in files})}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='delete_replicas', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied('Account %s can not delete file replicas on %s. %s' % (issuer, rse, auth_result.message))
@@ -454,7 +454,7 @@ def update_replicas_states(
     with db_session(DatabaseOperationType.WRITE) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'rse': rse, 'rse_id': rse_id}
+        kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({f['scope'] for f in files})}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='update_replicas_states', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied('Account %s can not update file replicas state on %s. %s' % (issuer, rse, auth_result.message))
