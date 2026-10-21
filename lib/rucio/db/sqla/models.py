@@ -445,6 +445,37 @@ class RoleScopePermissionAssociation(BASE, ModelBase):
                    CheckConstraint('OPERATION IS NOT NULL', name='ROLE_SCOPE_PERMISSION_MAP_OPERATION_NN'))
 
 
+class RoleLocalLimitPermissionAssociation(BASE, ModelBase):
+    """Represents a role's limit on one RSE (RSE + bytes) for Role-Based Access Control (RBAC), like an account's local limit"""
+    __tablename__ = 'role_local_limit_permission_map'
+    role: Mapped[str] = mapped_column(String(255))
+    rse_id: Mapped[str] = mapped_column(GUID())
+    # ROLE_QUOTA_NOCAP (-1) for no cap
+    bytes: Mapped[int] = mapped_column(BigInteger)
+    _table_args = (PrimaryKeyConstraint('role', 'rse_id', name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   ForeignKeyConstraint(['rse_id'], ['rses.id'], name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_RSE_ID_FK'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('RSE_ID IS NOT NULL', name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_RSE_ID_NN'),
+                   CheckConstraint('BYTES IS NOT NULL', name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_BYTES_NN'),
+                   CheckConstraint('BYTES >= -1', name='ROLE_LOCAL_LIMIT_PERMISSION_MAP_BYTES_CHK'))
+
+
+class RoleGlobalLimitPermissionAssociation(BASE, ModelBase):
+    """Represents a role's limit summed over an RSE expression (RSE expression + bytes) for Role-Based Access Control (RBAC), like an account's global limit"""
+    __tablename__ = 'role_global_limit_permission_map'
+    role: Mapped[str] = mapped_column(String(255))
+    rse_expression: Mapped[str] = mapped_column(String(3000))
+    # ROLE_QUOTA_NOCAP (-1) for no cap
+    bytes: Mapped[int] = mapped_column(BigInteger)
+    _table_args = (PrimaryKeyConstraint('role', 'rse_expression', name='ROLE_GLOBAL_LIMIT_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_GLOBAL_LIMIT_PERMISSION_MAP_ROLE_FK', onupdate='CASCADE', ondelete='CASCADE'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_GLOBAL_LIMIT_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('RSE_EXPRESSION IS NOT NULL', name='ROLE_GLOBAL_LIMIT_PERMISSION_MAP_RSE_EXPRESSION_NN'),
+                   CheckConstraint('BYTES IS NOT NULL', name='ROLE_GLOBAL_LIMIT_PERMISSION_MAP_BYTES_NN'),
+                   CheckConstraint('BYTES >= -1', name='ROLE_GLOBAL_LIMIT_PERMISSION_MAP_BYTES_CHK'))
+
+
 class DataIdentifier(BASE, ModelBase):
     """Represents a dataset"""
     __tablename__ = 'dids'
