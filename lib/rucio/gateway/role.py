@@ -286,12 +286,14 @@ def add_role_permission(
     Grant a role a permission of a type, see :func:`rucio.core.role.add_role_permission`.
 
     :param role: The role to grant the permission to.
-    :param permission_type: The type of the permission, e.g. 'scope'.
+    :param permission_type: The type of the permission: 'scope' or 'limit'.
     :param parameters: The target of the permission and its parameters: a 'scope_pattern', on which only a trailing '*'
-                       wildcard is accepted, and an 'operation' for a scope permission.
+                       wildcard is accepted, and an 'operation' for a scope permission; an 'rse_expression' and the bytes
+                       of its 'local' or 'global' limit for a limit, which overwrites the limit if it exists already. A local
+                       limit is set on an expression matching a single RSE, a global one on an expression matching several.
     :param issuer: The account issuing the command.
     :param force: Grant the permission even if the role is locked.
-    :param vo: The VO of the issuing account, in which the target of the permission is resolved if its type needs one.
+    :param vo: The VO of the issuing account, in which the RSE expression of a limit is resolved.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='add_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)
@@ -312,13 +314,14 @@ def delete_role_permission(
     Remove permissions of a type from a role, see :func:`rucio.core.role.delete_role_permission`.
 
     :param role: The role to remove the permissions from.
-    :param permission_type: The type of the permissions, e.g. 'scope'.
+    :param permission_type: The type of the permissions: 'scope' or 'limit'.
     :param parameters: The target of the permissions and the parameters identifying them: a 'scope_pattern' and an
-                       'operation' for a scope permission.
+                       'operation' for a scope permission; an 'rse_expression', and optionally which of its 'local'
+                       and 'global' limits to remove (true), both being looked for otherwise, for a limit.
     :param issuer: The account issuing the command.
     :param force: Remove the permissions even if the role is locked.
-    :param vo: The VO of the issuing account, in which the target of the permissions is resolved if their type needs one.
-    :returns: The number of permissions removed.
+    :param vo: The VO of the issuing account, in which the RSE expression of a local limit is resolved.
+    :returns: The number of permissions removed, e.g. both the local and the global limit on an RSE expression.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)

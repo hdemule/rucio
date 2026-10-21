@@ -139,7 +139,9 @@ class RolePermission(ErrorHandlingMethodView):
 
     The request body names the permission: its target and its parameters, in the shape the permissions
     are listed with, together with `force`, e.g. {"scope_pattern": "data*", "operation": "read"} for a
-    scope permission.
+    scope permission, or {"rse_expression": "tier=1", "global": 5000} for a limit, -1
+    meaning no cap. Granting a limit which exists already overwrites it. Removing limits takes which
+    of the 'local' and 'global' ones to remove, as booleans, both being removed if none is given.
     """
 
     def post(self, role_name: str, permission_type: str):
