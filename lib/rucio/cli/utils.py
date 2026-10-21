@@ -49,7 +49,7 @@ from rucio.common.exception import (
     ScopeNotFound,
     UnsupportedOperation,
 )
-from rucio.common.utils import extract_scope, get_bytes_value_from_string, setup_logger, sizefmt
+from rucio.common.utils import extract_scope, get_bytes_value_from_string, setup_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -135,32 +135,154 @@ def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
     return '\n'.join(lines)
 
 
-def format_quota(bytes_: int, human: bool = True) -> str:
-    """Render a limit of a role compactly, e.g. '100 GB' or '1.5 TB', 'no cap' if it is `ROLE_QUOTA_NOCAP`."""
+class SizeFormat(Enum):
+    """How the sizes of the limits of a role, and the usage measured against them, are rendered."""
+    # with a storage unit, e.g. '1.5 TB'
+    COMPACT = 'compact'
+    # to the byte, with grouped digits, e.g. '1,500,000,000,000 B'
+    EXACT = 'exact'
+    # to the byte, as a bare number for scripts, e.g. '1500000000000'
+    RAW = 'raw'
+
+    @classmethod
+    def of(cls, human: bool, exact: bool = False) -> "SizeFormat":
+        """The format matching `--robot` (`human` being False with it) and a request for sizes to the byte, e.g. `--detail`."""
+        if not human:
+            return cls.RAW
+        return cls.EXACT if exact else cls.COMPACT
+
+
+# The decimal storage units, as `sizefmt` names them.
+SIZE_UNITS = ('B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB')
+
+
+def _compact_size(bytes_: float, decimals: int) -> tuple[str, str]:
+    """
+    Render a size with the largest decimal unit it reaches, without trailing zeros, e.g. ('1.5', 'TB').
+
+    :param bytes_: The size, in bytes.
+    :param decimals: The decimals kept at most, the size being rounded to them.
+    :returns: The number and its unit, apart so that two sizes in the same unit can share it.
+    """
+    value = float(bytes_)
+    # the unit is chosen once rounded, so that 999.96 kB reads as 1 MB rather than 1000 kB
+    for unit in SIZE_UNITS:
+        if abs(round(value, decimals)) < 1000 or unit == SIZE_UNITS[-1]:
+            break
+        value /= 1000
+    number = f"{value:.{decimals}f}"
+    return (number.rstrip('0').rstrip('.') if '.' in number else number), unit
+
+
+def format_size(bytes_: int, sizes: SizeFormat = SizeFormat.COMPACT) -> str:
+    """Render a size in bytes, see :class:`SizeFormat`, e.g. '1.234 TB', '1,234,000,000,000 B' or '1234000000000'."""
+    if sizes == SizeFormat.RAW:
+        return str(bytes_)
+    if sizes == SizeFormat.EXACT:
+        return f"{bytes_:,} B"
+    return ' '.join(_compact_size(bytes_, decimals=3))
+
+
+def format_quota(bytes_: int, sizes: SizeFormat = SizeFormat.COMPACT) -> str:
+    """Render a limit of a role, e.g. '100 GB' or '1.5 TB', 'no cap' if it is `ROLE_QUOTA_NOCAP`."""
     if bytes_ == ROLE_QUOTA_NOCAP:
         return "no cap"
-    if not human:
-        return sizefmt(bytes_, human)
-    # sizefmt always shows three decimals, e.g. '100.000 GB', which a limit set as '100GB' does not need
-    number, _, unit = sizefmt(bytes_, human).partition(' ')
-    return f"{number.rstrip('0').rstrip('.')} {unit}" if '.' in number else f"{number} {unit}"
+    return format_size(bytes_, sizes)
+
+
+def _format_percentage(used: int, limit: int, decimals: int) -> str:
+    """
+    Render the share of a (non-zero) limit which is used, rounded to `decimals`.
+
+    The rounding never hides that a limit is used, nor makes it look reached when it is not: a usage
+    rounding to 0 reads as e.g. '<1%', one rounding to 100 while still below the limit as e.g. '>99%'.
+    A usage beyond the limit reads as '>100%': it is not an error, the limit of a role being only one of
+    those an account may write by, the role leaving the most space being taken.
+    """
+    if used > limit:
+        return ">100%"
+    step = 10 ** -decimals
+    percentage = round(100 * used / limit, decimals)
+    if used and percentage == 0:
+        return f"<{step:.{decimals}f}%"
+    if used < limit and percentage >= 100:
+        return f">{100 - step:.{decimals}f}%"
+    return f"{percentage:.{decimals}f}%"
+
+
+def format_quota_usage(used: int, limit: int, sizes: SizeFormat = SizeFormat.COMPACT) -> str:
+    """
+    Render a limit of a role together with the usage of an account measured against it.
+
+    The usage and the limit share their unit when they have the same. The share of the limit used is
+    rounded to the percent in the compact format, to a tenth of a percent otherwise:
+
+        1.4/10 GB (14% used)
+        950 MB/10 GB (10% used)
+        1,395,864,371/10,000,000,000 B (14.0% used)
+        12/10 GB (>100% used)
+        3.2 TB/no cap
+        0/0 B (full)
+
+    :param used: The bytes used, on the RSE of a local limit or summed over the RSEs of a global one.
+    :param limit: The limit, `ROLE_QUOTA_NOCAP` for no cap.
+    :param sizes: How the sizes are rendered.
+    """
+    if sizes == SizeFormat.COMPACT:
+        # the usage is only indicative, a tenth of its unit is enough
+        used_number, used_unit = _compact_size(used, decimals=1)
+        # nothing used reads the same in any unit
+        shares_unit = not used or (limit != ROLE_QUOTA_NOCAP and _compact_size(limit, decimals=3)[1] == used_unit)
+        used_text = used_number if shares_unit else f"{used_number} {used_unit}"
+    else:
+        # the exact sizes always share their unit, if any
+        used_text = format_size(used, sizes).removesuffix(' B')
+
+    usage = f"{used_text}/{format_quota(limit, sizes)}"
+    if limit == ROLE_QUOTA_NOCAP:
+        return usage
+    if limit == 0:
+        return f"{usage} (full)"
+    return f"{usage} ({_format_percentage(used, limit, decimals=0 if sizes == SizeFormat.COMPACT else 1)} used)"
 
 
 # The localities of the limits of a role, in the order they are rendered.
 LIMIT_LOCALITIES = ('local', 'global')
 
 
-def format_limits(permission: "Mapping[str, Any]", human: bool = True) -> str:
-    """Render the limits of a role on a target, as listed by the server, e.g. 'local: 10 TB, global: no cap'."""
-    return ', '.join(f"{locality}: {format_quota(permission[locality], human)}" for locality in LIMIT_LOCALITIES if locality in permission)
+def format_limits(
+        permission: "Mapping[str, Any]",
+        sizes: SizeFormat = SizeFormat.COMPACT,
+        used: "Optional[Callable[[str], int]]" = None,
+) -> str:
+    """
+    Render the limits of a role on a target, as listed by the server, e.g. 'local: 10 TB' or 'global: no cap'.
+
+    :param permission: The limit permission, as listed by the server.
+    :param sizes: How the sizes are rendered.
+    :param used: Gives the bytes an account uses, summed over the RSEs an RSE expression currently matches. With it,
+                 each limit is rendered with the usage measured against it, e.g. 'local: 1.4/10 GB (14% used)', see
+                 :func:`format_quota_usage`.
+    """
+    return ', '.join(
+        f"{locality}: "
+        + (format_quota(permission[locality], sizes) if used is None else format_quota_usage(used(permission['rse_expression']), permission[locality], sizes))
+        for locality in LIMIT_LOCALITIES if locality in permission
+    )
 
 
-def permission_lines(permissions: "Iterable[Mapping[str, Any]]", human: bool = True) -> list[tuple[str, str, str, str]]:
+def permission_lines(
+        permissions: "Iterable[Mapping[str, Any]]",
+        sizes: SizeFormat = SizeFormat.COMPACT,
+        used: "Optional[Callable[[str], int]]" = None,
+) -> list[tuple[str, str, str, str]]:
     """
     Gather the permissions of a role into one line per type and target, sorted by type then target.
 
     :param permissions: The permissions of the role, as listed by the server.
-    :param human: Render the limits with a storage unit rather than in bytes.
+    :param sizes: How the sizes of the limits are rendered.
+    :param used: Gives the bytes an account uses on the RSEs of an RSE expression, to render each limit with the usage
+                 measured against it, see :func:`format_limits`.
     :returns: The lines, as (type, target, operations, limits): the operations granted on a scope pattern, e.g. 'rw-'
               (see :func:`format_operations`), and the limits on an RSE expression (see :func:`format_limits`), '' where
               they do not apply. A permission of a type this client does not know is left out.
@@ -174,7 +296,7 @@ def permission_lines(permissions: "Iterable[Mapping[str, Any]]", human: bool = T
             limits.append(permission)
 
     lines = [('scope', scope_pattern, format_operations(ops), '') for scope_pattern, ops in sorted(ops_by_scope_pattern.items())]
-    lines.extend(('limit', limit['rse_expression'], '', format_limits(limit, human)) for limit in sorted(limits, key=lambda limit: limit['rse_expression']))
+    lines.extend(('limit', limit['rse_expression'], '', format_limits(limit, sizes, used)) for limit in sorted(limits, key=lambda limit: limit['rse_expression']))
     return lines
 
 
@@ -182,7 +304,8 @@ def format_permission_tree(
         role: str,
         permissions: "Iterable[Mapping[str, Any]]",
         rse_names: "Optional[Callable[[str], Sequence[str]]]" = None,
-        human: bool = True,
+        sizes: SizeFormat = SizeFormat.COMPACT,
+        used: "Optional[Callable[[str], int]]" = None,
 ) -> str:
     """
     Render a role and its permissions as a tree, see :func:`format_tree`.
@@ -204,16 +327,18 @@ def format_permission_tree(
     :param permissions: The permissions of the role, as listed by the server.
     :param rse_names: Gives the names of the RSEs an RSE expression currently matches. Without it, every
                       limit holds on one line, with its RSE expression.
-    :param human: Render the limits with a storage unit rather than in bytes.
+    :param sizes: How the sizes of the limits are rendered.
+    :param used: Gives the bytes an account uses on the RSEs of an RSE expression, to render each limit with the usage
+                 measured against it, see :func:`format_limits`.
     :returns: The tree, to be used as a single table cell.
     """
-    return format_permission_trees([(role, permissions)], rse_names, human)[0]
+    return format_permission_trees([(role, permissions, used)], rse_names, sizes)[0]
 
 
 def format_permission_trees(
-        roles: "Sequence[tuple[str, Iterable[Mapping[str, Any]]]]",
+        roles: "Sequence[tuple[str, Iterable[Mapping[str, Any]], Optional[Callable[[str], int]]]]",
         rse_names: "Optional[Callable[[str], Sequence[str]]]" = None,
-        human: bool = True,
+        sizes: SizeFormat = SizeFormat.COMPACT,
 ) -> list[str]:
     """
     Render several roles and their permissions as trees, see :func:`format_permission_tree`.
@@ -221,16 +346,18 @@ def format_permission_trees(
     The columns of the branches are aligned across all the trees, so that the trees read as one when
     listed one below the other, e.g. in a table of roles.
 
-    :param roles: The roles, as their name, the root of their tree, and their permissions as listed by the server.
+    :param roles: The roles, as their name, the root of their tree, their permissions as listed by the server, and what
+                  gives the bytes an account uses on the RSEs of an RSE expression, see :func:`format_permission_tree`,
+                  None to only render the limits of the role, e.g. if the account does not hold it.
     :param rse_names: Gives the names of the RSEs an RSE expression currently matches, see :func:`format_permission_tree`.
-    :param human: Render the limits with a storage unit rather than in bytes.
+    :param sizes: How the sizes of the limits are rendered.
     :returns: The trees, in the order of `roles`, each to be used as a single table cell.
     """
     # each branch of each role as (type, identifier, parameters), the identifier being the RSEs of a global limit if it covers several
     entries_by_role: list[list[tuple[str, Union[str, list[str]], str]]] = []
-    for _, permissions in roles:
+    for _, permissions, used in roles:
         entries: list[tuple[str, Union[str, list[str]], str]] = []
-        for permission_type, target, operations, limits in permission_lines(permissions, human):
+        for permission_type, target, operations, limits in permission_lines(permissions, sizes, used):
             if permission_type != 'limit':
                 entries.append((permission_type.upper(), target, operations))
                 continue
@@ -245,7 +372,7 @@ def format_permission_trees(
 
     all_entries = [entry for entries in entries_by_role for entry in entries]
     if not all_entries:
-        return [format_tree(role, [], placeholder="(no permission assigned)") for role, _ in roles]
+        return [format_tree(role, [], placeholder="(no permission assigned)") for role, _, _ in roles]
 
     # the bracket of a list of RSEs opens in the gap before the identifier column, so that the RSEs line up
     # with the other identifiers, and closes with '|- ' before the parameter column
@@ -257,7 +384,7 @@ def format_permission_trees(
     rse_width = id_width - len(TREE_BRACKET_CLOSE) - 2
 
     trees = []
-    for (role, _), entries in zip(roles, entries_by_role):
+    for (role, _, _), entries in zip(roles, entries_by_role):
         branches = []
         for permission_type, identifier, parameters in entries:
             if isinstance(identifier, str):
