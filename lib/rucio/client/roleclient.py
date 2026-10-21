@@ -179,7 +179,9 @@ class RoleClient(BaseClient):
         Returns
         -------
             A list of dictionaries, one per permission, with its `type` and, in the shape it is granted with
-            (see `add_role_permission`): a `scope_pattern` and an `operation` for a 'scope' permission.
+            (see `add_role_permission`): a `scope_pattern` and an `operation` for a 'scope' permission; an
+            `rse_expression` and its `local` or `global` bytes for a 'limit', a local limit being listed
+            under the name of its RSE.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions")
         response = self._send_request(url, method=HTTPMethod.GET)
@@ -373,12 +375,16 @@ class RoleClient(BaseClient):
         role :
             The role to grant the permission to.
         permission_type :
-            The type of the permission, e.g. 'scope'.
+            The type of the permission: 'scope' or 'limit'.
         parameters :
             The target of the permission and its parameters, e.g.:
 
             - {'scope_pattern': 'data*', 'operation': 'read'} for a 'scope' permission, only a trailing '*' wildcard
-              being accepted, and the operation being 'read', 'write' or 'delete'.
+              being accepted, and the operation being 'read', 'write' or 'delete';
+            - {'rse_expression': 'CERN-EOS-DISK', 'local': 1000} or {'rse_expression': 'tier=1', 'global': 5000} for a
+              'limit', with either its local or its global bytes, `ROLE_QUOTA_NOCAP` (-1) meaning no cap. A local limit
+              is set on the single RSE its expression matches, a global one on an expression matching several RSEs.
+              A limit which exists already is overwritten.
         force :
             Grant the permission even if the role is locked.
         """
@@ -396,17 +402,19 @@ class RoleClient(BaseClient):
         role :
             The role to remove the permissions from.
         permission_type :
-            The type of the permissions, e.g. 'scope'.
+            The type of the permissions: 'scope' or 'limit'.
         parameters :
             The target of the permissions and the parameters identifying them, e.g.:
 
-            - {'scope_pattern': 'data*', 'operation': 'read'} for a 'scope' permission.
+            - {'scope_pattern': 'data*', 'operation': 'read'} for a 'scope' permission;
+            - {'rse_expression': 'tier=1', 'global': True} for a 'limit': the local limit on the RSE the expression
+              matches and/or the global limit on the expression itself, both being looked for if neither is given.
         force :
             Remove the permissions even if the role is locked.
 
         Returns
         -------
-            The number of permissions removed.
+            The number of permissions removed, e.g. both the local and the global limit on an RSE expression.
         """
         response = self._send_permission_request(HTTPMethod.DELETE, role, permission_type, parameters, force)
         if response.status_code == codes.ok:
