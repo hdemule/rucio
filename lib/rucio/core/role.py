@@ -26,6 +26,8 @@ The module is organised as follows:
 - Role permissions: grant, remove and list the permissions of a role, of any type.
 - Permission checks: tell whether an account may perform a request, of any checked permission type,
   with :func:`has_permission` as the single entry point, and filter listings accordingly.
+- RSE quotas: how the limits granted by the account's roles apply, taking precedence over the
+  account limits, see :func:`list_account_rse_quota_grants`.
 - Synchronisation: of the roles with the policy package, and of an account's roles with an IdP.
 """
 
@@ -618,7 +620,8 @@ def set_account_role_dates(
 # A permission type deciding whether an account may perform an operation on a resource (e.g. on a
 # scope) has a `CheckedPermissionTypeHandler`, together with a `PermissionRequest` subclass naming
 # the resource and the operations it grants, its own subclass of `RolePermissionOperationType`
-# (e.g. `ScopeOperationType` for scopes), see :func:`has_permission`. The other types are applied where they matter.
+# (e.g. `ScopeOperationType` for scopes), see :func:`has_permission`. The other types are applied where they matter, e.g. the
+# limits by the RSE selector, see :func:`rse_quota_left`.
 #
 # Nothing else in this module has to change to support a new permission type.
 # ----------------------------------------------------------------------------------------------
@@ -1031,7 +1034,7 @@ class LimitPermissionHandler(PermissionTypeHandler):
     overwrites it. Removing the limits on an RSE expression removes the local limit on the RSE it
     matches and the global limit on that very expression; the localities set to true restrict
     which, both being looked for if none is given. The RSEs are those of the VO given, of every VO
-    if None.
+    if None. How the limits are applied is described in :func:`list_account_rse_quota_grants`.
     """
     permission_type = RolePermissionType.LIMIT
     tables = (models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation)
@@ -1434,6 +1437,131 @@ def filter_iterable_by_scope_access(
     for item in items:
         if can_access(item.get(scope_keyword)):
             yield item
+
+
+# ----------------------------------------------------------------------------------------------
+# RSE quotas
+#
+# The limits of a role are its limit permissions, see :class:`LimitPermissionHandler`. They are
+# applied by the RSE selector when a rule is created or re-evaluated, the same way the account
+# limits are, which keep working as they do without RBAC:
+#
+# - within a role, an RSE may be written to only if a local limit of the role covers it, and if
+#   every global limit of the role covering it still has room: like a global account limit, a
+#   global limit only ever restricts, it never grants by itself;
+# - on an RSE a local limit of at least one of the account's roles covers, the roles take
+#   precedence and the account limits are not considered at all, local or global, and the role
+#   leaving the most space is taken;
+# - on an RSE no local limit of any role covers, the account limits apply as they always did.
+#
+# Like the account limits, the limits are personal: each account holding a role gets the whole
+# limit for itself, measured against its own usage, rather than sharing it with the other holders
+# of the role.
+# ----------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RSEQuotaGrant:
+    """A limit granted to an account by one of its roles."""
+    role: str
+    locality: LimitLocality
+    # the expression of a global limit, None for a local one
+    rse_expression: Optional[str]
+    # the RSE of a local limit, or the RSEs the expression of a global one currently matches, within the VO of the account
+    rse_ids: frozenset[str]
+    # ROLE_QUOTA_NOCAP means no cap
+    bytes: int
+
+
+def list_account_rse_quota_grants(account: "InternalAccount", *, session: "Session") -> list[RSEQuotaGrant]:
+    """
+    List the RSE limits granted to the account by its roles, see the introduction of this section.
+
+    Every limit of a role the account holds through an active assignment is a grant, including a
+    local one of 0: it still covers its RSE, so that the account limits do not apply there, but lets
+    nothing be written on it. The expression of a global limit is resolved within the VO of the
+    account, and a global limit whose expression currently matches no RSE is left out.
+
+    :param account: The account whose quotas to list.
+    :param session: The database session.
+    :returns: The grants, see :func:`rse_quota_left` to apply them to an RSE. Empty if RBAC is disabled, so that only the account limits apply.
+    """
+    if not is_rbac_enabled():
+        return []
+
+    local, global_ = models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation
+    held = (models.AccountRoleAssociation.account == account, _assignment_active())
+
+    stmt = (
+        select(local.role, local.rse_id, local.bytes)
+        .join(models.AccountRoleAssociation, models.AccountRoleAssociation.role == local.role)
+        .where(*held)
+        .order_by(local.role, local.rse_id)
+    )
+    grants = [
+        RSEQuotaGrant(role=role, locality=LimitLocality.LOCAL, rse_expression=None, rse_ids=frozenset([rse_id]), bytes=bytes_)
+        for role, rse_id, bytes_ in session.execute(stmt).all()
+    ]
+
+    stmt = (
+        select(global_.role, global_.rse_expression, global_.bytes)
+        .join(models.AccountRoleAssociation, models.AccountRoleAssociation.role == global_.role)
+        .where(*held)
+        .order_by(global_.role, global_.rse_expression)
+    )
+    for role, rse_expression, bytes_ in session.execute(stmt).all():
+        rse_ids = _resolve_rse_ids(rse_expression, account.vo, session=session)
+        if rse_ids:
+            grants.append(RSEQuotaGrant(role=role, locality=LimitLocality.GLOBAL, rse_expression=rse_expression, rse_ids=rse_ids, bytes=bytes_))
+    return grants
+
+
+def rse_quota_left(
+        grants: "Iterable[RSEQuotaGrant]",
+        rse_id: str,
+        usage: "Mapping[str, int]",
+) -> Optional[tuple[float, dict[str, float]]]:
+    """
+    Tell how much an account may still write on an RSE according to its role limits, see the introduction of this section.
+
+    Within each role covering the RSE with a local limit, the space left is the smallest of what its
+    local limit on the RSE leaves and what each of its global limits covering the RSE leaves, a limit
+    of `ROLE_QUOTA_NOCAP` leaving infinite space. The role leaving the most space is taken.
+
+    :param grants: The grants of the account, see :func:`list_account_rse_quota_grants`.
+    :param rse_id: The RSE to write on.
+    :param usage: The bytes the account currently uses on each RSE, by RSE id.
+    :returns: None if no local limit of any role covers the RSE, so that the account limits apply.
+              Otherwise the space left on the RSE by the local limit of the role taken, and what its
+              global limits leave, by RSE expression, the same way the RSE selector reports the account limits.
+    """
+    grants_by_role: dict[str, list[RSEQuotaGrant]] = {}
+    for grant in grants:
+        if rse_id in grant.rse_ids:
+            grants_by_role.setdefault(grant.role, []).append(grant)
+
+    best: Optional[tuple[float, float, dict[str, float]]] = None
+    for role_grants in grants_by_role.values():
+        local_grant = next((grant for grant in role_grants if grant.locality == LimitLocality.LOCAL), None)
+        if local_grant is None:
+            # a global limit only restricts what a local one grants
+            continue
+
+        # a role has a single local limit per RSE
+        local_left = float('inf') if local_grant.bytes == ROLE_QUOTA_NOCAP else local_grant.bytes - usage.get(rse_id, 0)
+        global_left = {
+            cast(str, grant.rse_expression): grant.bytes - sum(usage.get(covered, 0) for covered in grant.rse_ids)
+            for grant in role_grants
+            if grant.locality == LimitLocality.GLOBAL and grant.bytes != ROLE_QUOTA_NOCAP
+        }
+
+        space_left = min([local_left, *global_left.values()])
+        if best is None or space_left > best[0]:
+            best = (space_left, local_left, global_left)
+
+    if best is None:
+        return None
+    _, local_left, global_left = best
+    return local_left, global_left
 
 
 # ----------------------------------------------------------------------------------------------
