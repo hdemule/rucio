@@ -71,6 +71,20 @@ def _holds(assignment: "Mapping[str, Any]") -> bool:
     return (activates_at is None or activates_at <= now) and (expires_at is None or now < expires_at)
 
 
+ASSIGNMENT_DATE_FORMAT = "%d-%b-%Y %H:%M:%S UTC"
+
+
+def _format_date(date: Optional[str]) -> str:
+    """Render a date of a role assignment, as listed by the server, e.g. '21-Oct-2026 07:58:54 UTC', '-' if there is none."""
+    if not date:
+        return '-'
+    try:
+        return str_to_date(date).strftime(ASSIGNMENT_DATE_FORMAT)  # type: ignore[union-attr]
+    except ValueError:
+        # a date in another format than the one the server sends, shown as is rather than hidden
+        return date
+
+
 def _role_label(role_name: str, reserved: bool) -> str:
     """The name of a role, tagged with `RESERVED_ROLE_TAG` if it is reserved."""
     return f"{role_name} {RESERVED_ROLE_TAG}" if reserved else role_name
@@ -262,14 +276,14 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
         assignments = ctx.obj.client.list_role_accounts(role_name)
         reserved = any(entry['role'] == role_name and entry.get('reserved') for entry in ctx.obj.client.list_roles())
         click.echo(f"Accounts assigned to role {_role_label(role_name, reserved)}:")
-        rows = [[assignment['account'], assignment.get('activates_at') or '-', assignment.get('expires_at') or '-'] for assignment in assignments]
+        rows = [[assignment['account'], _format_date(assignment.get('activates_at')), _format_date(assignment.get('expires_at'))] for assignment in assignments]
         click.echo(tabulate(rows, headers=["ACCOUNT", "ACTIVATES AT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
     else:
         rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
         click.echo(f"Roles for account '{rbac['account']}':")
         if not detail:
             rows = [
-                [_role_label(entry['role'], bool(entry.get('reserved'))), entry.get('activates_at') or '-', entry.get('expires_at') or '-']
+                [_role_label(entry['role'], bool(entry.get('reserved'))), _format_date(entry.get('activates_at')), _format_date(entry.get('expires_at'))]
                 for entry in rbac['roles']
             ]
             headers = ["ROLE", "ACTIVATES AT", "EXPIRES AT"]
@@ -284,7 +298,7 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
                 account_name=rbac['account'], held={entry['role'] for entry in rbac['roles'] if _holds(entry)},
             )
             rows = [
-                [role_cell, str(entry.get('activates_at') or '-'), str(entry.get('expires_at') or '-'), entry.get('description') or '-']
+                [role_cell, _format_date(entry.get('activates_at')), _format_date(entry.get('expires_at')), entry.get('description') or '-']
                 for role_cell, entry in zip(role_cells, rbac['roles'])
             ]
             headers = ["ROLE", "ACTIVATES AT", "EXPIRES AT", "DESCRIPTION"]
