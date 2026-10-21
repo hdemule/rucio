@@ -20,8 +20,9 @@ Check, and optionally rebuild from scratch, everything the RBAC tests rely on.
 files, rules, transfer requests and roles (see the assumptions at the top of that file). This
 script runs inside the dev `rucio` container:
 
-    python tools/rbac/db_setup/setup_test_db.py            # dry run: report what is present and what is missing
-    python tools/rbac/db_setup/setup_test_db.py --reset    # DROP THE WHOLE DATABASE, then recreate everything
+    python tools/rbac/db_setup/setup_test_db.py             # dry run: report what is present and what is missing
+    python tools/rbac/db_setup/setup_test_db.py --reset     # DROP THE WHOLE DATABASE, then recreate everything
+    python tools/rbac/db_setup/setup_test_db.py --dev-rses  # only add what is missing of the dev RSEs, see below
 
 --reset first runs a preflight check of everything it needs (policy package, source files,
 alembic head, ...) and stops before touching the database if any of it is missing. It then asks
@@ -29,6 +30,26 @@ for confirmation (skip it with --yes), purges the database schema, rebuilds it l
 `tools/run_tests.sh -ir` does (reset_database.py -b, bootstrap_tests.py, sync_rses.py,
 sync_meta.py) and provisions the RBAC test data on top. It ends by running the dry-run check
 again, and exits with a non-zero status if anything is still missing.
+
+On top of what the tests need, the dev environment gets the RSEs RSE1 to RSE3 and RSE_USERDISK, to
+try out uploads and the limits of roles by hand. They are POSIX RSEs within the `rucio` container.
+RSE1 to RSE3 are tagged with `dev_rse=True` and covered by the limits of 'data-scientist' (held by
+alice), RSE_USERDISK by an account limit of alice (see `DEV_RSE_ROLE_LIMITS` and `DEV_RSE_ACCOUNT_LIMITS`).
+
+The policy package only lets a non-admin account register replicas on an RSE whose name ends with
+one of its user suffixes (e.g. USERDISK), which RSE1 to RSE3 do not. RSE_USERDISK does: alice
+uploads there herself, as a temporary deposit, then adds rules to get the data onto RSE1 to RSE3,
+which count against her limits there. Without --register-after-upload, the upload registers the
+replica first and marks it available once written, which requires DELETE on the scope, e.g.:
+
+    export ALICE=/opt/rucio/etc/rucio-alice.cfg
+    RUCIO_CONFIG=$ALICE rucio upload --rse RSE_USERDISK --scope atlas --lifetime 86400 --register-after-upload /tmp/myfile
+    RUCIO_CONFIG=$ALICE rucio rule add atlas:myfile --copies 1 --rses RSE1
+    rucio-abacus-account --run-once    # no daemon runs in the dev environment, this applies the new usage
+    RUCIO_CONFIG=$ALICE rucio role account list --me --detail
+
+No transfer daemon runs in the dev environment either, so the rule on RSE1 stays REPLICATING, the
+file never being copied there: its locks count against the limits of alice all the same.
 """
 
 import argparse
@@ -52,7 +73,7 @@ from sqlalchemy import Enum, select, text  # noqa: E402
 
 from rucio.alembicrevision import ALEMBIC_REVISION  # noqa: E402
 from rucio.common.config import config_get  # noqa: E402
-from rucio.common.constants import DEFAULT_VO  # noqa: E402
+from rucio.common.constants import DEFAULT_VO, ROLE_QUOTA_NOCAP  # noqa: E402
 from rucio.common.exception import RucioException  # noqa: E402
 from rucio.common.types import InternalAccount, InternalScope  # noqa: E402
 from rucio.db.sqla import models  # noqa: E402
@@ -91,9 +112,37 @@ RULE_DIDS = [('alice', 'file1.png'), ('root', 'file1.png')]
 REQUEST_DID = ('alice', 'file1.png')
 # role -> (operations granted on scope pattern, accounts holding the role)
 ROLES = {
-    'data-scientist': ({('read', 'atlas'), ('write', 'atlas')}, {'alice'}),
+    'data-scientist': ({('read', 'atlas'), ('write', 'atlas'), ('read', 'archive')}, {'alice'}),
+    'superuser': ({('read', '*')}, {'jdoe', 'panda'}),
 }
 ACCOUNTS_WITHOUT_ROLES = ['bob']
+
+MB = 10**6
+# The RSEs of the dev environment only, not used by the tests: POSIX storage within the `rucio` container,
+# each in its own directory, so that the replicas of a DID on several of them are distinct files.
+DEV_RSES = ['RSE%d' % index for index in range(1, 4)]
+DEV_RSE_ROOT = '/tmp/rucio_rse/dev'
+# matched by every dev RSE but the deposit, e.g. for a global limit on all of them: 'dev_rse=True'
+DEV_RSE_ATTRIBUTE = ('dev_rse', True)
+DEV_RSE_EXPRESSION = '%s=%s' % DEV_RSE_ATTRIBUTE
+# The dev RSE on which a non-admin account may register replicas, its name ending with a user suffix of the
+# policy package: the deposit alice uploads to before adding rules on the others. It does not carry
+# DEV_RSE_ATTRIBUTE, so that what is deposited there does not count against the global limit of the role.
+DEV_DEPOSIT_RSE = 'RSE_USERDISK'
+# role -> (RSE expression, locality, bytes): within the role, RSE1 to RSE3 are writable up to their local
+# limit, while the global limit caps the three of them together.
+DEV_RSE_ROLE_LIMITS = {
+    'data-scientist': [
+        (DEV_DEPOSIT_RSE, 'local', 1000 * MB),
+        ('RSE1', 'local', 5 * MB),
+        ('RSE2', 'local', 10 * MB),
+        ('RSE3', 'local', 10 * MB),
+        (DEV_RSE_EXPRESSION, 'global', 10 * MB),
+    ],
+}
+# account -> (RSE, bytes): the deposit is not covered by any limit of the role, the account limit applies instead
+DEV_RSE_ACCOUNT_LIMITS = {
+}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -276,13 +325,53 @@ def check_scope(scope: str, owner: str) -> Callable[[], Optional[str]]:
     return check
 
 
-def check_rse() -> Optional[str]:
-    rows = _read(select(models.RSE.id).where(models.RSE.rse == RSE, models.RSE.deleted == False))  # noqa: E712
-    if not rows:
-        return 'does not exist'
-    protocols = _read(select(models.RSEProtocol.scheme).where(models.RSEProtocol.rse_id == rows[0][0]))
-    if 'file' not in {row[0] for row in protocols}:
-        return "has no 'file' protocol"
+def check_rse(rse: str, attribute: Optional[tuple[str, Any]] = None) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        rows = _read(select(models.RSE.id, models.RSE.availability_write).where(models.RSE.rse == rse, models.RSE.deleted == False))  # noqa: E712
+        if not rows:
+            return 'does not exist'
+        rse_id, writable = rows[0]
+        if writable is False:
+            return 'is not available for writing'
+        protocols = _read(select(models.RSEProtocol.scheme).where(models.RSEProtocol.rse_id == rse_id))
+        if 'file' not in {row[0] for row in protocols}:
+            return "has no 'file' protocol"
+        if attribute is not None:
+            from rucio.core.rse import list_rse_attributes
+            with db_session(DatabaseOperationType.READ) as session:
+                value = list_rse_attributes(rse_id, session=session).get(attribute[0])
+            if value != attribute[1]:
+                return 'has attribute %s=%s, expected %s' % (attribute[0], value, attribute[1])
+    return check
+
+
+def check_role_limits(role: str, expected: list[tuple[str, str, int]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.role import list_role_permissions
+        with db_session(DatabaseOperationType.READ) as session:
+            limits = list_role_permissions(role, vo=DEFAULT_VO, session=session)
+        present = {(limit['rse_expression'], locality, limit[locality]) for limit in limits if limit.get('type') == RolePermissionType.LIMIT.value
+                   for locality in ('local', 'global') if locality in limit}
+        missing = [limit for limit in expected if limit not in present]
+        if missing:
+            return 'missing %s' % ', '.join('%s limit of %s on %s' % (locality, _bytes(bytes_), target) for target, locality, bytes_ in missing)
+    return check
+
+
+def check_account_limits(account: str, expected: list[tuple[str, int]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.account_limit import get_local_account_limit
+        from rucio.core.rse import get_rse_id
+        with db_session(DatabaseOperationType.READ) as session:
+            missing = [(rse, bytes_) for rse, bytes_ in expected
+                       if get_local_account_limit(_account(account), rse_ids=get_rse_id(rse, vo=DEFAULT_VO, session=session), session=session) != bytes_]
+        if missing:
+            return 'missing %s' % ', '.join('local limit of %s on %s' % (_bytes(bytes_), rse) for rse, bytes_ in missing)
+    return check
+
+
+def _bytes(bytes_: int) -> str:
+    return 'no cap' if bytes_ == ROLE_QUOTA_NOCAP else '%d MB' % (bytes_ // MB)
 
 
 def check_file(scope: str, name: str) -> Callable[[], Optional[str]]:
@@ -400,7 +489,7 @@ def run_database_checks(report: Report) -> None:
         report.run('scope %s owned by %s' % (scope, owner), check_scope(scope, owner))
 
     report.section('RSE and data')
-    report.run('RSE %s' % RSE, check_rse)
+    report.run('RSE %s' % RSE, check_rse(RSE))
     for scope, name in FILES:
         report.run('file %s:%s' % (scope, name), check_file(scope, name))
     for (scope, name), (_, content) in DATASETS.items():
@@ -419,6 +508,19 @@ def run_database_checks(report: Report) -> None:
             report.run('account %s holds %s' % (account, role), check_account_roles(account, {role}))
     for account in ACCOUNTS_WITHOUT_ROLES:
         report.run('account %s holds no role' % account, check_account_roles(account, set()))
+
+    run_dev_rse_checks(report)
+
+
+def run_dev_rse_checks(report: Report) -> None:
+    report.section('Dev RSEs (not used by the tests)')
+    for rse in DEV_RSES:
+        report.run('RSE %s with %s' % (rse, DEV_RSE_EXPRESSION), check_rse(rse, DEV_RSE_ATTRIBUTE))
+    report.run('deposit RSE %s' % DEV_DEPOSIT_RSE, check_rse(DEV_DEPOSIT_RSE))
+    for role, limits in DEV_RSE_ROLE_LIMITS.items():
+        report.run('role %s has its limits on the dev RSEs' % role, check_role_limits(role, limits))
+    for account, limits in DEV_RSE_ACCOUNT_LIMITS.items():
+        report.run('account %s has its account limits on the dev RSEs' % account, check_account_limits(account, limits))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -580,6 +682,49 @@ def _provision_roles() -> None:
                 role_core.add_account_role(_account(account), role, session=session)
 
 
+def _clear_dev_rse_storage() -> None:
+    """Remove the files a previous run left on the dev RSEs, which the rebuilt database no longer knows."""
+    if os.path.isdir(DEV_RSE_ROOT):
+        print('Removing %s, left on the storage by a previous run' % DEV_RSE_ROOT)
+        shutil.rmtree(DEV_RSE_ROOT)
+
+
+def _provision_dev_rses() -> None:
+    """Add what is missing of the dev RSEs and of the limits on them, keeping whatever exists already."""
+    from rucio.core.account_limit import set_local_account_limit
+    from rucio.core.role import add_role_permission
+    from rucio.core.rse import add_protocol, add_rse, add_rse_attribute, get_rse_id, get_rse_protocols, list_rse_attributes, rse_exists
+
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for rse in DEV_RSES + [DEV_DEPOSIT_RSE]:
+            if rse_exists(rse, vo=DEFAULT_VO, session=session):
+                rse_id = get_rse_id(rse, vo=DEFAULT_VO, session=session)
+            else:
+                rse_id = add_rse(rse, vo=DEFAULT_VO, session=session)
+                print('Added RSE %s' % rse)
+            if not any(protocol['scheme'] == 'file' for protocol in get_rse_protocols(rse_id, session=session)['protocols']):
+                # the same protocol as MOCK-POSIX in etc/rse_repository.json, writing within the `rucio` container
+                add_protocol(rse_id, {
+                    'scheme': 'file',
+                    'prefix': '%s/%s/' % (DEV_RSE_ROOT, rse),
+                    'impl': 'rucio.rse.protocols.posix.Default',
+                    'domains': {domain: {'read': 1, 'write': 1, 'delete': 1} for domain in ('lan', 'wan')},
+                }, session=session)
+            key, value = DEV_RSE_ATTRIBUTE
+            if rse in DEV_RSES and list_rse_attributes(rse_id, session=session).get(key) != value:
+                add_rse_attribute(rse_id, key, value, session=session)
+
+    # a global limit needs the RSEs its expression matches to exist already
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for role, limits in DEV_RSE_ROLE_LIMITS.items():
+            for target, locality, bytes_ in limits:
+                # setting a limit which exists already overwrites it
+                add_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': target, locality: bytes_}, force=True, vo=DEFAULT_VO, session=session)
+        for account, account_limits in DEV_RSE_ACCOUNT_LIMITS.items():
+            for rse, bytes_ in account_limits:
+                set_local_account_limit(_account(account), get_rse_id(rse, vo=DEFAULT_VO, session=session), bytes_, session=session)
+
+
 def reset(files_dir: str) -> None:
     _step('Purging and rebuilding the database schema')
     _rebuild_database()
@@ -603,16 +748,41 @@ def reset(files_dir: str) -> None:
     _provision_datasets()
     _provision_requests()
 
+    _step('Creating the dev RSEs %s, and the limits on them' % ', '.join(DEV_RSES + [DEV_DEPOSIT_RSE]))
+    _clear_dev_rse_storage()
+    _provision_dev_rses()
+
 
 # ------------------------------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='Check, and optionally rebuild from scratch, everything the RBAC tests rely on.')
     parser.add_argument('--reset', action='store_true', help='DROP THE WHOLE DATABASE and recreate everything from scratch (default: dry run, only check)')
+    parser.add_argument('--dev-rses', action='store_true',
+                        help='only add what is missing of the dev RSEs %s and of the limits on them, leaving the rest of the database untouched' % ', '.join(DEV_RSES + [DEV_DEPOSIT_RSE]))
     parser.add_argument('--yes', action='store_true', help='do not ask for confirmation before --reset')
     parser.add_argument('--files-dir', default=os.path.join(os.environ.get('RUCIO_HOME', '/opt/rucio')),
                         help='directory holding the files to upload (default: %(default)s)')
     args = parser.parse_args()
+
+    if args.reset and args.dev_rses:
+        parser.error('--dev-rses is part of --reset already, give only one of them')
+
+    if args.dev_rses:
+        _step('Adding what is missing of the dev RSEs %s, and of the limits on them' % ', '.join(DEV_RSES + [DEV_DEPOSIT_RSE]))
+        try:
+            _provision_dev_rses()
+        except RucioException as error:
+            print('\nAdding the dev RSEs failed: %s' % error)
+            return 1
+        report = Report()
+        run_dev_rse_checks(report)
+        print()
+        if report.failures:
+            print('%d requirement(s) of the dev RSEs missing.' % len(report.failures))
+            return 1
+        print('The dev RSEs are ready.')
+        return 0
 
     report = Report()
     run_environment_checks(report, args.files_dir)
