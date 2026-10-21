@@ -154,6 +154,11 @@ def _role_path(role_name: str, *suffix: str) -> str:
     return '/'.join(['', 'roles', quote_plus(role_name), *suffix])
 
 
+def _scope_permission(operation: str, scope_pattern: str) -> dict[str, str]:
+    """Build the body naming a scope permission, to be sent to `/roles/<role_name>/permissions/scope`."""
+    return {'scope_pattern': scope_pattern, 'operation': operation}
+
+
 def _account_roles_path(account: str, role_name: Optional[str] = None) -> str:
     """Build a `/roles/accounts/<account>` path, or `/roles/<role_name>/accounts/<account>` if a role is given."""
     if role_name is None:
@@ -1112,7 +1117,7 @@ class TestROLE:
         for account in ('root', 'alice'):
             response = _get(_role_path('data-scientist', 'permissions'), account)
             assert response.status_code == OK
-            granted = {perm['operation'] for perm in response.json() if covers_atlas(perm['scope_pattern'])}
+            granted = {perm['operation'] for perm in response.json() if perm['type'] == 'scope' and covers_atlas(perm['scope_pattern'])}
             assert {'read', 'write'} <= granted
         assert _get(_role_path('data-scientist', 'permissions'), 'bob').status_code == FORBIDDEN
 
@@ -1145,8 +1150,8 @@ class TestROLE:
         [
             ('POST', _role_path('tmp_probe'), None),
             ('DELETE', _role_path('data-scientist'), None),
-            ('POST', _role_path('data-scientist', 'permissions', 'read', 'atlas'), None),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'atlas'), None),
+            ('POST', _role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
             ('POST', _account_roles_path('bob', 'data-scientist'), None),
             ('DELETE', _account_roles_path('alice', 'data-scientist'), None),
             ('PUT', _role_path('data-scientist'), {'locked': True}),
@@ -1190,7 +1195,7 @@ class TestROLE:
         role_name = 'tmp'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('write', 'root')).status_code == CREATED
             assert _delete(_role_path(role_name), 'root').status_code == OK
             assert _get(_role_path(role_name, 'permissions'), 'root').status_code == NOT_FOUND
 
@@ -1205,7 +1210,7 @@ class TestROLE:
         role_name = 'tmp_force_delete'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'write', 'root'), 'root').status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('write', 'root')).status_code == CREATED
             assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
             assert _delete(_role_path(role_name), 'root', json={'force': True}).status_code == OK
 
@@ -1215,7 +1220,7 @@ class TestROLE:
         finally:
             # only needed if the forced deletion failed, in which case the role is still in use
             _delete(_account_roles_path('alice', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'write', 'root'), 'root')
+            _delete(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('write', 'root'))
             _delete(_role_path(role_name), 'root')
 
     def test_non_admin_cannot_force_delete_role(self):
@@ -1308,7 +1313,7 @@ class TestROLE:
 
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'read', 'alice'), 'root').status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice')).status_code == CREATED
             assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
             # an assignment without an expiry date grants access
             assert _get(path, 'bob', params=params).status_code == OK
@@ -1325,7 +1330,7 @@ class TestROLE:
         finally:
             # the assignment and the permission have to go first: a role still in use cannot be deleted
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'read', 'alice'), 'root')
+            _delete(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice'))
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_invalid_account_role_expires_at_is_rejected(self):
@@ -1397,7 +1402,7 @@ class TestROLE:
 
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'read', 'alice'), 'root').status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice')).status_code == CREATED
             # an assignment whose activation date is in the future does not grant anything yet, although it is listed
             assert _post(_account_roles_path('bob', role_name), 'root', json={'activates_at': 'Fri, 01 Jan 2100 00:00:00 UTC'}).status_code == CREATED
             assert role_name in [role['role'] for role in _get(_account_roles_path('bob'), 'root').json()['roles']]
@@ -1409,7 +1414,7 @@ class TestROLE:
         finally:
             # the assignment and the permission have to go first: a role still in use cannot be deleted
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'read', 'alice'), 'root')
+            _delete(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice'))
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_account_role_expiring_before_activation_is_rejected(self):
@@ -1548,14 +1553,14 @@ class TestROLE:
             assert _request('PUT', _role_path('data-scientist'), account, json={'description': 'nope'}).status_code == FORBIDDEN
 
     @pytest.mark.parametrize(
-        ('method', 'path'),
+        ('method', 'path', 'payload'),
         [
-            ('DELETE', _role_path('non_existing_role')),
-            ('POST', _account_roles_path('alice', 'non_existing_role')),
-            ('POST', _account_roles_path('non_existing_account', 'data-scientist')),
-            ('DELETE', _account_roles_path('bob', 'data-scientist')),
-            ('POST', _role_path('non_existing_role', 'permissions', 'read', 'atlas')),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'read', 'root')),
+            ('DELETE', _role_path('non_existing_role'), None),
+            ('POST', _account_roles_path('alice', 'non_existing_role'), None),
+            ('POST', _account_roles_path('non_existing_account', 'data-scientist'), None),
+            ('DELETE', _account_roles_path('bob', 'data-scientist'), None),
+            ('POST', _role_path('non_existing_role', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'root')),
         ],
         ids=[
             'delete non-existing role',
@@ -1566,9 +1571,10 @@ class TestROLE:
             'remove permission not granted to role',
         ],
     )
-    def test_operations_on_nonexistent_targets_return_not_found(self, method, path):
+    def test_operations_on_nonexistent_targets_return_not_found(self, method, path, payload):
         """RBAC(ADMIN): referencing a non-existing role, account or assignment returns 404"""
-        assert _request(method, path, 'root').status_code == NOT_FOUND
+        kwargs = {'json': payload} if payload is not None else {}
+        assert _request(method, path, 'root', **kwargs).status_code == NOT_FOUND
 
     def test_permission_on_scope_pattern_without_existing_scope(self):
         """RBAC(ADMIN): a scope pattern is not checked against the existing scopes, so that it also covers scopes created later"""
@@ -1576,36 +1582,37 @@ class TestROLE:
         scope_pattern = 'rbac_future_%s' % uuid4().hex[:12]
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'read', scope_pattern), 'root').status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', scope_pattern)).status_code == CREATED
             permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
-            assert [(perm['operation'], perm['scope_pattern']) for perm in permissions] == [('read', scope_pattern)]
+            assert permissions == [{'type': 'scope', 'scope_pattern': scope_pattern, 'operation': 'read'}]
         finally:
             _delete(_role_path(role_name), 'root', json={'force': True})
 
     @pytest.mark.parametrize('scope_pattern', ['*atlas', 'at*las', 'at**'], ids=['leading wildcard', 'embedded wildcard', 'several wildcards'])
     def test_invalid_scope_pattern_is_rejected(self, scope_pattern):
         """RBAC(ADMIN): a '*' is only accepted on its own or closing a scope pattern"""
-        assert _post(_role_path('data-scientist', 'permissions', 'read', quote_plus(scope_pattern)), 'root').status_code == BAD_REQUEST
+        assert _post(_role_path('data-scientist', 'permissions', 'scope'), 'root', json=_scope_permission('read', scope_pattern)).status_code == BAD_REQUEST
 
     @pytest.mark.parametrize(
-        'path',
+        ('path', 'payload'),
         [
-            _role_path('data-scientist'),
-            _role_path('data-scientist', 'permissions', 'read', 'atlas'),
-            _role_path('data-scientist', 'permissions', 'write', 'atlas'),
-            _account_roles_path('alice', 'data-scientist'),
+            (_role_path('data-scientist'), None),
+            (_role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
+            (_role_path('data-scientist', 'permissions', 'scope'), _scope_permission('write', 'atlas')),
+            (_account_roles_path('alice', 'data-scientist'), None),
         ],
         ids=['duplicate role', 'duplicate read permission', 'duplicate write permission', 'duplicate account role assignment'],
     )
-    def test_operations_on_already_existing_targets_return_conflict(self, path):
+    def test_operations_on_already_existing_targets_return_conflict(self, path, payload):
         """RBAC(ADMIN): re-creating an already-existing role, permission or account role assignment returns 409"""
         # the target is expected to exist already (see the assumptions at the top of this file),
         # in which case this first call is the duplicate and answers 409. Should it not exist,
         # it is created here and removed again in the cleanup below, so that the test leaves the
         # database as it found it either way.
-        created = _post(path, 'root').status_code == CREATED
+        kwargs = {'json': payload} if payload is not None else {}
+        created = _post(path, 'root', **kwargs).status_code == CREATED
         try:
-            assert _post(path, 'root').status_code == CONFLICT
+            assert _post(path, 'root', **kwargs).status_code == CONFLICT
         finally:
             if created:
-                assert _delete(path, 'root').status_code == OK
+                assert _delete(path, 'root', **kwargs).status_code == OK
