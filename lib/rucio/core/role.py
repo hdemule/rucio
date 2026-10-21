@@ -19,8 +19,8 @@ The module is organised as follows:
 
 - Roles: create, update, delete and list roles, including the reserved ones, see `RESERVED_ROLES`.
 - Account role assignments: which account holds which role, from when and until when.
-- Permission types: the types of the permissions a role can be granted, e.g. operations on scopes.
-  Each type has its own `role_<type>_permission_map` table(s) and a
+- Permission types: the types of the permissions a role can be granted, e.g. operations on scopes
+  or limits on RSEs. Each type has its own `role_<type>_permission_map` table(s) and a
   :class:`PermissionTypeHandler` registered for it, and a :class:`PermissionRequest` describing what
   is checked against it if it decides whether an account may perform an operation.
 - Role permissions: grant, remove and list the permissions of a role, of any type.
@@ -33,17 +33,19 @@ import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, Union, cast
 
 from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.config import config_get_bool
-from rucio.common.constants import ADMIN_ROLE, DEFAULT_VO, RESERVED_ROLES
+from rucio.common.constants import ADMIN_ROLE, DEFAULT_VO, RESERVED_ROLES, ROLE_QUOTA_NOCAP
 from rucio.common.exception import (
     AccountNotFound,
     Duplicate,
     InputValidationError,
+    InvalidRSEExpression,
     RoleAssignmentDisabled,
     RoleAssignmentNotFound,
     RoleInUse,
@@ -56,6 +58,7 @@ from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
 from rucio.core.account import has_account_attribute
+from rucio.core.rse_expression_parser import parse_expression
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import RolePermissionOperationType, RolePermissionType, ScopeOperationType
@@ -925,6 +928,186 @@ class ScopePermissionHandler(CheckedPermissionTypeHandler[ScopePermissionRequest
         return request.operation == ScopeOperationType.READ
 
 
+# --- Limits -----------------------------------------------------------------------------------
+
+# the length of `role_global_limit_permission_map.rse_expression`
+RSE_EXPRESSION_LENGTH = 3000
+
+
+class LimitLocality(Enum):
+    """
+    What a limit caps, like the local and global account limits.
+
+    Its value is also the parameter of a limit permission giving its bytes, see :class:`LimitPermissionHandler`.
+    """
+    # the usage on one RSE
+    LOCAL = 'local'
+    # the usage summed over the RSEs an expression matches
+    GLOBAL = 'global'
+
+
+def _validate_rse_expression(rse_expression: str, *, session: "Session") -> str:
+    """
+    Validate the RSE expression of a limit.
+
+    The expression must follow the RSE expression syntax, but it does not have to match any RSE,
+    see :class:`LimitPermissionHandler` for what it must match.
+
+    :param rse_expression: The RSE expression as supplied by the caller.
+    :param session: The database session.
+    :returns: The RSE expression, stripped of surrounding whitespace.
+    :raises InputValidationError: If the RSE expression is not a string, is empty, is too long or does not follow the RSE expression syntax.
+    """
+    if not isinstance(rse_expression, str):
+        raise InputValidationError("RSE expression must be a string, got '%s'." % type(rse_expression).__name__)
+
+    rse_expression = rse_expression.strip()
+    if not rse_expression:
+        raise InputValidationError("RSE expression must not be empty.")
+    if len(rse_expression) > RSE_EXPRESSION_LENGTH:
+        raise InputValidationError("RSE expression must not be longer than %d characters." % RSE_EXPRESSION_LENGTH)
+
+    try:
+        parse_expression(rse_expression, session=session)
+    except InvalidRSEExpression as error:
+        # the parser refuses an expression which matches no RSE the same way as a malformed one, only the latter is refused here
+        if "empty set" not in str(error):
+            raise InputValidationError("RSE expression '%s' is not valid: %s" % (rse_expression, error))
+
+    return rse_expression
+
+
+def _resolve_rse_ids(rse_expression: str, vo: Optional[str], *, session: "Session") -> frozenset[str]:
+    """
+    Resolve the RSE expression of a limit into the ids of the RSEs it currently matches.
+
+    :param rse_expression: The RSE expression, as stored.
+    :param vo: Only resolve the RSEs of this VO, or those of every VO if None.
+    :param session: The database session.
+    :returns: The ids of the matching RSEs, empty if the expression currently matches none.
+    """
+    try:
+        rses = parse_expression(rse_expression, filter_={'vo': vo} if vo else None, session=session)
+    except InvalidRSEExpression:
+        return frozenset()
+    return frozenset(rse['id'] for rse in rses)
+
+
+def _normalize_bytes(value: Any, attribute: str) -> int:
+    """
+    Validate a limit given in bytes.
+
+    No cap is never implied: it must be given explicitly as `ROLE_QUOTA_NOCAP`, so that None (e.g.
+    a null in a request body) is refused rather than taken for it.
+
+    :param value: The limit as supplied by the caller: a non-negative integer, or `ROLE_QUOTA_NOCAP` for no cap.
+    :param attribute: The name of the limit, for the error messages.
+    :returns: The limit to store.
+    :raises InputValidationError: If the limit is neither a non-negative integer nor `ROLE_QUOTA_NOCAP`.
+    """
+    # a bool is an int, but certainly not a size
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InputValidationError("'%s' must be a number of bytes, or %d for no cap, got '%s'." % (attribute, ROLE_QUOTA_NOCAP, type(value).__name__))
+    if value < 0 and value != ROLE_QUOTA_NOCAP:
+        raise InputValidationError("'%s' must not be negative, got %d. Use %d for no cap." % (attribute, value, ROLE_QUOTA_NOCAP))
+    return value
+
+
+@_register_permission_handler
+class LimitPermissionHandler(PermissionTypeHandler):
+    """
+    Limits on RSEs, like the account limits: how many bytes each account holding the role may use.
+
+    A limit is either local or global, given in bytes under its locality ('local' or 'global'),
+    `ROLE_QUOTA_NOCAP` meaning no cap:
+
+    - a local limit caps the usage on a single RSE, like a local account limit. Its RSE expression
+      must match exactly one RSE, e.g. its name; it is stored by RSE and listed under its name;
+    - a global limit caps the usage summed over the RSEs an expression matches, like a global
+      account limit. Its expression must match several RSEs when it is set; it is stored as given
+      and resolved whenever it is applied, so that it also covers the RSEs it matches later.
+
+    A local and a global limit are therefore never set at once. Setting a limit which exists already
+    overwrites it. Removing the limits on an RSE expression removes the local limit on the RSE it
+    matches and the global limit on that very expression; the localities set to true restrict
+    which, both being looked for if none is given. The RSEs are those of the VO given, of every VO
+    if None.
+    """
+    permission_type = RolePermissionType.LIMIT
+    tables = (models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation)
+    target_attribute = "rse_expression"
+    target_label = "RSE expression"
+
+    def normalize_target(self, target: Any, *, session: "Session") -> str:
+        return _validate_rse_expression(target, session=session)
+
+    def normalize_parameters(self, parameters: "Mapping[str, Any]", *, removing: bool) -> dict[str, Any]:
+        localities = [locality.value for locality in LimitLocality]
+        unknown = sorted(set(parameters) - set(localities))
+        if unknown:
+            raise InputValidationError("Parameter(s) %s not supported on a '%s' permission, expected: %s."
+                                       % (", ".join(unknown), self.permission_type.value, " or ".join(localities)))
+        if not removing:
+            if len(parameters) != 1:
+                raise InputValidationError("Exactly one of %s must be given to set a limit: a local limit is set on one RSE, a global one on an expression matching several."
+                                           % " or ".join("'%s'" % name for name in localities))
+            return {name: _normalize_bytes(value, name) for name, value in parameters.items()}
+
+        for name, value in parameters.items():
+            if not isinstance(value, bool):
+                raise InputValidationError("'%s' must be true or false to remove a limit, got '%s'." % (name, type(value).__name__))
+        if parameters and not any(parameters.values()):
+            raise InputValidationError("At least one of %s must be true to remove a limit." % " or ".join("'%s'" % name for name in localities))
+        # True for a locality explicitly asked for, False for one only looked for since none was given
+        return {name: bool(parameters.get(name)) for name in localities if parameters.get(name, not parameters)}
+
+    def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
+        localities = "/".join(locality.value for locality in LimitLocality if locality.value in parameters)
+        return "%s limit on %s '%s'" % (localities, self.target_label, target)
+
+    def list_permissions(self, role: str, *, vo: Optional[str], session: "Session") -> list[dict[str, Any]]:
+        local, global_ = models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation
+        stmt = (
+            select(models.RSE.rse, local.bytes)
+            .select_from(local)
+            .join(models.RSE, models.RSE.id == local.rse_id)
+            .where(local.role == role, *([models.RSE.vo == vo] if vo else []))
+        )
+        limits = [{self.target_attribute: rse, LimitLocality.LOCAL.value: bytes_} for rse, bytes_ in session.execute(stmt).all()]
+
+        stmt = select(global_.rse_expression, global_.bytes).where(global_.role == role)
+        limits.extend({self.target_attribute: rse_expression, LimitLocality.GLOBAL.value: bytes_} for rse_expression, bytes_ in session.execute(stmt).all())
+        return sorted(limits, key=lambda limit: limit[self.target_attribute])
+
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> None:
+        rse_ids = _resolve_rse_ids(target, vo, session=session)
+        matched = len(rse_ids)
+        if LimitLocality.LOCAL.value in parameters:
+            if matched != 1:
+                raise InputValidationError("A local limit is set on a single RSE, but RSE expression '%s' matches %s. Set a local limit on each RSE%s."
+                                           % (target, "no RSE" if not matched else "%d RSEs" % matched, ", or a global limit on the expression" if matched else ""))
+            [rse_id] = rse_ids
+            session.merge(models.RoleLocalLimitPermissionAssociation(role=role, rse_id=rse_id, bytes=parameters[LimitLocality.LOCAL.value]))
+        else:
+            if matched < 2:
+                raise InputValidationError("A global limit caps the usage summed over several RSEs, but RSE expression '%s' matches %s.%s"
+                                           % (target, "no RSE" if not matched else "a single one", " Set a local limit on it instead." if matched else ""))
+            session.merge(models.RoleGlobalLimitPermissionAssociation(role=role, rse_expression=target, bytes=parameters[LimitLocality.GLOBAL.value]))
+
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> int:
+        local, global_ = models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation
+        removed = 0
+        if LimitLocality.LOCAL.value in parameters:
+            rse_ids = _resolve_rse_ids(target, vo, session=session)
+            if len(rse_ids) == 1:
+                removed += cast(Any, session.execute(delete(local).where(local.role == role, local.rse_id.in_(rse_ids)))).rowcount
+            elif parameters[LimitLocality.LOCAL.value]:
+                raise InputValidationError("A local limit is set on a single RSE, but RSE expression '%s' does not match exactly one." % target)
+        if LimitLocality.GLOBAL.value in parameters:
+            removed += cast(Any, session.execute(delete(global_).where(global_.role == role, global_.rse_expression == target))).rowcount
+        return removed
+
+
 # ----------------------------------------------------------------------------------------------
 # Role permissions
 # ----------------------------------------------------------------------------------------------
@@ -953,10 +1136,11 @@ def list_role_permissions(role: str, vo: Optional[str] = None, *, session: "Sess
 
     Each permission is given as its `type`, its target under the key its type names it by, and its
     parameters, in the shape it is granted with, see :func:`add_role_permission`: e.g. a 'scope_pattern'
-    and an 'operation' for a scope permission.
+    and an 'operation' for a scope permission, an 'rse_expression' and its 'local' or 'global' bytes
+    for a limit, a local limit being listed under the name of its RSE.
 
     :param role: The role whose permissions to list.
-    :param vo: Only list the permissions on the resources of this VO, of every VO if None, if their type tells them apart.
+    :param vo: Only list the local limits on the RSEs of this VO, or on those of every VO if None.
     :param session: The database session.
     :raises RoleNotFound: If the role does not exist.
     """
@@ -981,15 +1165,16 @@ def add_role_permission(
     Grant a role a permission of a type.
 
         add_role_permission(role, RolePermissionType.SCOPE, {'scope_pattern': 'data*', 'operation': 'read'}, session=session)
+        add_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': 'tier=1', 'global': 10**13}, session=session)
 
-    A scope permission which exists already is refused.
+    A scope permission which exists already is refused, a limit which exists already is overwritten.
 
     :param role: The role to grant the permission to.
     :param permission_type: The type of the permission, e.g. `RolePermissionType.SCOPE`.
     :param parameters: The target of the permission under the key its type names it by, e.g. 'scope_pattern',
                        and its parameters, see the `PermissionTypeHandler` of the type.
     :param force: Grant the permission even if the role is locked.
-    :param vo: The VO the target is resolved in, every VO if None, if its type needs one.
+    :param vo: The VO the RSE expression of a limit is resolved in, every VO if None.
     :param session: The database session.
     :raises InputValidationError: If the permission type, the target or a parameter is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
@@ -1030,15 +1215,16 @@ def delete_role_permission(
     Remove permissions of a type from a role.
 
         delete_role_permission(role, RolePermissionType.SCOPE, {'scope_pattern': 'data*', 'operation': 'read'}, session=session)
+        delete_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': 'tier=1', 'global': True}, session=session)
 
     :param role: The role to remove the permissions from.
     :param permission_type: The type of the permissions, e.g. `RolePermissionType.SCOPE`.
     :param parameters: The target of the permissions under the key its type names it by, e.g. 'scope_pattern',
                        and the parameters identifying them, see the `PermissionTypeHandler` of the type.
     :param force: Remove the permissions even if the role is locked.
-    :param vo: The VO the target is resolved in, every VO if None, if its type needs one.
+    :param vo: The VO the RSE expression of a local limit is resolved in, every VO if None.
     :param session: The database session.
-    :returns: The number of permissions removed.
+    :returns: The number of permissions removed, e.g. both the local and the global limit on an RSE expression.
     :raises InputValidationError: If the permission type, the target or a parameter is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RolePermissionNotFound: If the role does not have any such permission.
