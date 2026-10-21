@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional
 import click
 from tabulate import tabulate
 
-from rucio.cli.utils import OptionalDateTime, RoleOperations, RoleOperationType, format_operations, format_permission_tree, format_tree, wrap_table_column
+from rucio.cli.utils import OptionalDateTime, RoleOperations, ScopeOperationType, format_operations, format_permission_tree, format_tree, wrap_table_column
 from rucio.common.exception import Duplicate, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound
 
 if TYPE_CHECKING:
@@ -308,36 +308,11 @@ def account_remove(ctx: click.Context, role_name: str, account_name: str, force:
 
 @role.group()
 def permission() -> None:
-    """Manage permissions of a role."""
+    """Manage permissions of a role, of every type.
 
-
-def _matching_scopes(scope_pattern: str, known_scopes: list[str]) -> list[str]:
-    """Return the known scopes a wildcard scope pattern matches. Only a trailing '*' is accepted, as enforced server-side."""
-    prefix = scope_pattern[:-1]
-    return sorted(scope for scope in known_scopes if scope.startswith(prefix))
-
-
-def _confirm_scope_pattern(ctx: click.Context, scope_pattern: str, verb: str) -> bool:
-    """
-    Show the scopes a wildcard scope pattern currently matches and ask for confirmation.
-
-    Always True for a scope pattern without a wildcard, since it names a single scope and
-    there is nothing to expand or confirm.
-
-    :param verb: The action to ask confirmation for, e.g. 'add' or 'remove'.
-    :returns: True if the caller should proceed, False if the user declined.
-    """
-    if '*' not in scope_pattern:
-        return True
-
-    matches = _matching_scopes(scope_pattern, ctx.obj.client.list_scopes())
-    click.echo(f"The '{scope_pattern}' pattern currently matches the following scope(s):")
-    for scope in matches:
-        click.echo(f"  {scope}")
-    if not matches:
-        click.echo("  (none)")
-
-    return click.confirm(f"Do you still want to {verb} this permission?")
+    \b
+    Every permission type is managed the same way:
+      rucio role permission TYPE add|remove ROLE_NAME IDENTIFIER... [PARAMETERS]"""
 
 
 @permission.command("list")
@@ -372,67 +347,106 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
     click.echo(tabulate(rows, headers=["SCOPE PATTERN", "OPERATION(S)"], tablefmt=ctx.obj.tablefmt))
 
 
-@permission.command("add")
+# --- Scopes -----------------------------------------------------------------------------------
+
+def _matching_scopes(scope_pattern: str, known_scopes: list[str]) -> list[str]:
+    """Return the known scopes a wildcard scope pattern matches. Only a trailing '*' is accepted, as enforced server-side."""
+    prefix = scope_pattern[:-1]
+    return sorted(scope for scope in known_scopes if scope.startswith(prefix))
+
+
+def _confirm_scope_pattern(ctx: click.Context, scope_pattern: str, verb: str) -> bool:
+    """
+    Show the scopes a wildcard scope pattern currently matches and ask for confirmation.
+
+    Always True for a scope pattern without a wildcard, since it names a single scope and
+    there is nothing to expand or confirm.
+
+    :param verb: The action to ask confirmation for, e.g. 'add' or 'remove'.
+    :returns: True if the caller should proceed, False if the user declined.
+    """
+    if '*' not in scope_pattern:
+        return True
+
+    matches = _matching_scopes(scope_pattern, ctx.obj.client.list_scopes())
+    click.echo(f"The '{scope_pattern}' pattern currently matches the following scope(s):")
+    for scope in matches:
+        click.echo(f"  {scope}")
+    if not matches:
+        click.echo("  (none)")
+
+    return click.confirm(f"Do you still want to {verb} this permission?")
+
+
+@permission.group("scope")
+def permission_scope() -> None:
+    """Manage the operations a role grants on scopes."""
+
+
+@permission_scope.command("add")
 @click.argument("role_name")
+@click.argument("scope_patterns", metavar="SCOPE_PATTERN...", nargs=-1, required=True)
 @click.argument("operations", type=OPERATIONS)
-@click.argument("scope_pattern")
-@click.option("--force", is_flag=True, default=False, help="Add the permission even if the role is locked.")
+@click.option("--force", is_flag=True, default=False, help="Add the permissions even if the role is locked.")
 @click.pass_context
-def permission_add(ctx: click.Context, role_name: str, operations: list[RoleOperationType], scope_pattern: str, force: bool) -> None:
-    """Add OPERATIONS on SCOPE_PATTERN to ROLE_NAME.
+def scope_add(ctx: click.Context, role_name: str, scope_patterns: tuple[str, ...], operations: list[ScopeOperationType], force: bool) -> None:
+    """Add OPERATIONS on each SCOPE_PATTERN to ROLE_NAME.
 
-    OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'.
-
-    SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob."""
-    if not _confirm_scope_pattern(ctx, scope_pattern, "add"):
-        click.echo("Aborted, no permission was added.")
-        return
-    added, already_assigned = [], []
-    for op in operations:
-        try:
-            with _lock_hint(role_name):
-                ctx.obj.client.add_role_permission(role_name, op.value, scope_pattern, force=force)
-            added.append(op.value)
-        except Duplicate:
-            already_assigned.append(op.value)
-
-    if already_assigned:
-        click.echo(f"Warning: {'/'.join(already_assigned)} permission(s) on {scope_pattern} already assigned to role '{role_name}'.")
-    if added:
-        click.echo(f"Added {'/'.join(added)} permission(s) on {scope_pattern} to role '{role_name}'.")
-
-
-@permission.command("remove")
-@click.argument("role_name")
-@click.argument("operations", type=OPERATIONS)
-@click.argument("scope_pattern")
-@click.option("--force", is_flag=True, default=False, help="Remove the permission even if the role is locked.")
-@click.pass_context
-def permission_remove(ctx: click.Context, role_name: str, operations: list[RoleOperationType], scope_pattern: str, force: bool) -> None:
-    """Remove OPERATIONS on SCOPE_PATTERN from ROLE_NAME.
+    SCOPE_PATTERN only accepts a trailing '*' wildcard, e.g. 'data*' or '*' for every scope; quote it so the shell does not expand it as a glob.
 
     OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'."""
-    assigned = {
-        permission['operation']
-        for permission in ctx.obj.client.list_role_permissions(role_name)
-        if permission['scope_pattern'] == scope_pattern
-    }
-    if not any(op.value in assigned for op in operations):
-        raise RolePermissionNotFound(
-            f"None of the requested permissions ({'/'.join(op.value for op in operations)}) are assigned to role '{role_name}' on scope pattern '{scope_pattern}'.")
+    for scope_pattern in scope_patterns:
+        if not _confirm_scope_pattern(ctx, scope_pattern, "add"):
+            click.echo(f"Skipped scope pattern '{scope_pattern}', no permission was added on it.")
+            continue
 
-    if not _confirm_scope_pattern(ctx, scope_pattern, "remove"):
-        click.echo("Aborted, no permission was removed.")
-        return
+        added, already_assigned = [], []
+        for op in operations:
+            try:
+                with _lock_hint(role_name):
+                    ctx.obj.client.add_role_permission(role_name, 'scope', {'scope_pattern': scope_pattern, 'operation': op.value}, force=force)
+                added.append(op.value)
+            except Duplicate:
+                already_assigned.append(op.value)
 
-    removed, not_assigned = [], []
-    for op in operations:
-        try:
-            with _lock_hint(role_name):
-                ctx.obj.client.delete_role_permission(role_name, op.value, scope_pattern, force=force)
-            removed.append(op.value)
-        except RolePermissionNotFound:
-            not_assigned.append(op.value)
-    if not_assigned:
-        click.echo(f"Warning: {'/'.join(not_assigned)} permission(s) on {scope_pattern} were already not assigned to role '{role_name}'.")
-    click.echo(f"Removed {'/'.join(removed)} permission(s) on {scope_pattern} from role '{role_name}'.")
+        if already_assigned:
+            click.echo(f"Warning: {'/'.join(already_assigned)} permission(s) on {scope_pattern} already assigned to role '{role_name}'.")
+        if added:
+            click.echo(f"Added {'/'.join(added)} permission(s) on {scope_pattern} to role '{role_name}'.")
+
+
+@permission_scope.command("remove")
+@click.argument("role_name")
+@click.argument("scope_patterns", metavar="SCOPE_PATTERN...", nargs=-1, required=True)
+@click.argument("operations", type=OPERATIONS)
+@click.option("--force", is_flag=True, default=False, help="Remove the permissions even if the role is locked.")
+@click.pass_context
+def scope_remove(ctx: click.Context, role_name: str, scope_patterns: tuple[str, ...], operations: list[ScopeOperationType], force: bool) -> None:
+    """Remove OPERATIONS on each SCOPE_PATTERN from ROLE_NAME.
+
+    SCOPE_PATTERN must be given exactly as it was granted, see `rucio role permission list`.
+
+    OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'."""
+    permissions = ctx.obj.client.list_role_permissions(role_name)
+    for scope_pattern in scope_patterns:
+        assigned = {permission['operation'] for permission in permissions if permission.get('type') == 'scope' and permission['scope_pattern'] == scope_pattern}
+        if not any(op.value in assigned for op in operations):
+            raise RolePermissionNotFound(
+                f"None of the requested permissions ({'/'.join(op.value for op in operations)}) are assigned to role '{role_name}' on scope pattern '{scope_pattern}'.")
+
+    for scope_pattern in scope_patterns:
+        if not _confirm_scope_pattern(ctx, scope_pattern, "remove"):
+            click.echo(f"Skipped scope pattern '{scope_pattern}', no permission was removed from it.")
+            continue
+
+        removed, not_assigned = [], []
+        for op in operations:
+            try:
+                with _lock_hint(role_name):
+                    ctx.obj.client.delete_role_permission(role_name, 'scope', {'scope_pattern': scope_pattern, 'operation': op.value}, force=force)
+                removed.append(op.value)
+            except RolePermissionNotFound:
+                not_assigned.append(op.value)
+        if not_assigned:
+            click.echo(f"Warning: {'/'.join(not_assigned)} permission(s) on {scope_pattern} were already not assigned to role '{role_name}'.")
+        click.echo(f"Removed {'/'.join(removed)} permission(s) on {scope_pattern} from role '{role_name}'.")

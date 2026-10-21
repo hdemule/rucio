@@ -58,18 +58,18 @@ SUCCESS = 0
 FAILURE = 1
 
 
-# Client-side representation of the operations a role permission can grant.
-class RoleOperationType(Enum):
+# Client-side representation of the operations a scope permission can grant.
+class ScopeOperationType(Enum):
     READ = 'read'
     WRITE = 'write'
     DELETE = 'delete'
 
 
 # The letter shown for each operation, in the order the operations are rendered.
-OPERATION_LETTERS: dict[RoleOperationType, str] = {
-    RoleOperationType.READ: 'r',
-    RoleOperationType.WRITE: 'w',
-    RoleOperationType.DELETE: 'd',
+OPERATION_LETTERS: dict[ScopeOperationType, str] = {
+    ScopeOperationType.READ: 'r',
+    ScopeOperationType.WRITE: 'w',
+    ScopeOperationType.DELETE: 'd',
 }
 
 
@@ -425,14 +425,14 @@ class RoleOperations(click.ParamType):
     name = "operations"
     HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd', 'rwd' or 'read,write'"
 
-    def convert(self, value, param, ctx) -> list[RoleOperationType]:
+    def convert(self, value, param, ctx) -> list[ScopeOperationType]:
         """Turn a command line value into the requested operations, deduplicated and in canonical order."""
         if isinstance(value, list):
             return value
         by_letter = {letter: operation for operation, letter in OPERATION_LETTERS.items()}
-        by_name = {operation.value: operation for operation in RoleOperationType}
+        by_name = {operation.value: operation for operation in ScopeOperationType}
 
-        requested: set[RoleOperationType] = set()
+        requested: set[ScopeOperationType] = set()
         for token in value.lower().replace(' ', '').split(','):
             if token in by_name:
                 requested.add(by_name[token])
