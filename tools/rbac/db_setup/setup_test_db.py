@@ -20,8 +20,8 @@ Check, and optionally rebuild from scratch, everything the RBAC tests rely on.
 files, rules, transfer requests and roles (see the assumptions at the top of that file). This
 script runs inside the dev `rucio` container:
 
-    python tools/rbac_setup.py            # dry run: report what is present and what is missing
-    python tools/rbac_setup.py --reset    # DROP THE WHOLE DATABASE, then recreate everything
+    python tools/rbac/db_setup/setup_test_db.py            # dry run: report what is present and what is missing
+    python tools/rbac/db_setup/setup_test_db.py --reset    # DROP THE WHOLE DATABASE, then recreate everything
 
 --reset first runs a preflight check of everything it needs (policy package, source files,
 alembic head, ...) and stops before touching the database if any of it is missing. It then asks
@@ -43,7 +43,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# the root of the repository, this script being in tools/rbac/db_setup
+BASE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 sys.path.append(BASE_PATH)
 os.chdir(BASE_PATH)
 
@@ -55,7 +56,7 @@ from rucio.common.constants import DEFAULT_VO  # noqa: E402
 from rucio.common.exception import RucioException  # noqa: E402
 from rucio.common.types import InternalAccount, InternalScope  # noqa: E402
 from rucio.db.sqla import models  # noqa: E402
-from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RoleOperationType  # noqa: E402
+from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RolePermissionType, ScopeOperationType  # noqa: E402
 from rucio.db.sqla.session import db_session, get_engine  # noqa: E402
 
 POLICY_PACKAGE = 'rbac_rucio_policy_package'
@@ -221,7 +222,7 @@ def _model_enums() -> dict[str, set[str]]:
 
 
 def check_enums() -> Optional[str]:
-    """Compare the enum type each column uses in the database with the models, e.g. a RoleOperationType value added after the type was created."""
+    """Compare the enum type each column uses in the database with the models, e.g. a ScopeOperationType value added after the type was created."""
     if get_engine().dialect.name != 'postgresql':
         return None
     rows = _read(text(
@@ -349,8 +350,8 @@ def check_role(role: str) -> Optional[str]:
 
 def check_role_permissions(role: str, expected: set[tuple[str, str]]) -> Callable[[], Optional[str]]:
     def check() -> Optional[str]:
-        rows = _read(select(models.RolePermissionAssociation.operation, models.RolePermissionAssociation.scope_pattern).where(
-            models.RolePermissionAssociation.role == role))
+        rows = _read(select(models.RoleScopePermissionAssociation.operation, models.RoleScopePermissionAssociation.scope_pattern).where(
+            models.RoleScopePermissionAssociation.role == role))
         missing = expected - {(row[0].value, row[1]) for row in rows}
         if missing:
             return 'missing %s' % ', '.join('%s on %s' % permission for permission in sorted(missing))
@@ -574,7 +575,7 @@ def _provision_roles() -> None:
     with db_session(DatabaseOperationType.WRITE) as session:
         for role, (permissions, holders) in ROLES.items():
             for operation, scope_pattern in sorted(permissions):
-                role_core.add_role_permission(role, scope_pattern, RoleOperationType(operation), session=session)
+                role_core.add_role_permission(role, RolePermissionType.SCOPE, {'scope_pattern': scope_pattern, 'operation': ScopeOperationType(operation)}, session=session)
             for account in sorted(holders):
                 role_core.add_account_role(_account(account), role, session=session)
 
