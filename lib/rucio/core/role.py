@@ -19,11 +19,12 @@ The module is organised as follows:
 
 - Roles: create, update, delete and list roles, including the reserved ones, see `RESERVED_ROLES`.
 - Account role assignments: which account holds which role, from when and until when.
-- Permission resources: the resource types a role can be granted permissions on. Each resource
-  type has its own `role_<resource>_permission_map` table, a :class:`PermissionRequest` describing
-  what is checked against it, and a :class:`ResourcePermissionHandler` registered for it.
-- Role permissions: grant, revoke and list the permissions of a role, on any resource type.
-- Permission checks: tell whether an account may perform a request, on any resource type,
+- Permission types: the types of the permissions a role can be granted, e.g. operations on scopes.
+  Each type has its own `role_<type>_permission_map` table(s) and a
+  :class:`PermissionTypeHandler` registered for it, and a :class:`PermissionRequest` describing what
+  is checked against it if it decides whether an account may perform an operation.
+- Role permissions: grant, remove and list the permissions of a role, of any type.
+- Permission checks: tell whether an account may perform a request, of any checked permission type,
   with :func:`has_permission` as the single entry point, and filter listings accordingly.
 - Synchronisation: of the roles with the policy package, and of an account's roles with an IdP.
 """
@@ -57,7 +58,7 @@ from rucio.core import permission
 from rucio.core.account import has_account_attribute
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import RolePermissionType, ScopeOperationType
+from rucio.db.sqla.constants import RolePermissionOperationType, RolePermissionType, ScopeOperationType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -150,20 +151,6 @@ def _ensure_expires_after_activation(activates_at: datetime, expires_at: Optiona
     """
     if expires_at is not None and expires_at <= activates_at:
         raise InputValidationError("'expires_at' (%s) must be after 'activates_at' (%s)." % (expires_at, activates_at))
-
-
-def _normalize_operation(operation: Union[ScopeOperationType, str]) -> ScopeOperationType:
-    """
-    Turn an operation given as a `ScopeOperationType` or as its value ('read', 'write', 'delete') into a `ScopeOperationType`.
-
-    :raises InputValidationError: If the operation is not a known one.
-    """
-    if isinstance(operation, ScopeOperationType):
-        return operation
-    try:
-        return ScopeOperationType(operation)
-    except ValueError:
-        raise InputValidationError("Operation '%s' is not supported, expected one of: %s." % (operation, ", ".join(op.value for op in ScopeOperationType)))
 
 
 def _assignment_active() -> "ColumnElement[bool]":
@@ -390,7 +377,7 @@ def _remove_accounts_from_role(role: str, *, session: "Session") -> int:
 
     `account_role_map.role` references `roles.role` with ON DELETE RESTRICT, so the account
     assignments are removed first. The permissions of the role go along with it, since the `role`
-    of every `role_<resource>_permission_map` table references `roles.role` with ON DELETE CASCADE.
+    of every `role_<type>_permission_map` table references `roles.role` with ON DELETE CASCADE.
 
     :param role: The role to delete.
     :param session: The database session.
@@ -613,76 +600,186 @@ def set_account_role_dates(
 
 
 # ----------------------------------------------------------------------------------------------
-# Permission resources
+# Permission types
 #
-# A role is granted permissions on resources of several types. Each resource type comes with:
+# A role is granted permissions of several types. A permission is made of its role, its type, its
+# target (e.g. a scope pattern) and the parameters of its type (e.g. the operation it grants on the
+# scopes the pattern matches). Each permission type comes with:
 #
 # - a `RolePermissionType` member;
-# - a `role_<resource>_permission_map` table holding `role`, `operation` and one target column
-#   (e.g. a scope pattern), which together form its primary key, and whose `role` references
-#   `roles.role` with ON DELETE CASCADE;
-# - a `PermissionRequest` subclass, naming the concrete resource an account asks to operate on;
-# - a `ResourcePermissionHandler` subclass, registered with `_register_permission_handler`,
-#   tying the two together.
+# - one or more `role_<type>_permission_map` tables, whose `role` references `roles.role` with
+#   ON DELETE CASCADE;
+# - a `PermissionTypeHandler` subclass, registered with `_register_permission_handler`, telling how
+#   its permissions are validated, granted, removed and listed.
 #
-# Nothing else in this module has to change to support a new resource type.
+# A permission type deciding whether an account may perform an operation on a resource (e.g. on a
+# scope) has a `CheckedPermissionTypeHandler`, together with a `PermissionRequest` subclass naming
+# the resource and the operations it grants, its own subclass of `RolePermissionOperationType`
+# (e.g. `ScopeOperationType` for scopes), see :func:`has_permission`. The other types are applied where they matter.
+#
+# Nothing else in this module has to change to support a new permission type.
 # ----------------------------------------------------------------------------------------------
+
+# the parameter of a permission granting an operation, see `CheckedPermissionTypeHandler`
+OPERATION = "operation"
+
+OperationT = TypeVar("OperationT", bound=RolePermissionOperationType)
+
+
+def _normalize_operation(operation: Union[OperationT, str], operation_type: type[OperationT], permission_type: RolePermissionType) -> OperationT:
+    """
+    Turn an operation given as a member of the operation type of a permission type, or as its value, into that member.
+
+    :param operation: The operation as supplied by the caller, e.g. `ScopeOperationType.READ` or 'read' for a scope permission.
+    :param operation_type: The operations the permission type grants, a subclass of `RolePermissionOperationType`.
+    :param permission_type: The permission type, for the error messages.
+    :raises InputValidationError: If the operation is not one the permission type grants.
+    """
+    if isinstance(operation, operation_type):
+        return operation
+    try:
+        return operation_type(operation)
+    except ValueError:
+        raise InputValidationError("Operation '%s' is not supported on a '%s' permission, expected one of: %s."
+                                   % (getattr(operation, "value", operation), permission_type.value, ", ".join(op.value for op in operation_type)))
+
 
 @dataclass(frozen=True)
 class PermissionRequest:
     """
     A request to perform an operation on a concrete resource, checked by :func:`has_permission`.
 
-    Each resource type subclasses it with the fields naming the resource and sets `resource_type`.
+    Each checked permission type subclasses it with the fields naming the resource, sets `permission_type`
+    and narrows `operation` to the operations of its handler, e.g. `ScopeOperationType` for scopes.
     A request is hashable, so that a decision on it can be cached, see :func:`permission_checker`.
     """
-    resource_type: ClassVar[RolePermissionType]
-    operation: ScopeOperationType
+    permission_type: ClassVar[RolePermissionType]
+    operation: RolePermissionOperationType
 
 
 RequestT = TypeVar("RequestT", bound=PermissionRequest)
 
 
-class ResourcePermissionHandler(Generic[RequestT]):
+class PermissionTypeHandler:
     """
-    Everything the generic permission functions need to know about one resource type.
+    Everything the generic permission functions need to know about one permission type.
 
-    A subclass names its table (`model`), the column of that table holding the target of a
-    permission (`target_attribute`) and the request checked against it (`request_type`), and
-    implements :meth:`matches`. The other methods have defaults which suit most resource types.
+    A subclass names the parameter holding the target of a permission (`target_attribute`) and its
+    tables (`tables`), and implements how a permission is validated, granted, removed and listed.
+    The methods writing to the database do not commit.
     """
-    resource_type: ClassVar[RolePermissionType]
-    # the `role_<resource>_permission_map` model
-    model: ClassVar[Any]
-    request_type: ClassVar[type[PermissionRequest]]
-    # the column holding the target of a permission, also the key of the target in a listing
+    permission_type: ClassVar[RolePermissionType]
+    # the parameter holding the target of a permission, also its key in a listing
     target_attribute: ClassVar[str]
     # how the target is called in messages
     target_label: ClassVar[str]
+    # the `role_<type>_permission_map` models
+    tables: ClassVar[tuple[Any, ...]]
+
+    def normalize_target(self, target: Any, *, session: "Session") -> Any:
+        """
+        Validate a target given when granting or removing a permission, and turn it into what is stored.
+
+        :raises InputValidationError: If the target is not valid for this permission type.
+        """
+        return target
+
+    def normalize_parameters(self, parameters: "Mapping[str, Any]", *, removing: bool) -> dict[str, Any]:
+        """
+        Validate the parameters given, besides the target, when granting a permission, or when `removing` one.
+
+        :raises InputValidationError: If a parameter is missing, unknown or not valid.
+        """
+        raise NotImplementedError
+
+    def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
+        """Render a permission for a message, e.g. "'read' permission on scope pattern 'data*'"."""
+        raise NotImplementedError
+
+    def list_permissions(self, role: str, *, vo: Optional[str], session: "Session") -> list[dict[str, Any]]:
+        """List the permissions of this type of a role, each with its target under `target_attribute` and its parameters."""
+        raise NotImplementedError
+
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> None:
+        """Grant a permission to a role, see :func:`add_role_permission`."""
+        raise NotImplementedError
+
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> int:
+        """Remove permissions from a role, see :func:`delete_role_permission`, and tell how many were removed."""
+        raise NotImplementedError
+
+
+class CheckedPermissionTypeHandler(PermissionTypeHandler, Generic[RequestT]):
+    """
+    A permission type granting operations on a resource, checked against a :class:`PermissionRequest`, see :func:`has_permission`.
+
+    Its permissions are stored in a single table (`model`) holding `role`, `operation` and the target
+    column named by `target_attribute`, which together form its primary key: a permission is
+    identified by its target and its `operation`, its only parameter. A subclass names its request
+    (`request_type`) and the operations it grants (`operation_type`), its own subclass of
+    `RolePermissionOperationType`, and implements :meth:`matches`.
+    """
+    # the `role_<type>_permission_map` model
+    model: ClassVar[Any]
+    request_type: ClassVar[type[PermissionRequest]]
+    # the operations this permission type grants, e.g. `ScopeOperationType`
+    operation_type: ClassVar[type[RolePermissionOperationType]]
 
     @property
     def target_column(self) -> "InstrumentedAttribute[Any]":
         """The column of `model` holding the target of a permission."""
         return getattr(self.model, self.target_attribute)
 
-    @property
-    def constraint_prefix(self) -> str:
-        """The prefix of the names of the constraints of `model`, e.g. 'ROLE_SCOPE_PERMISSION_MAP'."""
-        return self.model.__tablename__.upper()
+    def normalize_parameters(self, parameters: "Mapping[str, Any]", *, removing: bool) -> dict[str, Any]:
+        unknown = sorted(set(parameters) - {OPERATION})
+        if unknown:
+            raise InputValidationError("Parameter(s) %s not supported on a '%s' permission, expected: %s."
+                                       % (", ".join(unknown), self.permission_type.value, OPERATION))
+        if parameters.get(OPERATION) is None:
+            raise InputValidationError("'%s' must be given for a '%s' permission." % (OPERATION, self.permission_type.value))
+        return {OPERATION: _normalize_operation(parameters[OPERATION], self.operation_type, self.permission_type)}
 
-    def normalize_target(self, target: Any, *, session: "Session") -> Any:
+    def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
+        return "'%s' permission on %s '%s'" % (parameters[OPERATION].value, self.target_label, target)
+
+    def list_permissions(self, role: str, *, vo: Optional[str], session: "Session") -> list[dict[str, Any]]:
+        stmt = (
+            select(self.target_column, self.model.operation)
+            .where(self.model.role == role)
+            .order_by(self.target_column, self.model.operation)
+        )
+        return [{self.target_attribute: target, OPERATION: operation.value} for target, operation in session.execute(stmt).all()]
+
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> None:
+        session.add(self.model(role=role, operation=parameters[OPERATION], **{self.target_attribute: target}))
+
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> int:
+        stmt = delete(self.model).where(
+            self.model.role == role,
+            self.target_column == target,
+            self.model.operation == parameters[OPERATION],
+        )
+        return cast(Any, session.execute(stmt)).rowcount
+
+    def granted_targets(self, account: "InternalAccount", operation: RolePermissionOperationType, *, session: "Session") -> list[Any]:
         """
-        Validate a target given when granting or revoking a permission, and turn it into what is stored.
+        List the targets on which the account's roles grant an operation.
 
-        :raises InputValidationError: If the target is not valid for this resource type.
+        Role assignments which are not active, i.e. whose `activates_at` is in the future or whose `expires_at` is in the past, are ignored.
         """
-        return target
+        stmt = (
+            select(self.target_column)
+            .select_from(models.AccountRoleAssociation)
+            .join(self.model, self.model.role == models.AccountRoleAssociation.role)
+            .where(
+                models.AccountRoleAssociation.account == account,
+                self.model.operation == operation,
+                _assignment_active(),
+            )
+        )
+        return list(session.execute(stmt).scalars())
 
-    def describe_target(self, target: Any, *, session: "Session") -> str:
-        """Render a stored target for a listing or a message."""
-        return str(target)
-
-    def matches(self, request: RequestT, target: Any) -> bool:
+    def matches(self, request: RequestT, target: Any, *, session: "Session") -> bool:
         """Tell whether a stored target covers the resource of the request."""
         raise NotImplementedError
 
@@ -700,39 +797,41 @@ class ResourcePermissionHandler(Generic[RequestT]):
         return False
 
 
-_PERMISSION_HANDLERS: dict[RolePermissionType, ResourcePermissionHandler[Any]] = {}
+_PERMISSION_HANDLERS: dict[RolePermissionType, PermissionTypeHandler] = {}
 
 
-def _register_permission_handler(handler_class: "type[ResourcePermissionHandler[Any]]") -> "type[ResourcePermissionHandler[Any]]":
-    """Class decorator registering the handler of a resource type, see :class:`ResourcePermissionHandler`."""
-    _PERMISSION_HANDLERS[handler_class.resource_type] = handler_class()
+def _register_permission_handler(handler_class: "type[PermissionTypeHandler]") -> "type[PermissionTypeHandler]":
+    """Class decorator registering the handler of a permission type, see :class:`PermissionTypeHandler`."""
+    _PERMISSION_HANDLERS[handler_class.permission_type] = handler_class()
     return handler_class
 
 
-def _permission_handler(resource_type: Optional[Union[RolePermissionType, str]]) -> ResourcePermissionHandler[Any]:
+def _permission_handler(permission_type: Optional[Union[RolePermissionType, str]]) -> PermissionTypeHandler:
     """
-    Find the handler of a resource type, given as a `RolePermissionType` or as its value (e.g. 'scope').
+    Find the handler of a permission type, given as a `RolePermissionType` or as its value (e.g. 'scope').
 
-    :raises InputValidationError: If no handler is registered for the resource type.
+    :raises InputValidationError: If no handler is registered for the permission type.
     """
     try:
-        return _PERMISSION_HANDLERS[RolePermissionType(resource_type)]
+        return _PERMISSION_HANDLERS[RolePermissionType(permission_type)]
     except (ValueError, KeyError):
-        raise InputValidationError("Resource type '%s' is not supported, expected one of: %s."
-                                   % (getattr(resource_type, "value", resource_type), ", ".join(sorted(t.value for t in _PERMISSION_HANDLERS))))
+        raise InputValidationError("Permission type '%s' is not supported, expected one of: %s."
+                                   % (getattr(permission_type, "value", permission_type), ", ".join(sorted(t.value for t in _PERMISSION_HANDLERS))))
 
 
-def _request_handler(request: PermissionRequest) -> ResourcePermissionHandler[Any]:
+def _request_handler(request: PermissionRequest) -> CheckedPermissionTypeHandler[Any]:
     """
     Find the handler a permission request is checked by.
 
-    :raises InputValidationError: If the request is not one of a registered resource type, or its operation is not a `ScopeOperationType`.
+    :raises InputValidationError: If the request is not one of a registered permission type which is checked against requests.
     """
-    handler = _permission_handler(getattr(type(request), "resource_type", None))
+    handler = _permission_handler(getattr(type(request), "permission_type", None))
+    if not isinstance(handler, CheckedPermissionTypeHandler):
+        raise InputValidationError("'%s' permissions are not checked against requests." % handler.permission_type.value)
     if not isinstance(request, handler.request_type):
-        raise InputValidationError("A '%s' request must be a %s, got '%s'." % (handler.resource_type.value, handler.request_type.__name__, type(request).__name__))
-    if not isinstance(request.operation, ScopeOperationType):
-        raise InputValidationError("The operation of a permission request must be a ScopeOperationType, got '%s'." % type(request.operation).__name__)
+        raise InputValidationError("A '%s' request must be a %s, got '%s'." % (handler.permission_type.value, handler.request_type.__name__, type(request).__name__))
+    if not isinstance(request.operation, handler.operation_type):
+        raise InputValidationError("A '%s' request must ask for a %s, got '%s'." % (handler.permission_type.value, handler.operation_type.__name__, request.operation))
     return handler
 
 
@@ -792,27 +891,30 @@ def _scope_pattern_matches(scope: "InternalScope", scope_pattern: str) -> bool:
 @dataclass(frozen=True)
 class ScopePermissionRequest(PermissionRequest):
     """A request to perform `operation` on the content of `scope`."""
-    resource_type: ClassVar[RolePermissionType] = RolePermissionType.SCOPE
+    permission_type: ClassVar[RolePermissionType] = RolePermissionType.SCOPE
+    operation: ScopeOperationType
     scope: InternalScope
 
 
 @_register_permission_handler
-class ScopePermissionHandler(ResourcePermissionHandler[ScopePermissionRequest]):
+class ScopePermissionHandler(CheckedPermissionTypeHandler[ScopePermissionRequest]):
     """
-    Permissions on scopes, granted on scope patterns, see :func:`_validate_scope_pattern`.
+    Operations on scopes, granted on scope patterns, see :func:`_validate_scope_pattern`.
 
-    The owner of a scope may perform any operation on it without holding any role.
+    The operations are those of `ScopeOperationType`: 'read', 'write' and 'delete'. The owner of a scope may perform any operation on it without holding any role.
     """
-    resource_type = RolePermissionType.SCOPE
+    permission_type = RolePermissionType.SCOPE
     model = models.RoleScopePermissionAssociation
+    tables = (models.RoleScopePermissionAssociation,)
     request_type = ScopePermissionRequest
+    operation_type = ScopeOperationType
     target_attribute = "scope_pattern"
     target_label = "scope pattern"
 
     def normalize_target(self, target: Any, *, session: "Session") -> str:
         return _validate_scope_pattern(target)
 
-    def matches(self, request: ScopePermissionRequest, target: str) -> bool:
+    def matches(self, request: ScopePermissionRequest, target: str, *, session: "Session") -> bool:
         return _scope_pattern_matches(request.scope, target)
 
     def implicit_access(self, account: "InternalAccount", request: ScopePermissionRequest, *, session: "Session") -> bool:
@@ -827,139 +929,140 @@ class ScopePermissionHandler(ResourcePermissionHandler[ScopePermissionRequest]):
 # Role permissions
 # ----------------------------------------------------------------------------------------------
 
-def list_role_permissions(role: str, session: "Session") -> list[dict[str, str]]:
+def _split_target(handler: PermissionTypeHandler, parameters: "Mapping[str, Any]") -> tuple[Any, dict[str, Any]]:
     """
-    List the permissions granted to a role, over every resource type.
+    Take the target of a permission out of its parameters.
 
-    Each permission is given as its `resource_type`, its `operation` and its target, the latter
-    under the key the resource type names it by (e.g. 'scope_pattern' for a scope).
+    :returns: The target, and the other parameters.
+    :raises InputValidationError: If the target is not given.
+    """
+    parameters = dict(parameters)
+    if handler.target_attribute not in parameters:
+        raise InputValidationError("'%s' must be given for a '%s' permission." % (handler.target_attribute, handler.permission_type.value))
+    return parameters.pop(handler.target_attribute), parameters
 
+
+def _violates_table_constraint(error: IntegrityError, handler: PermissionTypeHandler, suffix: str) -> bool:
+    """Tell whether the IntegrityError comes from the constraint of one of the tables of a permission type, e.g. its '_PK'."""
+    return any(_violates_constraint(error, "%s_%s" % (table.__tablename__.upper(), suffix)) for table in handler.tables)
+
+
+def list_role_permissions(role: str, vo: Optional[str] = None, *, session: "Session") -> list[dict[str, Any]]:
+    """
+    List the permissions granted to a role, of every type.
+
+    Each permission is given as its `type`, its target under the key its type names it by, and its
+    parameters, in the shape it is granted with, see :func:`add_role_permission`: e.g. a 'scope_pattern'
+    and an 'operation' for a scope permission.
+
+    :param role: The role whose permissions to list.
+    :param vo: Only list the permissions on the resources of this VO, of every VO if None, if their type tells them apart.
+    :param session: The database session.
     :raises RoleNotFound: If the role does not exist.
     """
     _ensure_role_exists(role, session)
 
-    permissions = []
-    for resource_type, handler in _PERMISSION_HANDLERS.items():
-        stmt = (
-            select(handler.target_column, handler.model.operation)
-            .where(handler.model.role == role)
-            .order_by(handler.target_column, handler.model.operation)
-        )
-        permissions.extend(
-            {"resource_type": resource_type.value, "operation": operation.value, handler.target_attribute: handler.describe_target(target, session=session)}
-            for target, operation in session.execute(stmt).all()
-        )
-    return permissions
+    return [
+        {"type": permission_type.value, **permission}
+        for permission_type, handler in _PERMISSION_HANDLERS.items()
+        for permission in handler.list_permissions(role, vo=vo, session=session)
+    ]
 
 
 def add_role_permission(
         role: str,
-        resource_type: Union[RolePermissionType, str],
-        target: Any,
-        operation: Union[ScopeOperationType, str],
+        permission_type: Union[RolePermissionType, str],
+        parameters: "Mapping[str, Any]",
         force: bool = False,
         *,
+        vo: Optional[str] = None,
         session: "Session") -> None:
     """
-    Grant a role a permission to perform an operation on a target of a resource type.
+    Grant a role a permission of a type.
+
+        add_role_permission(role, RolePermissionType.SCOPE, {'scope_pattern': 'data*', 'operation': 'read'}, session=session)
+
+    A scope permission which exists already is refused.
 
     :param role: The role to grant the permission to.
-    :param resource_type: The resource type of the target, e.g. `RolePermissionType.SCOPE`.
-    :param target: What the permission is granted on, as the resource type expects it, e.g. a scope pattern.
-    :param operation: The operation to grant.
+    :param permission_type: The type of the permission, e.g. `RolePermissionType.SCOPE`.
+    :param parameters: The target of the permission under the key its type names it by, e.g. 'scope_pattern',
+                       and its parameters, see the `PermissionTypeHandler` of the type.
     :param force: Grant the permission even if the role is locked.
+    :param vo: The VO the target is resolved in, every VO if None, if its type needs one.
     :param session: The database session.
-    :raises InputValidationError: If the resource type, the target or the operation is not valid.
+    :raises InputValidationError: If the permission type, the target or a parameter is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RoleNotFound: If the role does not exist.
-    :raises Duplicate: If the role already has that permission.
+    :raises Duplicate: If the role already has that permission, and its type refuses it.
     :raises RoleReserved: If the role is reserved, whether or not `force` is given.
     """
-    handler = _permission_handler(resource_type)
-    operation = _normalize_operation(operation)
+    handler = _permission_handler(permission_type)
+    target, parameters = _split_target(handler, parameters)
     target = handler.normalize_target(target, session=session)
+    parameters = handler.normalize_parameters(parameters, removing=False)
     if is_reserved_role(role):
         raise RoleReserved("Role '%s' is reserved, so no permission can be granted to it." % role)
     _ensure_unlocked(role, force, session)
 
-    session.add(handler.model(role=role, operation=operation, **{handler.target_attribute: target}))
     try:
+        handler.add(role, target, parameters, vo=vo, session=session)
         session.commit()
     except IntegrityError as error:
         session.rollback()
-        described = "%s '%s'" % (handler.target_label, handler.describe_target(target, session=session))
-        if _violates_constraint(error, "%s_ROLE_FK" % handler.constraint_prefix):
+        described = handler.describe(target, parameters)
+        if _violates_table_constraint(error, handler, "ROLE_FK"):
             raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, "%s_PK" % handler.constraint_prefix):
-            raise Duplicate("Role '%s' already has '%s' permission on %s." % (role, operation.value, described))
-        raise Duplicate("Either role '%s' does not exist, or it already has '%s' permission on %s." % (role, operation.value, described))
+        if _violates_table_constraint(error, handler, "PK"):
+            raise Duplicate("Role '%s' already has %s." % (role, described))
+        raise Duplicate("Either role '%s' does not exist, or it already has %s." % (role, described))
 
 
 def delete_role_permission(
         role: str,
-        resource_type: Union[RolePermissionType, str],
-        target: Any,
-        operation: Union[ScopeOperationType, str],
+        permission_type: Union[RolePermissionType, str],
+        parameters: "Mapping[str, Any]",
         force: bool = False,
         *,
-        session: "Session") -> None:
+        vo: Optional[str] = None,
+        session: "Session") -> int:
     """
-    Remove a permission from a role.
+    Remove permissions of a type from a role.
 
-    :param role: The role to remove the permission from.
-    :param resource_type: The resource type of the target, e.g. `RolePermissionType.SCOPE`.
-    :param target: What the permission was granted on, as the resource type expects it, e.g. a scope pattern.
-    :param operation: The operation of the permission.
-    :param force: Remove the permission even if the role is locked.
+        delete_role_permission(role, RolePermissionType.SCOPE, {'scope_pattern': 'data*', 'operation': 'read'}, session=session)
+
+    :param role: The role to remove the permissions from.
+    :param permission_type: The type of the permissions, e.g. `RolePermissionType.SCOPE`.
+    :param parameters: The target of the permissions under the key its type names it by, e.g. 'scope_pattern',
+                       and the parameters identifying them, see the `PermissionTypeHandler` of the type.
+    :param force: Remove the permissions even if the role is locked.
+    :param vo: The VO the target is resolved in, every VO if None, if its type needs one.
     :param session: The database session.
-    :raises InputValidationError: If the resource type, the target or the operation is not valid.
+    :returns: The number of permissions removed.
+    :raises InputValidationError: If the permission type, the target or a parameter is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
-    :raises RolePermissionNotFound: If the role does not have that permission.
+    :raises RolePermissionNotFound: If the role does not have any such permission.
     :raises RoleReserved: If the role is reserved, whether or not `force` is given.
     """
-    handler = _permission_handler(resource_type)
-    operation = _normalize_operation(operation)
+    handler = _permission_handler(permission_type)
+    target, parameters = _split_target(handler, parameters)
     target = handler.normalize_target(target, session=session)
+    parameters = handler.normalize_parameters(parameters, removing=True)
     if is_reserved_role(role):
         raise RoleReserved("Role '%s' is reserved, so no permission can be removed from it." % role)
     _ensure_unlocked(role, force, session)
 
-    stmt = select(handler.model).where(
-        handler.model.role == role,
-        handler.target_column == target,
-        handler.model.operation == operation,
-    )
-    mapping = session.execute(stmt).scalar_one_or_none()
-    if mapping is None:
-        raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have '%s' permission on %s '%s'."
-                                     % (role, operation.value, handler.target_label, handler.describe_target(target, session=session)))
-
-    session.delete(mapping)
+    removed = handler.remove(role, target, parameters, vo=vo, session=session)
+    if not removed:
+        session.rollback()
+        raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have %s." % (role, handler.describe(target, parameters)))
     session.commit()
+    return removed
 
 
 # ----------------------------------------------------------------------------------------------
 # Permission checks
 # ----------------------------------------------------------------------------------------------
-
-def _granted_targets(account: "InternalAccount", handler: ResourcePermissionHandler[Any], operation: ScopeOperationType, session: "Session") -> list[Any]:
-    """
-    List the targets of one resource type on which the account's roles grant an operation.
-
-    Role assignments which are not active, i.e. whose `activates_at` is in the future or whose `expires_at` is in the past, are ignored.
-    """
-    stmt = (
-        select(handler.target_column)
-        .select_from(models.AccountRoleAssociation)
-        .join(handler.model, handler.model.role == models.AccountRoleAssociation.role)
-        .where(
-            models.AccountRoleAssociation.account == account,
-            handler.model.operation == operation,
-            _assignment_active(),
-        )
-    )
-    return list(session.execute(stmt).scalars())
-
 
 def has_role_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
     """
@@ -968,22 +1071,22 @@ def has_role_permission(account: "InternalAccount", request: PermissionRequest, 
     At least one permission covering the request must come from a role assignment which is active:
     activated already and not expired yet. Neither admin/root privileges nor implicit access (e.g. scope ownership) are
     considered here, see :func:`has_permission` for that. If RBAC is disabled, the RBAC tables are not looked at and the
-    request is decided by its resource type instead, see :meth:`ResourcePermissionHandler.access_without_rbac`.
+    request is decided by its permission type instead, see :meth:`CheckedPermissionTypeHandler.access_without_rbac`.
 
     :param account: The account to check.
     :param request: What the account asks to do, e.g. a :class:`ScopePermissionRequest`.
     :param session: The database session.
-    :raises InputValidationError: If the request is not one of a registered resource type.
+    :raises InputValidationError: If the request is not one of a registered permission type checked against requests.
     """
     handler = _request_handler(request)
     if not is_rbac_enabled():
         return handler.access_without_rbac(request)
-    return any(handler.matches(request, target) for target in _granted_targets(account, handler, request.operation, session))
+    return any(handler.matches(request, target, session=session) for target in handler.granted_targets(account, request.operation, session=session))
 
 
 def has_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
     """
-    Tell whether the account may perform the request, on any resource type.
+    Tell whether the account may perform the request, of any checked permission type.
 
     This is the single entry point of a permission check: an account may perform the request if
     it is root or admin, if it has implicit access to the resource (e.g. as the owner of a scope),
@@ -994,7 +1097,7 @@ def has_permission(account: "InternalAccount", request: PermissionRequest, *, se
     :param account: The account to check.
     :param request: What the account asks to do, e.g. a :class:`ScopePermissionRequest`.
     :param session: The database session.
-    :raises InputValidationError: If the request is not one of a registered resource type.
+    :raises InputValidationError: If the request is not one of a registered permission type checked against requests.
     """
     handler = _request_handler(request)
     if _is_root_or_admin(account, session):
@@ -1009,7 +1112,7 @@ def permission_checker(*, account: "InternalAccount", session: "Session") -> "Ca
     Build a callable telling whether the account may perform a request, as :func:`has_permission` does.
 
     This is meant for checking many requests in a row, e.g. to filter a listing: admin/root
-    privileges are looked up once, the targets granted by the account's roles once per resource type
+    privileges are looked up once, the targets granted by the account's roles once per permission type
     and operation, and each distinct request is decided once, for the lifetime of the callable.
 
     :param account: The account for which to check the requests.
@@ -1018,7 +1121,7 @@ def permission_checker(*, account: "InternalAccount", session: "Session") -> "Ca
     """
     privileged = _is_root_or_admin(account, session)
     rbac_enabled = is_rbac_enabled()
-    granted: dict[tuple[RolePermissionType, ScopeOperationType], list[Any]] = {}
+    granted: dict[tuple[RolePermissionType, RolePermissionOperationType], list[Any]] = {}
     decisions: dict[PermissionRequest, bool] = {}
 
     def _decide(request: PermissionRequest) -> bool:
@@ -1028,10 +1131,10 @@ def permission_checker(*, account: "InternalAccount", session: "Session") -> "Ca
         if not rbac_enabled:
             return handler.access_without_rbac(request)
 
-        key = (handler.resource_type, request.operation)
+        key = (handler.permission_type, request.operation)
         if key not in granted:
-            granted[key] = _granted_targets(account, handler, request.operation, session)
-        return any(handler.matches(request, target) for target in granted[key])
+            granted[key] = handler.granted_targets(account, request.operation, session=session)
+        return any(handler.matches(request, target, session=session) for target in granted[key])
 
     def _check(request: PermissionRequest) -> bool:
         if request not in decisions:

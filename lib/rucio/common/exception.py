@@ -1341,7 +1341,7 @@ class RolePermissionNotFound(RucioException):
     """
     def __init__(self, *args):
         super(RolePermissionNotFound, self).__init__(*args)
-        self._message = "The role does not have the specified permission on this scope."
+        self._message = "The role does not have the specified permission."
         self.error_code = 127
 
 
