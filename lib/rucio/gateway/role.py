@@ -4,11 +4,12 @@ from rucio.common.constants import DEFAULT_VO
 from rucio.common.exception import AccessDenied
 from rucio.common.types import InternalAccount
 from rucio.core import role as core_role
-from rucio.db.sqla.constants import DatabaseOperationType, RolePermissionType
+from rucio.db.sqla.constants import DatabaseOperationType
 from rucio.db.sqla.session import db_session
 from rucio.gateway.permission import has_permission
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
 
 
@@ -104,7 +105,7 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
             result['permissions'] = [
                 {'role': role['role'], **permission}
                 for role in roles
-                for permission in core_role.list_role_permissions(role=role['role'], session=session)
+                for permission in core_role.list_role_permissions(role=role['role'], vo=vo, session=session)
             ]
         result['account'] = account
         return result
@@ -271,56 +272,57 @@ def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_role_permissions', kwargs={'role': role}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot list permissions for role %s. Either the role does not exist or additional permissions are required.' % (issuer, role))
-        return core_role.list_role_permissions(role=role, session=session)
+        return core_role.list_role_permissions(role=role, vo=vo, session=session)
 
 
-def add_role_permission(role: str, operation: str, scope_pattern: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
+def add_role_permission(
+        role: str,
+        permission_type: str,
+        parameters: "Mapping[str, Any]",
+        issuer: str,
+        force: bool = False,
+        vo: str = DEFAULT_VO) -> None:
     """
-    Grant a role a permission on a scope pattern.
+    Grant a role a permission of a type, see :func:`rucio.core.role.add_role_permission`.
 
     :param role: The role to grant the permission to.
-    :param operation: The operation to grant.
-    :param scope_pattern: The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted.
+    :param permission_type: The type of the permission, e.g. 'scope'.
+    :param parameters: The target of the permission and its parameters: a 'scope_pattern', on which only a trailing '*'
+                       wildcard is accepted, and an 'operation' for a scope permission.
     :param issuer: The account issuing the command.
     :param force: Grant the permission even if the role is locked.
-    :param vo: The VO of the issuing account.
+    :param vo: The VO of the issuing account, in which the target of the permission is resolved if its type needs one.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
-        auth_result = has_permission(issuer=issuer, vo=vo, action='add_role_permission', kwargs={}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='add_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to add role permission for role %s.' % (issuer, role))
 
-        core_role.add_role_permission(
-            role=role,
-            resource_type=RolePermissionType.SCOPE,
-            target=scope_pattern,
-            operation=operation,
-            force=force,
-            session=session,
-        )
+        core_role.add_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, vo=vo, session=session)
 
 
-def delete_role_permission(role: str, operation: str, scope_pattern: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
+def delete_role_permission(
+        role: str,
+        permission_type: str,
+        parameters: "Mapping[str, Any]",
+        issuer: str,
+        force: bool = False,
+        vo: str = DEFAULT_VO) -> int:
     """
-    Remove a role's permission on a scope pattern.
+    Remove permissions of a type from a role, see :func:`rucio.core.role.delete_role_permission`.
 
-    :param role: The role to remove the permission from.
-    :param operation: The operation to remove.
-    :param scope_pattern: The scope pattern to remove the permission from.
+    :param role: The role to remove the permissions from.
+    :param permission_type: The type of the permissions, e.g. 'scope'.
+    :param parameters: The target of the permissions and the parameters identifying them: a 'scope_pattern' and an
+                       'operation' for a scope permission.
     :param issuer: The account issuing the command.
-    :param force: Remove the permission even if the role is locked.
-    :param vo: The VO of the issuing account.
+    :param force: Remove the permissions even if the role is locked.
+    :param vo: The VO of the issuing account, in which the target of the permissions is resolved if their type needs one.
+    :returns: The number of permissions removed.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
-        auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role_permission', kwargs={}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to delete role permission for role %s.' % (issuer, role))
 
-        core_role.delete_role_permission(
-            role=role,
-            resource_type=RolePermissionType.SCOPE,
-            target=scope_pattern,
-            operation=operation,
-            force=force,
-            session=session,
-        )
+        return core_role.delete_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, vo=vo, session=session)

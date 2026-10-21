@@ -132,12 +132,23 @@ class RolePermissions(ErrorHandlingMethodView):
             return generate_http_error_flask(404, error)
         return jsonify(permissions), 200
 
-    def post(self, role_name: str, operation: str, scope_pattern: str):
-        parameters = json_parameters(optional=True)
+
+class RolePermission(ErrorHandlingMethodView):
+    """
+    The permissions of one type of a role, e.g. `/roles/<role>/permissions/scope`.
+
+    The request body names the permission: its target and its parameters, in the shape the permissions
+    are listed with, together with `force`, e.g. {"scope_pattern": "data*", "operation": "read"} for a
+    scope permission.
+    """
+
+    def post(self, role_name: str, permission_type: str):
+        parameters = json_parameters()
         force = param_get(parameters, 'force', default=False)
 
         try:
-            add_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
+            add_role_permission(role=role_name, permission_type=permission_type, parameters=_permission_parameters(parameters),
+                                issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
         except (AccessDenied, RoleLocked, RoleReserved) as error:
             return generate_http_error_flask(403, error)
         except InputValidationError as error:
@@ -146,21 +157,27 @@ class RolePermissions(ErrorHandlingMethodView):
             return generate_http_error_flask(404, error)
         except Duplicate as error:
             return generate_http_error_flask(409, error)
-        return jsonify({"message": f"Permission '{operation}' on scope pattern '{scope_pattern}' successfully added to role '{role_name}'."}), 201
+        return jsonify({"message": f"Permission of type '{permission_type}' successfully added to role '{role_name}'."}), 201
 
-    def delete(self, role_name: str, operation: str, scope_pattern: str):
-        parameters = json_parameters(optional=True)
+    def delete(self, role_name: str, permission_type: str):
+        parameters = json_parameters()
         force = param_get(parameters, 'force', default=False)
 
         try:
-            delete_role_permission(role=role_name, operation=operation, scope_pattern=scope_pattern, issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
+            removed = delete_role_permission(role=role_name, permission_type=permission_type, parameters=_permission_parameters(parameters),
+                                             issuer=request.environ['issuer'], force=force, vo=request.environ['vo'])
         except (AccessDenied, RoleLocked, RoleReserved) as error:
             return generate_http_error_flask(403, error)
-        except RoleNotFound as error:
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
+        except (RoleNotFound, RolePermissionNotFound) as error:
             return generate_http_error_flask(404, error)
-        except RolePermissionNotFound as error:
-            return generate_http_error_flask(404, error)
-        return jsonify({"message": f"Permission '{operation}' on scope pattern '{scope_pattern}' successfully removed from role '{role_name}'."}), 200
+        return jsonify({"message": f"{removed} permission(s) of type '{permission_type}' successfully removed from role '{role_name}'.", "removed": removed}), 200
+
+
+def _permission_parameters(parameters: dict) -> dict:
+    """The target and the parameters of a permission given in a request body, i.e. everything but `force`; its type validates them."""
+    return {name: value for name, value in parameters.items() if name != 'force'}
 
 
 class RoleAccounts(ErrorHandlingMethodView):
@@ -345,7 +362,8 @@ def blueprint() -> AuthenticatedBlueprint:
     bp.add_url_rule("/<role_name>", view_func=role_list_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
     role_permissions_view = RolePermissions.as_view("role_permissions")
     bp.add_url_rule("/<role_name>/permissions", view_func=role_permissions_view, methods=[HTTPMethod.GET.value])
-    bp.add_url_rule("/<role_name>/permissions/<operation>/<scope_pattern>", view_func=role_permissions_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
+    role_permission_view = RolePermission.as_view("role_permission")
+    bp.add_url_rule("/<role_name>/permissions/<permission_type>", view_func=role_permission_view, methods=[HTTPMethod.POST.value, HTTPMethod.DELETE.value])
     role_accounts_view = RoleAccounts.as_view("role_accounts")
     bp.add_url_rule("/<role_name>/accounts", view_func=role_accounts_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule("/<role_name>/accounts/<account>", view_func=role_accounts_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
