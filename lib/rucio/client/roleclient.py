@@ -9,6 +9,7 @@ from rucio.common.constants import ISSUER_ACCOUNT_ALIAS, RBAC_WARNING_HEADER, HT
 from rucio.common.utils import build_url, render_json
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
 
 
@@ -171,7 +172,15 @@ class RoleClient(BaseClient):
         )
         raise exc_cls(exc_msg)
 
-    def list_role_permissions(self, role: str) -> list[dict[str, str]]:
+    def list_role_permissions(self, role: str) -> list[dict[str, Any]]:
+        """
+        List the permissions of a role, of every type.
+
+        Returns
+        -------
+            A list of dictionaries, one per permission, with its `type` and, in the shape it is granted with
+            (see `add_role_permission`): a `scope_pattern` and an `operation` for a 'scope' permission.
+        """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions")
         response = self._send_request(url, method=HTTPMethod.GET)
         if response.status_code == codes.ok:
@@ -355,46 +364,58 @@ class RoleClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
         raise exc_cls(exc_msg)
 
-    def add_role_permission(self, role: str, operation: str, scope_pattern: str, force: bool = False) -> None:
+    def add_role_permission(self, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool = False) -> None:
         """
-        Grant a role a permission on a scope pattern.
+        Grant a role a permission of a type.
 
         Parameters
         ----------
         role :
             The role to grant the permission to.
-        operation :
-            The operation to grant.
-        scope_pattern :
-            The scope pattern to grant the permission on; only a trailing '*' wildcard is accepted (e.g. '*' or 'data*').
+        permission_type :
+            The type of the permission, e.g. 'scope'.
+        parameters :
+            The target of the permission and its parameters, e.g.:
+
+            - {'scope_pattern': 'data*', 'operation': 'read'} for a 'scope' permission, only a trailing '*' wildcard
+              being accepted, and the operation being 'read', 'write' or 'delete'.
         force :
             Grant the permission even if the role is locked.
         """
-        path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions/{quote_plus(operation)}/{quote_plus(scope_pattern)}"
-        data = render_json(force=force) if force else None
-        response = self._send_request(build_url(choice(self.list_hosts), path=path), method=HTTPMethod.POST, data=data)
+        response = self._send_permission_request(HTTPMethod.POST, role, permission_type, parameters, force)
         if response.status_code != codes.created:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
 
-    def delete_role_permission(self, role: str, operation: str, scope_pattern: str, force: bool = False) -> None:
+    def delete_role_permission(self, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool = False) -> int:
         """
-        Remove a permission from a role.
+        Remove permissions of a type from a role.
 
         Parameters
         ----------
         role :
-            The role to remove the permission from.
-        operation :
-            The operation to remove.
-        scope_pattern :
-            The scope pattern to remove the permission from.
+            The role to remove the permissions from.
+        permission_type :
+            The type of the permissions, e.g. 'scope'.
+        parameters :
+            The target of the permissions and the parameters identifying them, e.g.:
+
+            - {'scope_pattern': 'data*', 'operation': 'read'} for a 'scope' permission.
         force :
-            Remove the permission even if the role is locked.
+            Remove the permissions even if the role is locked.
+
+        Returns
+        -------
+            The number of permissions removed.
         """
-        path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions/{quote_plus(operation)}/{quote_plus(scope_pattern)}"
-        data = render_json(force=force) if force else None
-        response = self._send_request(build_url(choice(self.list_hosts), path=path), method=HTTPMethod.DELETE, data=data)
-        if response.status_code != codes.ok:
-            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
-            raise exc_cls(exc_msg)
+        response = self._send_permission_request(HTTPMethod.DELETE, role, permission_type, parameters, force)
+        if response.status_code == codes.ok:
+            return response.json()['removed']
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def _send_permission_request(self, method: HTTPMethod, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool):
+        """Send a request on the permissions of a type of a role, naming the permission in the body."""
+        path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions/{quote_plus(permission_type)}"
+        data = render_json(**parameters, **({'force': force} if force else {}))
+        return self._send_request(build_url(choice(self.list_hosts), path=path), method=method, data=data)
