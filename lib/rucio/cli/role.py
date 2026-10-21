@@ -1,5 +1,6 @@
 import textwrap
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import click
@@ -10,6 +11,7 @@ from rucio.cli.utils import (
     QuotaSize,
     RoleOperations,
     ScopeOperationType,
+    SizeFormat,
     format_permission_trees,
     format_quota,
     format_sections,
@@ -17,11 +19,11 @@ from rucio.cli.utils import (
     permission_lines,
     wrap_table_column,
 )
-from rucio.common.exception import Duplicate, InvalidRSEExpression, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound, RSENotFound
+from rucio.common.exception import AccessDenied, AccountNotFound, Duplicate, InvalidRSEExpression, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound, RSENotFound
+from rucio.common.utils import str_to_date
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
-    from datetime import datetime
+    from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 
 
 OPERATIONS = RoleOperations()
@@ -58,23 +60,44 @@ def _lock_hint(role_name: str, action: str = "altered") -> 'Generator[None, None
         raise RoleLocked(f"Role '{role_name}' is locked, so it cannot be {action}. Add {forced}, or unlock it first with `rucio role update {role_name} -l false`.") from error
 
 
+def _holds(assignment: "Mapping[str, Any]") -> bool:
+    """
+    Tell whether a role assignment, as listed by the server, grants its role right now: activated already and not expired yet.
+
+    Only then is the account bound by the limits of the role, see `rucio role permission limit --help`.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    activates_at, expires_at = str_to_date(assignment.get('activates_at') or ''), str_to_date(assignment.get('expires_at') or '')
+    return (activates_at is None or activates_at <= now) and (expires_at is None or now < expires_at)
+
+
 def _role_label(role_name: str, reserved: bool) -> str:
     """The name of a role, tagged with `RESERVED_ROLE_TAG` if it is reserved."""
     return f"{role_name} {RESERVED_ROLE_TAG}" if reserved else role_name
 
 
-def _role_details(ctx: click.Context, roles: "Sequence[tuple[str, bool, Iterable[Mapping[str, Any]]]]") -> list[str]:
+def _role_details(
+        ctx: click.Context,
+        roles: "Sequence[tuple[str, bool, Iterable[Mapping[str, Any]]]]",
+        account_name: Optional[str] = None,
+        held: "Collection[str]" = (),
+) -> list[str]:
     """
     The label of each role followed by its permission tree, the trees being aligned with each other, see :func:`format_permission_trees`.
 
     A reserved role has no permissions, so its tag is explained instead of an empty permission tree.
 
     :param roles: The roles, as their name, whether they are reserved, and their permissions as listed by the server.
+    :param account_name: The account to measure the limits against, see :func:`_usage_resolver`. None to only list the limits.
+    :param held: The roles `account_name` holds, see :func:`_holds`: only their limits are measured, the others being
+                 limits the account is not bound by.
     :returns: The details, in the order of `roles`, each to be used as a single table cell.
     """
+    rse_names = _rse_names_resolver(ctx)
+    used = _usage_resolver(ctx, account_name, rse_names) if account_name is not None and held else None
     trees = iter(format_permission_trees(
-        [(_role_label(role_name, reserved), permissions) for role_name, reserved, permissions in roles if not reserved],
-        _rse_names_resolver(ctx), ctx.obj.human,
+        [(_role_label(role_name, reserved), permissions, used if role_name in held else None) for role_name, reserved, permissions in roles if not reserved],
+        rse_names, SizeFormat.of(ctx.obj.human),
     ))
     return [f"{_role_label(role_name, reserved)}\n{RESERVED_ROLE_DETAIL}" if reserved else next(trees) for role_name, reserved, _ in roles]
 
@@ -222,7 +245,7 @@ def account() -> None:
 @click.option("-a", "--account", "account_name", metavar="ACCOUNT", help="List the roles assigned to ACCOUNT.")
 @click.option("-r", "--role", "role_name", metavar="ROLE", help="List the accounts ROLE is assigned to.")
 @click.option("--me", is_flag=True, help="List the roles assigned to your own account.")
-@click.option("--detail", is_flag=True, help="Also list the permissions granted by each role. To be used with -a/--account or --me.")
+@click.option("--detail", is_flag=True, help="Also list the permissions granted by each role, each limit of a role the account holds with its usage measured against it. To be used with -a/--account or --me.")
 @click.pass_context
 def account_list(ctx: click.Context, account_name: Optional[str], role_name: Optional[str], me: bool, detail: bool) -> None:
     """
@@ -256,7 +279,10 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
             for permission in rbac['permissions']:
                 permissions_by_role.setdefault(permission['role'], []).append(permission)
 
-            role_cells = _role_details(ctx, [(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], [])) for entry in rbac['roles']])
+            role_cells = _role_details(
+                ctx, [(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], [])) for entry in rbac['roles']],
+                account_name=rbac['account'], held={entry['role'] for entry in rbac['roles'] if _holds(entry)},
+            )
             rows = [
                 [role_cell, str(entry.get('activates_at') or '-'), str(entry.get('expires_at') or '-'), entry.get('description') or '-']
                 for role_cell, entry in zip(role_cells, rbac['roles'])
@@ -341,18 +367,25 @@ def permission() -> None:
 
 @permission.command("list")
 @click.argument("role_name")
-@click.option("--detail", is_flag=True, help="Expand each wildcard scope pattern into the scopes it currently matches.")
+@click.option("--detail", is_flag=True, help="Expand each wildcard scope pattern into the scopes it currently matches, and give the limits and their usage to the byte.")
 @click.pass_context
 def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
     """List permissions assigned to ROLE_NAME, one section per permission type.
 
-    A local limit is listed under the name of its RSE, a global limit under the RSEs its expression currently matches, one per line."""
-    lines = permission_lines(ctx.obj.client.list_role_permissions(role_name), ctx.obj.human)
+    A local limit is listed under the name of its RSE, a global limit under the RSEs its expression currently matches, one per line.
+    If you hold ROLE_NAME, each limit is listed with the usage of your account measured against it: like the account limits, each
+    account holding the role gets the whole limit for itself. Use `role account list -a ACCOUNT --detail` for that of another account."""
+    rbac = ctx.obj.client.list_account_roles(use_issuer_account=True)
+    account_name = rbac['account']
+    rse_names = _rse_names_resolver(ctx)
+    # the limits of a role the account does not hold do not bind it, its usage means nothing against them
+    holds_role = any(entry['role'] == role_name and _holds(entry) for entry in rbac['roles'])
+    used = _usage_resolver(ctx, account_name, rse_names) if holds_role else None
+    lines = permission_lines(ctx.obj.client.list_role_permissions(role_name), SizeFormat.of(ctx.obj.human, exact=detail), used)
 
     # only fetch the (potentially large) list of every scope if a pattern actually needs expanding
     needs_scopes = detail and any(permission_type == 'scope' and '*' in target for permission_type, target, _, _ in lines)
     known_scopes = ctx.obj.client.list_scopes() if needs_scopes else []
-    rse_names = _rse_names_resolver(ctx)
 
     scope_rows, limit_rows = [], []
     for permission_type, target, operations, limits in lines:
@@ -372,6 +405,8 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
         return
     click.echo(f"Permissions associated with role '{role_name}':")
     click.echo(format_sections(sections))
+    if limit_rows and used is not None:
+        click.echo(f"Limits measured against the usage of your account '{account_name}'.")
 
 
 # --- Scopes -----------------------------------------------------------------------------------
@@ -501,6 +536,27 @@ def _rse_names_resolver(ctx: click.Context) -> "Callable[[str], list[str]]":
     return _resolve
 
 
+def _usage_resolver(ctx: click.Context, account_name: str, rse_names: "Callable[[str], Sequence[str]]") -> "Optional[Callable[[str], int]]":
+    """
+    Give the bytes an account uses on the RSEs an RSE expression currently matches, summed over them, as a role limit on the expression measures it.
+
+    The usage of the account on every RSE is asked for once, the RSEs of each expression through `rse_names`.
+
+    :param account_name: The account whose usage to measure.
+    :param rse_names: Gives the names of the RSEs an RSE expression currently matches, see :func:`_rse_names_resolver`.
+    :returns: The resolver, or None if the usage of the account cannot be read, e.g. that of another account without the right to.
+    """
+    try:
+        usage = {entry['rse']: entry['bytes'] or 0 for entry in ctx.obj.client.get_local_account_usage(account_name)}
+    except (AccessDenied, AccountNotFound):
+        return None
+
+    def _resolve(rse_expression: str) -> int:
+        return sum(usage.get(rse, 0) for rse in rse_names(rse_expression))
+
+    return _resolve
+
+
 def _confirm_limit_add(ctx: click.Context, role_name: str, rse_expression: str, locality: str, bytes_: int, limits: "Mapping[str, Mapping[str, Any]]") -> bool:
     """
     Ask for confirmation if setting a limit overwrites one of the role with another value.
@@ -519,7 +575,7 @@ def _confirm_limit_add(ctx: click.Context, role_name: str, rse_expression: str, 
 
     click.echo(f"This overwrites the following limit of role '{role_name}':")
     for target, current in overwritten:
-        click.echo(f"  {locality} limit on {target}: {format_quota(current, ctx.obj.human)} -> {format_quota(bytes_, ctx.obj.human)}")
+        click.echo(f"  {locality} limit on {target}: {format_quota(current, SizeFormat.of(ctx.obj.human))} -> {format_quota(bytes_, SizeFormat.of(ctx.obj.human))}")
     return click.confirm("Do you still want to set this limit?")
 
 
@@ -562,7 +618,7 @@ def limit_add(ctx: click.Context, role_name: str, rse_expressions: tuple[str, ..
 
         with _lock_hint(role_name):
             ctx.obj.client.add_role_permission(role_name, 'limit', {'rse_expression': rse_expression, locality: bytes_}, force=force)
-        click.echo(f"Set {locality} limit of {format_quota(bytes_, ctx.obj.human)} on {rse_expression} for role '{role_name}'.")
+        click.echo(f"Set {locality} limit of {format_quota(bytes_, SizeFormat.of(ctx.obj.human))} on {rse_expression} for role '{role_name}'.")
         if bytes_ == 0:
             click.echo(f"Warning: a limit of 0 lets nothing be written on {rse_expression}"
                        + (", while it still takes precedence over the account limits there." if locality == 'local' else "."))
