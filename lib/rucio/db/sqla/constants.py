@@ -230,5 +230,10 @@ class ScopeOperationType(RolePermissionOperationType):
 
 
 class RolePermissionType(Enum):
-    """The types of the permissions a role can be granted, each stored in its own `role_<type>_permission_map` table(s)."""
+    """
+    The types of the permissions a role can be granted, each stored in its own `role_<type>_permission_map` table(s).
+
+    SCOPE grants operations on scopes, LIMIT the bytes an account may use on RSEs.
+    """
     SCOPE = 'scope'
+    LIMIT = 'limit'
