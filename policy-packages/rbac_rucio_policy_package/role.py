@@ -55,7 +55,7 @@
 roles = [
     {
         "name": "data-scientist",
-        "description": "Data scientist role with read access to data scope and archived content.",
+        "description": "Data scientist role with read/write access to scope atlas and read-only access to archived content. This role also includes predefined limits to a set of RSEs.",
         "disable-filters": [],
     },
     {
