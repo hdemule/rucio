@@ -30,6 +30,24 @@ RESERVED_KEYS = ['scope', 'name', 'account', 'did_type', 'is_open', 'monotonic',
 
 DEFAULT_VO = 'def'
 
+# Roles managed by Rucio itself, mapped to their description: they can only be created by
+# `rucio.core.role.setup_reserved_roles`, always locked and not assignable, and then never be
+# deleted nor altered, except for their assignable state.
+ADMIN_ROLE = 'admin'
+RESERVED_ROLES = {
+    ADMIN_ROLE: 'Rucio administrator.',
+}
+
+# Logged by the server and sent to the client, under `RBAC_WARNING_HEADER`, whenever a role endpoint is called while RBAC is disabled,
+# see `rucio.core.role.is_rbac_enabled`.
+RBAC_DISABLED_WARNING = ("Role-based access control is currently disabled in the current rucio instance. "
+"You can still manage roles but everything will work as in standard Rucio as long as you do not explicitly enable RBAC in the current instance configuration.")
+RBAC_WARNING_HEADER = 'X-Rucio-Warning'
+
+# Stands for the issuer's account in REST paths. It cannot collide with an account name,
+# since '@' is not allowed in those.
+ISSUER_ACCOUNT_ALIAS = '@me'
+
 DEFAULT_ACTIVITY = 'User Subscriptions'
 
 KEY_TYPES = ['ALL', 'COLLECTION', 'FILE', 'DERIVED']
