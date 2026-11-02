@@ -16,7 +16,7 @@ from random import shuffle, uniform
 from typing import TYPE_CHECKING, Optional
 
 from rucio.common.exception import InsufficientAccountLimit, InsufficientTargetRSEs, InvalidRuleWeight, RSEOverQuota
-from rucio.core.account import get_all_rse_usages_per_account, get_usage
+from rucio.core.account import get_all_rse_usages_per_account, get_usage, has_account_attribute
 from rucio.core.account_limit import get_global_account_limit, get_local_account_limit
 from rucio.core.rse import get_rse_limits, has_rse_attribute, list_rse_attributes
 from rucio.core.rse_counter import get_counter as get_rse_counter
@@ -83,8 +83,13 @@ class RSESelector:
             raise InsufficientTargetRSEs('Target RSE set not sufficient for number of copies. (%s copies requested, RSE set size %s)' % (self.copies, len(self.rses)))
 
         rses_with_enough_quota = []
-        # root and admins are exempt from quotas, see `rucio.core.role.is_admin`, which still relies on the 'admin' account attribute while RBAC is disabled
-        if account.external == 'root' or core_role.is_admin(account=account, session=session) or ignore_account_limit:
+        use_roles = core_role.is_rbac_enabled()
+        # admins are exempt from quotas: with RBAC, root and the holders of the admin role, otherwise the accounts with the 'admin' attribute
+        if use_roles:
+            is_admin = account.external == 'root' or core_role.has_admin_role(account=account, session=session)
+        else:
+            is_admin = has_account_attribute(account=account, key='admin', session=session)
+        if is_admin or ignore_account_limit:
             for rse in self.rses:
                 rse['quota_left'] = float('inf')
                 rse['space_left'] = float('inf')
@@ -92,7 +97,7 @@ class RSESelector:
         else:
             global_quota_limit = get_global_account_limit(account=account, session=session)
             all_rse_usages = {usage['rse_id']: usage['bytes'] for usage in get_all_rse_usages_per_account(account=account, session=session)}
-            role_quota_grants = core_role.list_account_rse_quota_grants(account=account, session=session)
+            role_quota_grants = core_role.list_account_rse_quota_grants(account=account, session=session) if use_roles else []
             for rse in self.rses:
                 if rse['mock_rse']:
                     rse['quota_left'] = float('inf')

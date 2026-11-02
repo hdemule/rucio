@@ -59,7 +59,6 @@ from rucio.common.exception import (
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
-from rucio.core.account import has_account_attribute
 from rucio.core.rse_expression_parser import parse_expression
 from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
@@ -81,6 +80,13 @@ KEEP: Any = object()
 # ----------------------------------------------------------------------------------------------
 
 def is_rbac_enabled() -> bool:
+    """
+    Tell whether RBAC is enabled in this instance.
+
+    This is the only function of this module reading the flag: every other one answers what the roles
+    grant, whether RBAC is enabled or not. Deciding whether that answer applies is up to the caller,
+    e.g. the permission policy, see :mod:`rucio.core.permission.generic`, or the gateway filtering a listing.
+    """
     return config_get_bool('rbac', 'enabled', raise_exception=False, default=False, check_config_table=True)
 
 
@@ -209,11 +215,6 @@ def _role_not_assignable(role: str, session: "Session") -> bool:
     """Tell whether a role is not assignable. False (also) for a role which does not exist."""
     stmt = select(models.Roles.assignable).where(models.Roles.role == role)
     return session.execute(stmt).scalar_one_or_none() is False
-
-
-def _is_root_or_admin(account: "InternalAccount", session: "Session") -> bool:
-    """Tell whether the account is root or an admin, see :func:`is_admin`, either of which grants it every permission."""
-    return account.external == "root" or is_admin(account=account, session=session)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -455,17 +456,15 @@ def has_account_valid_role(account: "InternalAccount", role: str, session: "Sess
     return session.execute(stmt).first() is not None
 
 
-def is_admin(account: "InternalAccount", *, session: "Session") -> bool:
+def has_admin_role(account: "InternalAccount", *, session: "Session") -> bool:
     """
-    Tell whether the account is an admin: it holds the reserved admin role through an assignment which is active,
-    or, if RBAC is disabled, it has the 'admin' account attribute, as in standard Rucio.
+    Tell whether the account holds the reserved admin role through an assignment which is active.
+
+    Without RBAC, admins are the accounts with the 'admin' account attribute instead: choosing between the two is up to the caller.
 
     :param account: The account to check.
     :param session: The database session.
     """
-    # Retro-compatibility: if RBAC is disabled, the 'admin' account attribute still grants admin privileges.
-    if not is_rbac_enabled():
-        return has_account_attribute(account=account, key='admin', session=session)
     return has_account_valid_role(account=account, role=ADMIN_ROLE, session=session)
 
 
@@ -657,7 +656,7 @@ class PermissionRequest:
 
     Each checked permission type subclasses it with the fields naming the resource, sets `permission_type`
     and narrows `operation` to the operations of its handler, e.g. `ScopeOperationType` for scopes.
-    A request is hashable, so that a decision on it can be cached, see :func:`permission_checker`.
+    A request is hashable, so that a decision on it can be cached, see :func:`_permission_checker`.
     """
     permission_type: ClassVar[RolePermissionType]
     operation: RolePermissionOperationType
@@ -793,15 +792,6 @@ class CheckedPermissionTypeHandler(PermissionTypeHandler, Generic[RequestT]):
         """Tell whether the account may perform the request without holding any role, e.g. as the owner of the resource."""
         return False
 
-    def access_without_rbac(self, request: RequestT) -> bool:
-        """
-        Tell whether the request is granted while RBAC is disabled, see :func:`is_rbac_enabled`.
-
-        No role grants anything then, so this stands for what Rucio grants without RBAC, besides
-        admin/root privileges and implicit access. Nothing by default.
-        """
-        return False
-
 
 _PERMISSION_HANDLERS: dict[RolePermissionType, PermissionTypeHandler] = {}
 
@@ -925,10 +915,6 @@ class ScopePermissionHandler(CheckedPermissionTypeHandler[ScopePermissionRequest
 
     def implicit_access(self, account: "InternalAccount", request: ScopePermissionRequest, *, session: "Session") -> bool:
         return is_scope_owner(scope=request.scope, account=account, session=session)
-
-    def access_without_rbac(self, request: ScopePermissionRequest) -> bool:
-        # without RBAC every scope may be read, while writing and deleting are left to admin/root privileges and scope ownership
-        return request.operation == ScopeOperationType.READ
 
 
 # --- Limits -----------------------------------------------------------------------------------
@@ -1253,33 +1239,15 @@ def delete_role_permission(
 # Permission checks
 # ----------------------------------------------------------------------------------------------
 
-def has_role_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
-    """
-    Tell whether the account's roles grant it the request, according to the RBAC tables only.
-
-    At least one permission covering the request must come from a role assignment which is active:
-    activated already and not expired yet. Neither admin/root privileges nor implicit access (e.g. scope ownership) are
-    considered here, see :func:`has_permission` for that. If RBAC is disabled, the RBAC tables are not looked at and the
-    request is decided by its permission type instead, see :meth:`CheckedPermissionTypeHandler.access_without_rbac`.
-
-    :param account: The account to check.
-    :param request: What the account asks to do, e.g. a :class:`ScopePermissionRequest`.
-    :param session: The database session.
-    :raises InputValidationError: If the request is not one of a registered permission type checked against requests.
-    """
-    handler = _request_handler(request)
-    if not is_rbac_enabled():
-        return handler.access_without_rbac(request)
-    return any(handler.matches(request, target, session=session) for target in handler.granted_targets(account, request.operation, session=session))
-
-
 def has_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
     """
-    Tell whether the account may perform the request, of any checked permission type.
+    Tell whether RBAC grants the account the request, of any checked permission type.
 
-    This is the single entry point of a permission check: an account may perform the request if
-    it is root or admin, if it has implicit access to the resource (e.g. as the owner of a scope),
-    or if one of its roles grants it, see :func:`has_role_permission`.
+    The account may perform the request if it has implicit access to the resource (e.g. as the owner of a scope),
+    or if one of its roles grants it through an assignment which is active: activated already and not expired yet.
+
+    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`, nor are root and admin privileges:
+    both are the permission policy's business, which checks them before asking RBAC, see :mod:`rucio.core.permission.generic`.
 
         has_permission(account, ScopePermissionRequest(operation=ScopeOperationType.READ, scope=scope), session=session)
 
@@ -1289,16 +1257,17 @@ def has_permission(account: "InternalAccount", request: PermissionRequest, *, se
     :raises InputValidationError: If the request is not one of a registered permission type checked against requests.
     """
     handler = _request_handler(request)
-    if _is_root_or_admin(account, session):
-        return True
     if handler.implicit_access(account, request, session=session):
         return True
-    return has_role_permission(account, request, session=session)
+    return any(handler.matches(request, target, session=session) for target in handler.granted_targets(account, request.operation, session=session))
 
 
-def permission_checker(*, account: "InternalAccount", session: "Session") -> "Callable[[PermissionRequest], bool]":
+def _permission_checker(*, account: "InternalAccount", session: "Session") -> "Callable[[PermissionRequest], bool]":
     """
-    Build a callable telling whether the account may perform a request, as :func:`has_permission` does.
+    Build a callable telling whether RBAC grants the account a request, as :func:`has_permission` does,
+    except that root and the holders of the admin role are granted every request: listings are filtered
+    here directly, not through the permission policy, so nothing else checks their privileges.
+    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`.
 
     This is meant for checking many requests in a row, e.g. to filter a listing: admin/root
     privileges are looked up once, the targets granted by the account's roles once per permission type
@@ -1308,8 +1277,7 @@ def permission_checker(*, account: "InternalAccount", session: "Session") -> "Ca
     :param session: The database session.
     :returns: A callable taking a request and returning True if the account may perform it.
     """
-    privileged = _is_root_or_admin(account, session)
-    rbac_enabled = is_rbac_enabled()
+    privileged = account.external == "root" or has_admin_role(account=account, session=session)
     granted: dict[tuple[RolePermissionType, RolePermissionOperationType], list[Any]] = {}
     decisions: dict[PermissionRequest, bool] = {}
 
@@ -1317,8 +1285,6 @@ def permission_checker(*, account: "InternalAccount", session: "Session") -> "Ca
         handler = _request_handler(request)
         if privileged or handler.implicit_access(account, request, session=session):
             return True
-        if not rbac_enabled:
-            return handler.access_without_rbac(request)
 
         key = (handler.permission_type, request.operation)
         if key not in granted:
@@ -1349,14 +1315,13 @@ def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session:
     never disables a filter, since the policy package cannot define it. The filters are documented
     in the role module of the policy package.
 
+    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`: without RBAC, the caller does not filter at all.
+
     :param account: The account the listing is filtered for.
     :param filter_name: The name of the filter, e.g. 'list_scopes'.
     :param session: The database session.
     :returns: True if the listing must not be filtered for the account.
     """
-    if not is_rbac_enabled():
-        return True
-
     if filter_name in permission.get_disabled_filters_for_all_accounts(vo=account.vo):
         return True
 
@@ -1388,7 +1353,7 @@ def scope_access_checker(
     skip_filtering: bool = False,
 ) -> "Callable[[Optional[InternalScope]], bool]":
     """
-    Build a callable telling whether the account may perform an operation on a given scope, see :func:`permission_checker`.
+    Build a callable telling whether the account may perform an operation on a given scope, see :func:`_permission_checker`.
 
     This is meant for responses where the scope is not stored under a single dictionary key
     (e.g. 'scope:name' strings or nested dictionaries), for which :func:`filter_iterable_by_scope_access` does not fit.
@@ -1399,10 +1364,10 @@ def scope_access_checker(
     :param skip_filtering: Grant access to every scope, without checking it, see :func:`is_filter_disabled`.
     :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused, unless `skip_filtering` is given.
     """
-    if skip_filtering or not is_rbac_enabled():
+    if skip_filtering:
         return lambda scope: True
 
-    check = permission_checker(account=account, session=session)
+    check = _permission_checker(account=account, session=session)
 
     def _can_access(scope: "Optional[InternalScope]") -> bool:
         if scope is None or not isinstance(scope, InternalScope):
@@ -1483,11 +1448,9 @@ def list_account_rse_quota_grants(account: "InternalAccount", *, session: "Sessi
 
     :param account: The account whose quotas to list.
     :param session: The database session.
-    :returns: The grants, see :func:`rse_quota_left` to apply them to an RSE. Empty if RBAC is disabled, so that only the account limits apply.
+    :returns: The grants, see :func:`rse_quota_left` to apply them to an RSE. Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`:
+              without RBAC, the caller does not apply them, so that only the account limits apply.
     """
-    if not is_rbac_enabled():
-        return []
-
     local, global_ = models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation
     held = (models.AccountRoleAssociation.account == account, _assignment_active())
 
