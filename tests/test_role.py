@@ -139,7 +139,7 @@ def test_sync_roles_from_policy_package_reserved_role(reserved_role, db_session,
     before = _get_role(reserved_role, db_session)
     roles = _policy_package_roles(db_session)
     roles[reserved_role] = {'description': 'redefined by the policy package'}
-    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: roles)
+    monkeypatch.setattr(core_role.permission, 'get_roles', lambda: roles)
 
     core_role.sync_roles_from_policy_package_dry_run(session=db_session)
     assert "Role '%s' is reserved, so it would be left untouched." % reserved_role in capsys.readouterr().out
@@ -153,7 +153,7 @@ def test_sync_roles_from_policy_package_missing_reserved_role(reserved_role, db_
     """ROLE (CORE): Synchronising with a policy package which does not define a reserved role keeps it."""
     roles = _policy_package_roles(db_session)
     roles.pop(reserved_role)
-    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: roles)
+    monkeypatch.setattr(core_role.permission, 'get_roles', lambda: roles)
 
     core_role.sync_roles_from_policy_package_dry_run(session=db_session)
     assert "Role '%s' is not defined by the policy package but is reserved, so it would be left untouched." % reserved_role in capsys.readouterr().out
@@ -193,9 +193,9 @@ def policy_role_module(monkeypatch):
     role_module = types.ModuleType('fake_policy.role')
     monkeypatch.setitem(sys.modules, 'fake_policy', types.ModuleType('fake_policy'))
     monkeypatch.setitem(sys.modules, 'fake_policy.role', role_module)
-    monkeypatch.setattr(permission, '_get_policy_package_name', lambda vo: 'fake_policy')
-    monkeypatch.setattr(permission, 'role_definitions', {})
-    monkeypatch.setattr(permission, 'disabled_filters', {})
+    monkeypatch.setattr(permission, '_get_policy_package_name', lambda: 'fake_policy')
+    monkeypatch.setattr(permission, 'role_definitions', None)
+    monkeypatch.setattr(permission, 'disabled_filters', None)
     return role_module
 
 
@@ -209,35 +209,35 @@ def policy_role_module(monkeypatch):
     ({'disable_filters': ['list_scopes', ' get_scopes ']}, frozenset({'list_scopes', 'get_scopes'})),
     ({'roles': [{'name': 'data-scientist'}], 'disable_filters': ['list_scopes']}, frozenset({'list_scopes'})),
 ])
-def test_load_disabled_filters_for_all(policy_role_module, vo, attribute, getter, attributes, expected):
+def test_load_disabled_filters_for_all(policy_role_module, attribute, getter, attributes, expected):
     """ROLE (CORE): A policy package disables no filter for all roles or all accounts, unless its role module names them in the matching attribute, with or without roles."""
     for name, value in attributes.items():
         setattr(policy_role_module, attribute if name == 'disable_filters' else name, value)
-    assert getter(vo=vo) == expected
+    assert getter() == expected
 
 
-def test_load_disabled_filters_for_all_are_independent(policy_role_module, vo):
+def test_load_disabled_filters_for_all_are_independent(policy_role_module):
     """ROLE (CORE): The filters disabled for all roles and for all accounts are loaded separately."""
     policy_role_module.disable_filters_for_all_roles = ['list_scopes']
     policy_role_module.disable_filters_for_all_accounts = ['get_scopes']
-    assert permission.get_disabled_filters_for_all_roles(vo=vo) == frozenset({'list_scopes'})
-    assert permission.get_disabled_filters_for_all_accounts(vo=vo) == frozenset({'get_scopes'})
+    assert permission.get_disabled_filters_for_all_roles() == frozenset({'list_scopes'})
+    assert permission.get_disabled_filters_for_all_accounts() == frozenset({'get_scopes'})
 
 
 @pytest.mark.parametrize('attribute', ['disable_filters_for_all_roles', 'disable_filters_for_all_accounts'])
 @pytest.mark.parametrize('disable_filters', ['list_scopes', [''], ['list_scopes', 42], {'list_scopes': True}])
-def test_load_invalid_disabled_filters_for_all(policy_role_module, vo, attribute, disable_filters):
+def test_load_invalid_disabled_filters_for_all(policy_role_module, attribute, disable_filters):
     """ROLE (CORE): A policy package whose filters disabled for all roles or all accounts are not a list of filter names is refused."""
     setattr(policy_role_module, attribute, disable_filters)
     with pytest.raises(ErrorLoadingPolicyPackage):
-        permission.get_roles(vo=vo)
+        permission.get_roles()
 
 
 def _stub_disabled_filters(monkeypatch, roles=None, all_roles=frozenset(), all_accounts=frozenset()):
     """Stub the filters the policy package disables for some roles, for all roles and for all accounts."""
-    monkeypatch.setattr(core_role.permission, 'get_roles', lambda vo: roles or {})
-    monkeypatch.setattr(core_role.permission, 'get_disabled_filters_for_all_roles', lambda vo: all_roles)
-    monkeypatch.setattr(core_role.permission, 'get_disabled_filters_for_all_accounts', lambda vo: all_accounts)
+    monkeypatch.setattr(core_role.permission, 'get_roles', lambda: roles or {})
+    monkeypatch.setattr(core_role.permission, 'get_disabled_filters_for_all_roles', lambda: all_roles)
+    monkeypatch.setattr(core_role.permission, 'get_disabled_filters_for_all_accounts', lambda: all_accounts)
 
 
 @pytest.fixture

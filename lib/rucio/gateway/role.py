@@ -105,7 +105,7 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
             result['permissions'] = [
                 {'role': role['role'], **permission}
                 for role in roles
-                for permission in core_role.list_role_permissions(role=role['role'], vo=vo, session=session)
+                for permission in core_role.list_role_permissions(role=role['role'], session=session)
             ]
         result['account'] = account
         return result
@@ -113,7 +113,7 @@ def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str 
 
 def list_role_accounts(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, Any]]:
     """
-    List the accounts a role is assigned to.
+    List the accounts a role is assigned to, in the whole instance.
 
     :param role: The role to list the accounts of.
     :param issuer: The account issuing the command.
@@ -128,7 +128,6 @@ def list_role_accounts(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dic
         return [
             {**assignment, 'account': assignment['account'].external}
             for assignment in core_role.list_role_accounts(role=role, session=session)
-            if assignment['account'].vo == vo
         ]
 
 
@@ -272,7 +271,7 @@ def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[
         auth_result = has_permission(issuer=issuer, vo=vo, action='list_role_permissions', kwargs={'role': role}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot list permissions for role %s. Either the role does not exist or additional permissions are required.' % (issuer, role))
-        return core_role.list_role_permissions(role=role, vo=vo, session=session)
+        return core_role.list_role_permissions(role=role, session=session)
 
 
 def add_role_permission(
@@ -293,14 +292,14 @@ def add_role_permission(
                        limit is set on an expression matching a single RSE, a global one on an expression matching several.
     :param issuer: The account issuing the command.
     :param force: Grant the permission even if the role is locked.
-    :param vo: The VO of the issuing account, in which the RSE expression of a limit is resolved.
+    :param vo: The VO of the issuing account.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='add_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to add role permission for role %s.' % (issuer, role))
 
-        core_role.add_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, vo=vo, session=session)
+        core_role.add_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, session=session)
 
 
 def delete_role_permission(
@@ -320,7 +319,7 @@ def delete_role_permission(
                        and 'global' limits to remove (true), both being looked for otherwise, for a limit.
     :param issuer: The account issuing the command.
     :param force: Remove the permissions even if the role is locked.
-    :param vo: The VO of the issuing account, in which the RSE expression of a local limit is resolved.
+    :param vo: The VO of the issuing account.
     :returns: The number of permissions removed, e.g. both the local and the global limit on an RSE expression.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
@@ -328,4 +327,4 @@ def delete_role_permission(
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to delete role permission for role %s.' % (issuer, role))
 
-        return core_role.delete_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, vo=vo, session=session)
+        return core_role.delete_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, session=session)

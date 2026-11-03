@@ -701,15 +701,15 @@ class PermissionTypeHandler:
         """Render a permission for a message, e.g. "'read' permission on scope pattern 'data*'"."""
         raise NotImplementedError
 
-    def list_permissions(self, role: str, *, vo: Optional[str], session: "Session") -> list[dict[str, Any]]:
+    def list_permissions(self, role: str, *, session: "Session") -> list[dict[str, Any]]:
         """List the permissions of this type of a role, each with its target under `target_attribute` and its parameters."""
         raise NotImplementedError
 
-    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> None:
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> None:
         """Grant a permission to a role, see :func:`add_role_permission`."""
         raise NotImplementedError
 
-    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> int:
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> int:
         """Remove permissions from a role, see :func:`delete_role_permission`, and tell how many were removed."""
         raise NotImplementedError
 
@@ -747,7 +747,7 @@ class CheckedPermissionTypeHandler(PermissionTypeHandler, Generic[RequestT]):
     def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
         return "'%s' permission on %s '%s'" % (parameters[OPERATION].value, self.target_label, target)
 
-    def list_permissions(self, role: str, *, vo: Optional[str], session: "Session") -> list[dict[str, Any]]:
+    def list_permissions(self, role: str, *, session: "Session") -> list[dict[str, Any]]:
         stmt = (
             select(self.target_column, self.model.operation)
             .where(self.model.role == role)
@@ -755,10 +755,10 @@ class CheckedPermissionTypeHandler(PermissionTypeHandler, Generic[RequestT]):
         )
         return [{self.target_attribute: target, OPERATION: operation.value} for target, operation in session.execute(stmt).all()]
 
-    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> None:
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> None:
         session.add(self.model(role=role, operation=parameters[OPERATION], **{self.target_attribute: target}))
 
-    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> int:
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> int:
         stmt = delete(self.model).where(
             self.model.role == role,
             self.target_column == target,
@@ -966,17 +966,18 @@ def _validate_rse_expression(rse_expression: str, *, session: "Session") -> str:
     return rse_expression
 
 
-def _resolve_rse_ids(rse_expression: str, vo: Optional[str], *, session: "Session") -> frozenset[str]:
+def _resolve_rse_ids(rse_expression: str, *, session: "Session") -> frozenset[str]:
     """
     Resolve the RSE expression of a limit into the ids of the RSEs it currently matches.
 
+    Roles apply to the whole instance, so the expression is resolved over every RSE of the instance.
+
     :param rse_expression: The RSE expression, as stored.
-    :param vo: Only resolve the RSEs of this VO, or those of every VO if None.
     :param session: The database session.
     :returns: The ids of the matching RSEs, empty if the expression currently matches none.
     """
     try:
-        rses = parse_expression(rse_expression, filter_={'vo': vo} if vo else None, session=session)
+        rses = parse_expression(rse_expression, session=session)
     except InvalidRSEExpression:
         return frozenset()
     return frozenset(rse['id'] for rse in rses)
@@ -1019,8 +1020,8 @@ class LimitPermissionHandler(PermissionTypeHandler):
     A local and a global limit are therefore never set at once. Setting a limit which exists already
     overwrites it. Removing the limits on an RSE expression removes the local limit on the RSE it
     matches and the global limit on that very expression; the localities set to true restrict
-    which, both being looked for if none is given. The RSEs are those of the VO given, of every VO
-    if None. How the limits are applied is described in :func:`list_account_rse_quota_grants`.
+    which, both being looked for if none is given. The RSEs are those of the whole instance. How the
+    limits are applied is described in :func:`list_account_rse_quota_grants`.
     """
     permission_type = RolePermissionType.LIMIT
     tables = (models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation)
@@ -1054,13 +1055,13 @@ class LimitPermissionHandler(PermissionTypeHandler):
         localities = "/".join(locality.value for locality in LimitLocality if locality.value in parameters)
         return "%s limit on %s '%s'" % (localities, self.target_label, target)
 
-    def list_permissions(self, role: str, *, vo: Optional[str], session: "Session") -> list[dict[str, Any]]:
+    def list_permissions(self, role: str, *, session: "Session") -> list[dict[str, Any]]:
         local, global_ = models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation
         stmt = (
             select(models.RSE.rse, local.bytes)
             .select_from(local)
             .join(models.RSE, models.RSE.id == local.rse_id)
-            .where(local.role == role, *([models.RSE.vo == vo] if vo else []))
+            .where(local.role == role)
         )
         limits = [{self.target_attribute: rse, LimitLocality.LOCAL.value: bytes_} for rse, bytes_ in session.execute(stmt).all()]
 
@@ -1068,8 +1069,8 @@ class LimitPermissionHandler(PermissionTypeHandler):
         limits.extend({self.target_attribute: rse_expression, LimitLocality.GLOBAL.value: bytes_} for rse_expression, bytes_ in session.execute(stmt).all())
         return sorted(limits, key=lambda limit: limit[self.target_attribute])
 
-    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> None:
-        rse_ids = _resolve_rse_ids(target, vo, session=session)
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> None:
+        rse_ids = _resolve_rse_ids(target, session=session)
         matched = len(rse_ids)
         if LimitLocality.LOCAL.value in parameters:
             if matched != 1:
@@ -1083,11 +1084,11 @@ class LimitPermissionHandler(PermissionTypeHandler):
                                            % (target, "no RSE" if not matched else "a single one", " Set a local limit on it instead." if matched else ""))
             session.merge(models.RoleGlobalLimitPermissionAssociation(role=role, rse_expression=target, bytes=parameters[LimitLocality.GLOBAL.value]))
 
-    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, vo: Optional[str], session: "Session") -> int:
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> int:
         local, global_ = models.RoleLocalLimitPermissionAssociation, models.RoleGlobalLimitPermissionAssociation
         removed = 0
         if LimitLocality.LOCAL.value in parameters:
-            rse_ids = _resolve_rse_ids(target, vo, session=session)
+            rse_ids = _resolve_rse_ids(target, session=session)
             if len(rse_ids) == 1:
                 removed += cast(Any, session.execute(delete(local).where(local.role == role, local.rse_id.in_(rse_ids)))).rowcount
             elif parameters[LimitLocality.LOCAL.value]:
@@ -1119,7 +1120,7 @@ def _violates_table_constraint(error: IntegrityError, handler: PermissionTypeHan
     return any(_violates_constraint(error, "%s_%s" % (table.__tablename__.upper(), suffix)) for table in handler.tables)
 
 
-def list_role_permissions(role: str, vo: Optional[str] = None, *, session: "Session") -> list[dict[str, Any]]:
+def list_role_permissions(role: str, *, session: "Session") -> list[dict[str, Any]]:
     """
     List the permissions granted to a role, of every type.
 
@@ -1129,7 +1130,6 @@ def list_role_permissions(role: str, vo: Optional[str] = None, *, session: "Sess
     for a limit, a local limit being listed under the name of its RSE.
 
     :param role: The role whose permissions to list.
-    :param vo: Only list the local limits on the RSEs of this VO, or on those of every VO if None.
     :param session: The database session.
     :raises RoleNotFound: If the role does not exist.
     """
@@ -1138,7 +1138,7 @@ def list_role_permissions(role: str, vo: Optional[str] = None, *, session: "Sess
     return [
         {"type": permission_type.value, **permission}
         for permission_type, handler in _PERMISSION_HANDLERS.items()
-        for permission in handler.list_permissions(role, vo=vo, session=session)
+        for permission in handler.list_permissions(role, session=session)
     ]
 
 
@@ -1148,7 +1148,6 @@ def add_role_permission(
         parameters: "Mapping[str, Any]",
         force: bool = False,
         *,
-        vo: Optional[str] = None,
         session: "Session") -> None:
     """
     Grant a role a permission of a type.
@@ -1163,7 +1162,6 @@ def add_role_permission(
     :param parameters: The target of the permission under the key its type names it by, e.g. 'scope_pattern',
                        and its parameters, see the `PermissionTypeHandler` of the type.
     :param force: Grant the permission even if the role is locked.
-    :param vo: The VO the RSE expression of a limit is resolved in, every VO if None.
     :param session: The database session.
     :raises InputValidationError: If the permission type, the target or a parameter is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
@@ -1180,7 +1178,7 @@ def add_role_permission(
     _ensure_unlocked(role, force, session)
 
     try:
-        handler.add(role, target, parameters, vo=vo, session=session)
+        handler.add(role, target, parameters, session=session)
         session.commit()
     except IntegrityError as error:
         session.rollback()
@@ -1198,7 +1196,6 @@ def delete_role_permission(
         parameters: "Mapping[str, Any]",
         force: bool = False,
         *,
-        vo: Optional[str] = None,
         session: "Session") -> int:
     """
     Remove permissions of a type from a role.
@@ -1211,7 +1208,6 @@ def delete_role_permission(
     :param parameters: The target of the permissions under the key its type names it by, e.g. 'scope_pattern',
                        and the parameters identifying them, see the `PermissionTypeHandler` of the type.
     :param force: Remove the permissions even if the role is locked.
-    :param vo: The VO the RSE expression of a local limit is resolved in, every VO if None.
     :param session: The database session.
     :returns: The number of permissions removed, e.g. both the local and the global limit on an RSE expression.
     :raises InputValidationError: If the permission type, the target or a parameter is not valid.
@@ -1227,7 +1223,7 @@ def delete_role_permission(
         raise RoleReserved("Role '%s' is reserved, so no permission can be removed from it." % role)
     _ensure_unlocked(role, force, session)
 
-    removed = handler.remove(role, target, parameters, vo=vo, session=session)
+    removed = handler.remove(role, target, parameters, session=session)
     if not removed:
         session.rollback()
         raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have %s." % (role, handler.describe(target, parameters)))
@@ -1303,10 +1299,10 @@ def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session:
     """
     Tell whether the policy package disables a filter for the account.
 
-    Filtering is the default: a filter is only disabled if the policy package of the account's VO
+    Filtering is the default: a filter is only disabled if the policy package of the instance
     lists it, from the most general to the most specific, in:
 
-    - its `disable_filters_for_all_accounts`: for every account of the VO regardless of its roles,
+    - its `disable_filters_for_all_accounts`: for every account regardless of its roles,
       even for an account holding no role at all;
     - its `disable_filters_for_all_roles`: for every account holding at least one role;
     - the 'disable-filters' of a role: for every account holding that role.
@@ -1322,15 +1318,18 @@ def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session:
     :param session: The database session.
     :returns: True if the listing must not be filtered for the account.
     """
-    if filter_name in permission.get_disabled_filters_for_all_accounts(vo=account.vo):
+    if not is_rbac_enabled():
         return True
 
-    if filter_name in permission.get_disabled_filters_for_all_roles(vo=account.vo):
+    if filter_name in permission.get_disabled_filters_for_all_accounts():
+        return True
+
+    if filter_name in permission.get_disabled_filters_for_all_roles():
         # any role disables the filter, so there is no need to look at the role definitions
         role_disables_filter = models.AccountRoleAssociation.role.not_in(list(RESERVED_ROLES))
     else:
         roles = [
-            role for role, definition in permission.get_roles(vo=account.vo).items()
+            role for role, definition in permission.get_roles().items()
             if filter_name in definition.get('disable_filters', ()) and not is_reserved_role(role)
         ]
         if not roles:
@@ -1431,7 +1430,7 @@ class RSEQuotaGrant:
     locality: LimitLocality
     # the expression of a global limit, None for a local one
     rse_expression: Optional[str]
-    # the RSE of a local limit, or the RSEs the expression of a global one currently matches, within the VO of the account
+    # the RSE of a local limit, or the RSEs the expression of a global one currently matches
     rse_ids: frozenset[str]
     # ROLE_QUOTA_NOCAP means no cap
     bytes: int
@@ -1443,8 +1442,8 @@ def list_account_rse_quota_grants(account: "InternalAccount", *, session: "Sessi
 
     Every limit of a role the account holds through an active assignment is a grant, including a
     local one of 0: it still covers its RSE, so that the account limits do not apply there, but lets
-    nothing be written on it. The expression of a global limit is resolved within the VO of the
-    account, and a global limit whose expression currently matches no RSE is left out.
+    nothing be written on it. The expression of a global limit is resolved over every RSE of the
+    instance, and a global limit whose expression currently matches no RSE is left out.
 
     :param account: The account whose quotas to list.
     :param session: The database session.
@@ -1472,7 +1471,7 @@ def list_account_rse_quota_grants(account: "InternalAccount", *, session: "Sessi
         .order_by(global_.role, global_.rse_expression)
     )
     for role, rse_expression, bytes_ in session.execute(stmt).all():
-        rse_ids = _resolve_rse_ids(rse_expression, account.vo, session=session)
+        rse_ids = _resolve_rse_ids(rse_expression, session=session)
         if rse_ids:
             grants.append(RSEQuotaGrant(role=role, locality=LimitLocality.GLOBAL, rse_expression=rse_expression, rse_ids=rse_ids, bytes=bytes_))
     return grants
@@ -1561,7 +1560,7 @@ def _format_expires_at(expires_at: Optional[datetime]) -> str:
 # Synchronisation with the policy package
 # ----------------------------------------------------------------------------------------------
 
-def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Session") -> None:
+def sync_roles_from_policy_package_dry_run(*, session: "Session") -> None:
     """
     Synchronizes the internal roles with the roles defined by the policy package.
 
@@ -1578,13 +1577,12 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
     This is a dry run: it reports what the synchronisation would do and leaves the database
     untouched.
 
-    :param vo: The VO whose policy package defines the roles.
     :param session: The database session.
     """
     print("Syncing roles... (dry run, nothing is written to the database)")
 
     # Step 1: Retrieve Roles from the policy package
-    roles = permission.get_roles(vo=vo)
+    roles = permission.get_roles()
 
     print()
     print("Step 1: Retrieve Roles from the policy package")
@@ -1648,7 +1646,7 @@ def sync_roles_from_policy_package_dry_run(vo: str = DEFAULT_VO, *, session: "Se
           % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved))
 
 
-def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") -> None:
+def sync_roles_from_policy_package(*, session: "Session") -> None:
     """
     Synchronize the internal roles with the roles defined by the policy package.
 
@@ -1667,13 +1665,12 @@ def sync_roles_from_policy_package(vo: str = DEFAULT_VO, *, session: "Session") 
     it is. See :func:`sync_roles_from_policy_package_dry_run` to report the changes instead of
     applying them.
 
-    :param vo: The VO whose policy package defines the roles.
     :param session: The database session.
     """
-    print("Syncing the roles of VO '%s' with the policy package..." % vo)
+    print("Syncing the roles with the policy package...")
 
     # Step 1: Retrieve Roles from the policy package
-    roles = permission.get_roles(vo=vo)
+    roles = permission.get_roles()
 
     # Step 2: Retrieve all roles currently known to Rucio
     current = {entry["role"]: entry for entry in list_roles(session=session)}

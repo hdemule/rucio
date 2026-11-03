@@ -226,7 +226,7 @@ def check_policy_package_installed() -> Optional[str]:
 
 def check_policy_package_roles() -> Optional[str]:
     from rucio.core import permission
-    missing = set(ROLES) - set(permission.get_roles(vo=DEFAULT_VO))
+    missing = set(ROLES) - set(permission.get_roles())
     if missing:
         return 'the policy package does not define the role(s) %s' % ', '.join(sorted(missing))
 
@@ -349,7 +349,7 @@ def check_role_limits(role: str, expected: list[tuple[str, str, int]]) -> Callab
     def check() -> Optional[str]:
         from rucio.core.role import list_role_permissions
         with db_session(DatabaseOperationType.READ) as session:
-            limits = list_role_permissions(role, vo=DEFAULT_VO, session=session)
+            limits = list_role_permissions(role, session=session)
         present = {(limit['rse_expression'], locality, limit[locality]) for limit in limits if limit.get('type') == RolePermissionType.LIMIT.value
                    for locality in ('local', 'global') if locality in limit}
         missing = [limit for limit in expected if limit not in present]
@@ -673,7 +673,7 @@ def _provision_roles() -> None:
     with db_session(DatabaseOperationType.WRITE) as session:
         role_core.setup_reserved_roles(session=session)
     with db_session(DatabaseOperationType.WRITE) as session:
-        role_core.sync_roles_from_policy_package(vo=DEFAULT_VO, session=session)
+        role_core.sync_roles_from_policy_package(session=session)
     with db_session(DatabaseOperationType.WRITE) as session:
         for role, (permissions, holders) in ROLES.items():
             for operation, scope_pattern in sorted(permissions):
@@ -719,7 +719,7 @@ def _provision_dev_rses() -> None:
         for role, limits in DEV_RSE_ROLE_LIMITS.items():
             for target, locality, bytes_ in limits:
                 # setting a limit which exists already overwrites it
-                add_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': target, locality: bytes_}, force=True, vo=DEFAULT_VO, session=session)
+                add_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': target, locality: bytes_}, force=True, session=session)
         for account, account_limits in DEV_RSE_ACCOUNT_LIMITS.items():
             for rse, bytes_ in account_limits:
                 set_local_account_limit(_account(account), get_rse_id(rse, vo=DEFAULT_VO, session=session), bytes_, session=session)

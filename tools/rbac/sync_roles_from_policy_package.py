@@ -31,31 +31,29 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rucio.common.constants import DEFAULT_VO  # noqa: E402
 from rucio.core import role as role_core  # noqa: E402
 from rucio.db.sqla.constants import DatabaseOperationType  # noqa: E402
 from rucio.db.sqla.session import db_session  # noqa: E402
 
 
-def sync_roles_from_policy_package(vo: str = DEFAULT_VO, dry_run: bool = False) -> None:
+def sync_roles_from_policy_package(dry_run: bool = False) -> None:
     """Open a database session and run the synchronisation through it."""
     if dry_run:
         with db_session(DatabaseOperationType.READ) as session:
-            role_core.sync_roles_from_policy_package_dry_run(vo=vo, session=session)
+            role_core.sync_roles_from_policy_package_dry_run(session=session)
         return
 
     with db_session(DatabaseOperationType.WRITE) as session:
-        role_core.sync_roles_from_policy_package(vo=vo, session=session)
+        role_core.sync_roles_from_policy_package(session=session)
 
 
 def main() -> None:
     """Entry point of the script."""
     parser = argparse.ArgumentParser(description='Synchronise the roles of Rucio with the roles defined by the policy package.')
-    parser.add_argument('--vo', default=DEFAULT_VO, help='the VO whose policy package defines the roles (default: %(default)s)')
     parser.add_argument('--dry-run', action='store_true', help='report the changes instead of applying them')
     args = parser.parse_args()
 
-    sync_roles_from_policy_package(vo=args.vo, dry_run=args.dry_run)
+    sync_roles_from_policy_package(dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
