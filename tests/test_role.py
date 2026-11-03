@@ -312,3 +312,59 @@ def test_filter_iterable_by_scope_access_skip_filtering(db_session, root_account
     assert list(core_role.filter_iterable_by_scope_access(items, account=root_account, session=db_session, skip_filtering=skip_filtering)) == expected
     can_access = core_role.scope_access_checker(account=root_account, session=db_session, skip_filtering=skip_filtering)
     assert can_access(None) is bool(expected)
+
+
+def _assign_expired(account, role, session):
+    """Assign a role to an account through an assignment which expired yesterday."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    core_role.add_account_role(account, role, activates_at=now - timedelta(days=2), expires_at=now - timedelta(days=1), force=True, session=session)
+
+
+def _held_roles(account, session):
+    return {entry['role'] for entry in core_role.list_account_roles(account, session=session)}
+
+
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_clean_expired_account_roles(policy_role, reserved_role, random_account_factory, vo, db_session, dry_run):
+    """ROLE (CORE): Cleaning removes the expired assignments of every account of the VO, whatever the role, but keeps the valid ones; a dry run only reports them."""
+    first, second = random_account_factory(), random_account_factory()
+    valid_role = 'valid-%s' % generate_uuid()
+    core_role.add_role(valid_role, session=db_session)
+    try:
+        _assign_expired(first, policy_role, db_session)
+        _assign_expired(second, reserved_role, db_session)
+        core_role.add_account_role(second, valid_role, session=db_session)
+
+        report = core_role.clean_expired_account_roles(vo=vo, dry_run=dry_run, session=db_session)
+
+        assert report['dry_run'] is dry_run
+        removed = {(entry['account'], entry['role']) for entry in report['removed']}
+        assert {(first.external, policy_role), (second.external, reserved_role)} <= removed
+        assert all(role != valid_role for _, role in removed)
+        if dry_run:
+            assert _held_roles(first, db_session) == {policy_role}
+            assert _held_roles(second, db_session) == {reserved_role, valid_role}
+        else:
+            assert _held_roles(first, db_session) == set()
+            assert _held_roles(second, db_session) == {valid_role}
+    finally:
+        db_session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role.in_([valid_role, reserved_role])))
+        db_session.execute(delete(models.Roles).where(models.Roles.role == valid_role))
+        db_session.commit()
+
+
+def test_clean_expired_account_roles_other_vo(policy_role, random_account, db_session):
+    """ROLE (CORE): Cleaning the expired assignments of another VO leaves those of the account's VO alone."""
+    _assign_expired(random_account, policy_role, db_session)
+    report = core_role.clean_expired_account_roles(vo='zzz', session=db_session)
+    assert all(entry['account'] != random_account.external for entry in report['removed'])
+    assert _held_roles(random_account, db_session) == {policy_role}
+
+
+def test_clean_expired_account_roles_route():
+    """ROLE (REST): DELETE /roles/accounts/expired cleans, while a GET or PUT there still reaches an account named 'expired'."""
+    from rucio.web.rest.flaskapi.v1.roles import make_doc
+    adapter = make_doc().url_map.bind('localhost')
+    assert adapter.match('/roles/accounts/expired', method='DELETE')[0] == 'roles.expired_account_roles'
+    assert adapter.match('/roles/accounts/expired', method='GET') == ('roles.account_roles', {'account': 'expired'})
+    assert adapter.match('/roles/accounts/expired', method='PUT') == ('roles.account_roles', {'account': 'expired'})

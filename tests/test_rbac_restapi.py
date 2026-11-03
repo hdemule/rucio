@@ -1616,3 +1616,36 @@ class TestROLE:
         finally:
             if created:
                 assert _delete(path, 'root', **kwargs).status_code == OK
+
+    # --- cleaning of the expired assignments ---------------------------------------------
+
+    def test_clean_expired_account_roles(self):
+        """RBAC(ADMIN): an expired assignment is removed by cleaning, while a valid one is kept, and a dry run removes nothing"""
+        role_name = 'tmp_expiring'
+        dates = {'activates_at': 'Sat, 01 Jan 2000 12:00:00 UTC', 'expires_at': 'Sun, 02 Jan 2000 12:00:00 UTC'}
+
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_account_roles_path('alice', role_name), 'root', json=dates).status_code == CREATED
+            assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
+            expired = {'account': 'alice', 'role': role_name, 'expires_at': dates['expires_at']}
+
+            response = _request('DELETE', '/roles/accounts/expired', 'root', json={'dry_run': True})
+            assert response.status_code == OK
+            assert response.json()['dry_run'] is True
+            assert expired in response.json()['removed']
+            assert role_name in [role['role'] for role in _get(_account_roles_path('alice'), 'root').json()['roles']]
+
+            response = _request('DELETE', '/roles/accounts/expired', 'root')
+            assert response.status_code == OK
+            assert expired in response.json()['removed']
+            assert all(entry['role'] != role_name or entry['account'] != 'bob' for entry in response.json()['removed'])
+            assert role_name not in [role['role'] for role in _get(_account_roles_path('alice'), 'root').json()['roles']]
+            assert role_name in [role['role'] for role in _get(_account_roles_path('bob'), 'root').json()['roles']]
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    def test_non_admin_cannot_clean_expired_account_roles(self):
+        """RBAC(USER): cleaning the expired assignments is restricted to root/admin"""
+        for account in ('alice', 'bob'):
+            assert _request('DELETE', '/roles/accounts/expired', account, json={'dry_run': True}).status_code == FORBIDDEN

@@ -29,6 +29,7 @@ The module is organised as follows:
 - RSE quotas: how the limits granted by the account's roles apply, taking precedence over the
   account limits, see :func:`list_account_rse_quota_grants`.
 - Synchronisation: of the roles with the policy package, and of an account's roles with an IdP.
+- Cleaning: remove the expired role assignments of every account of a VO.
 """
 
 import logging
@@ -2162,3 +2163,52 @@ def sync_account_roles_from_idp(account: Union[str, "InternalAccount"], roles: A
     say("")
     say(report["summary"])
     return report
+
+
+# ----------------------------------------------------------------------------------------------
+# Cleaning of expired assignments
+# ----------------------------------------------------------------------------------------------
+
+def clean_expired_account_roles(vo: str = DEFAULT_VO, dry_run: bool = False, *, session: "Session") -> dict[str, Any]:
+    """
+    Remove the expired role assignments of every account of a VO.
+
+    An expired assignment grants nothing, but it stays in the database until the assignment is
+    removed or the account is synchronised with its IdP again, which may never happen. This removes
+    all of them at once, whatever the role, since it is Rucio itself, and not an IdP, that does it.
+
+    :param vo: The VO whose accounts have their expired assignments removed.
+    :param dry_run: Only report what would be removed, without writing to the database.
+    :param session: The database session.
+    :returns: The report of the cleaning:
+              - `dry_run`, `cleaned_at`: whether anything was written, and the time against which the
+                expiry dates were compared.
+              - `removed`: the expired assignments which were (or would be) removed, each with its
+                account, role and expiry date.
+              - `summary`: a one-line summary of the cleaning.
+    """
+    # the dates are stored as naive UTC datetimes, so compare them against a naive UTC now
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    stmt = (
+        select(models.AccountRoleAssociation.account, models.AccountRoleAssociation.role, models.AccountRoleAssociation.expires_at)
+        .where(models.AccountRoleAssociation.expires_at.is_not(None), models.AccountRoleAssociation.expires_at < now)
+        .order_by(models.AccountRoleAssociation.account, models.AccountRoleAssociation.role)
+    )
+    # the VO is encoded in the account column, so the assignments of the other VOs are left out here
+    expired = [(account, role, expires_at) for account, role, expires_at in session.execute(stmt).all() if account.vo == vo]
+
+    if not dry_run:
+        for account, role, _ in expired:
+            session.execute(
+                delete(models.AccountRoleAssociation)
+                .where(models.AccountRoleAssociation.account == account, models.AccountRoleAssociation.role == role)
+            )
+
+    verb = "Would remove" if dry_run else "Removed"
+    return {
+        "dry_run": dry_run,
+        "cleaned_at": now,
+        "removed": [{"account": account.external, "role": role, "expires_at": expires_at} for account, role, expires_at in expired],
+        "summary": "%s %d expired role assignment(s) of the accounts of VO '%s', as of %s." % (verb, len(expired), vo, now),
+    }

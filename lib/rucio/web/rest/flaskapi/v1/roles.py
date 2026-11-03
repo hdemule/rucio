@@ -23,6 +23,7 @@ from rucio.gateway.role import (
     add_account_role,
     add_role,
     add_role_permission,
+    clean_expired_account_roles,
     delete_account_role,
     delete_role,
     delete_role_permission,
@@ -348,6 +349,49 @@ class AccountRoles(ErrorHandlingMethodView):
         return Response(render_json(**report), content_type='application/json')
 
 
+class ExpiredAccountRoles(ErrorHandlingMethodView):
+    def delete(self) -> 'ResponseReturnValue':
+        """
+        ---
+        summary: Clean expired account roles
+        description: |
+          Remove the expired role assignments of every account of the VO, whatever the role.
+          With `dry_run`, only report what would be removed.
+        tags:
+          - Role
+        requestBody:
+          content:
+            'application/json':
+              schema:
+                type: object
+                properties:
+                  dry_run:
+                    description: "Only report what would be removed."
+                    type: boolean
+                    default: false
+        responses:
+          200:
+            description: "The report of the cleaning: the expired assignments which were (or would be) removed, each with its account, role and expiry date, and a summary."
+            content:
+              application/json:
+                schema:
+                  type: object
+          401:
+            description: "Invalid Auth Token"
+          403:
+            description: "Not allowed to clean the expired role assignments."
+        """
+        parameters = json_parameters(optional=True)
+        dry_run = param_get_bool(parameters, 'dry_run', default=False)
+
+        try:
+            report = clean_expired_account_roles(issuer=request.environ['issuer'], dry_run=dry_run, vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        # rendered through the API encoder, so that the dates are reported in Rucio's date format
+        return Response(render_json(**report), content_type='application/json')
+
+
 def warn_if_rbac_disabled(response: Response) -> Response:
     """Log a warning and pass it on to the client whenever a role endpoint is called while RBAC is disabled: roles can still be managed, but grant nothing."""
     if not is_rbac_enabled():
@@ -369,6 +413,8 @@ def blueprint() -> AuthenticatedBlueprint:
     role_accounts_view = RoleAccounts.as_view("role_accounts")
     bp.add_url_rule("/<role_name>/accounts", view_func=role_accounts_view, methods=[HTTPMethod.GET.value])
     bp.add_url_rule("/<role_name>/accounts/<account>", view_func=role_accounts_view, methods=[HTTPMethod.POST.value, HTTPMethod.PUT.value, HTTPMethod.DELETE.value])
+    # a static path, matched before `/accounts/<account>`: a GET or PUT for an account named 'expired' still reaches the account view
+    bp.add_url_rule("/accounts/expired", view_func=ExpiredAccountRoles.as_view("expired_account_roles"), methods=[HTTPMethod.DELETE.value])
     account_roles_view = AccountRoles.as_view("account_roles")
     bp.add_url_rule("/accounts/<account>", view_func=account_roles_view, methods=[HTTPMethod.GET.value, HTTPMethod.PUT.value])
     bp.after_request(response_headers)

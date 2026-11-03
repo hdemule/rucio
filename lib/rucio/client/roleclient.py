@@ -366,6 +366,27 @@ class RoleClient(BaseClient):
         exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
         raise exc_cls(exc_msg)
 
+    def clean_expired_account_roles(self, dry_run: bool = False) -> dict[str, Any]:
+        """
+        Remove the expired role assignments of every account of the VO, whatever the role.
+
+        Parameters
+        ----------
+        dry_run :
+            Only report what would be removed, without changing anything.
+
+        Returns
+        -------
+            The report of the cleaning: the expired assignments which were (or would be) removed, each with
+            its account, role and expiry date, and a one-line summary.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/accounts/expired")
+        response = self._send_request(url, method=HTTPMethod.DELETE, data=render_json(dry_run=dry_run))
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
     def add_role_permission(self, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool = False) -> None:
         """
         Grant a role a permission of a type.
