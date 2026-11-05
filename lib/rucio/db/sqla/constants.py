@@ -218,12 +218,18 @@ class RolePermissionOperationType(Enum):
     The parent of the operations a role permission grants.
 
     It has no member: each permission type checked against requests subclasses it with its own
-    operations, see `rucio.core.role.CheckedPermissionTypeHandler`.
+    operations, see `rucio.core.role.CheckedPermissionTypeHandler`. A permission stores the set of
+    operations it grants as one boolean column per operation, named by :attr:`column`.
     """
 
+    @property
+    def column(self) -> str:
+        """The boolean column of a `role_<type>_permission_map` table telling whether a permission grants this operation, e.g. 'can_read'."""
+        return f'can_{self.value}'
 
-class ScopeOperationType(RolePermissionOperationType):
-    """The operations a scope permission grants on the content of the scopes its pattern matches."""
+
+class DidOperationType(RolePermissionOperationType):
+    """The operations a DID permission grants on the DIDs its pattern matches."""
     READ = 'read'
     WRITE = 'write'
     DELETE = 'delete'
@@ -233,7 +239,7 @@ class RolePermissionType(Enum):
     """
     The types of the permissions a role can be granted, each stored in its own `role_<type>_permission_map` table(s).
 
-    SCOPE grants operations on scopes, LIMIT the bytes an account may use on RSEs.
+    DID grants operations on DIDs, LIMIT the bytes an account may use on RSEs.
     """
-    SCOPE = 'scope'
+    DID = 'did'
     LIMIT = 'limit'

@@ -21,11 +21,14 @@ from alembic import context
 from alembic.op import bulk_insert, create_check_constraint, create_foreign_key, create_primary_key, create_table, drop_table, execute
 
 from rucio.common.schema import get_schema_value
-from rucio.db.sqla.constants import ScopeOperationType
 
 # Alembic revision identifiers
 revision = '6a6d3e225f46'
 down_revision = '3b943000da18'
+
+# The operations a permission grants, as stored by this revision.
+# Spelled out rather than taken from the code, so that this revision does not depend on later code.
+OPERATIONS = ('read', 'write', 'delete')
 
 
 def upgrade():
@@ -71,10 +74,9 @@ def upgrade():
         create_table('role_permission_map',
                      sa.Column('role', sa.String(255)),
                      sa.Column('scope_pattern', sa.String(get_schema_value('SCOPE_LENGTH'))),
-                     sa.Column('operation', sa.Enum(ScopeOperationType,
+                     sa.Column('operation', sa.Enum(*OPERATIONS,
                                                     name='ROLE_PERMISSION_MAP_OPERATION_CHK',
-                                                    create_constraint=True,
-                                                    values_callable=lambda obj: [e.value for e in obj])),
+                                                    create_constraint=True)),
                      sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
                      sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
         create_primary_key('ROLE_PERMISSION_MAP_PK', 'role_permission_map', ['role', 'scope_pattern', 'operation'])
