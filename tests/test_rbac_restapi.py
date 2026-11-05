@@ -154,9 +154,9 @@ def _role_path(role_name: str, *suffix: str) -> str:
     return '/'.join(['', 'roles', quote_plus(role_name), *suffix])
 
 
-def _scope_permission(operation: str, scope_pattern: str) -> dict[str, str]:
-    """Build the body naming a scope permission, to be sent to `/roles/<role_name>/permissions/scope`."""
-    return {'scope_pattern': scope_pattern, 'operation': operation}
+def _did_permission(operation: str, did_pattern: str) -> dict[str, str]:
+    """Build the body naming a DID permission, to be sent to `/roles/<role_name>/permissions/did`."""
+    return {'did_pattern': did_pattern, 'operation': operation}
 
 
 def _account_roles_path(account: str, role_name: Optional[str] = None) -> str:
@@ -1110,14 +1110,15 @@ class TestROLE:
 
     def test_list_role_permissions(self):
         """RBAC(ADMIN/USER): GET /roles/<role>/permissions is visible to root/admin and to accounts holding that role"""
-        def covers_atlas(scope_pattern: str) -> bool:
-            # a scope pattern is either a scope, or a prefix closed by the '*' wildcard
-            return scope_pattern == 'atlas' or (scope_pattern.endswith('*') and 'atlas'.startswith(scope_pattern[:-1]))
+        def covers_atlas(did_pattern: str) -> bool:
+            # a pattern covering a whole scope has the '*' name part, its scope part being a scope or a prefix closed by '*'
+            scope_pattern, _, name_pattern = did_pattern.partition(':')
+            return name_pattern == '*' and (scope_pattern == 'atlas' or (scope_pattern.endswith('*') and 'atlas'.startswith(scope_pattern[:-1])))
 
         for account in ('root', 'alice'):
             response = _get(_role_path('data-scientist', 'permissions'), account)
             assert response.status_code == OK
-            granted = {perm['operation'] for perm in response.json() if perm['type'] == 'scope' and covers_atlas(perm['scope_pattern'])}
+            granted = {perm['operation'] for perm in response.json() if perm['type'] == 'did' and covers_atlas(perm['did_pattern'])}
             assert {'read', 'write'} <= granted
         assert _get(_role_path('data-scientist', 'permissions'), 'bob').status_code == FORBIDDEN
 
@@ -1150,8 +1151,8 @@ class TestROLE:
         [
             ('POST', _role_path('tmp_probe'), None),
             ('DELETE', _role_path('data-scientist'), None),
-            ('POST', _role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
+            ('POST', _role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'atlas')),
             ('POST', _account_roles_path('bob', 'data-scientist'), None),
             ('DELETE', _account_roles_path('alice', 'data-scientist'), None),
             ('PUT', _role_path('data-scientist'), {'locked': True}),
@@ -1195,7 +1196,7 @@ class TestROLE:
         role_name = 'tmp'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('write', 'root')).status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('write', 'root')).status_code == CREATED
             assert _delete(_role_path(role_name), 'root').status_code == OK
             assert _get(_role_path(role_name, 'permissions'), 'root').status_code == NOT_FOUND
 
@@ -1210,7 +1211,7 @@ class TestROLE:
         role_name = 'tmp_force_delete'
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('write', 'root')).status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('write', 'root')).status_code == CREATED
             assert _post(_account_roles_path('alice', role_name), 'root').status_code == CREATED
             assert _delete(_role_path(role_name), 'root', json={'force': True}).status_code == OK
 
@@ -1220,7 +1221,7 @@ class TestROLE:
         finally:
             # only needed if the forced deletion failed, in which case the role is still in use
             _delete(_account_roles_path('alice', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('write', 'root'))
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('write', 'root'))
             _delete(_role_path(role_name), 'root')
 
     def test_non_admin_cannot_force_delete_role(self):
@@ -1313,7 +1314,7 @@ class TestROLE:
 
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice')).status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'alice')).status_code == CREATED
             assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
             # an assignment without an expiry date grants access
             assert _get(path, 'bob', params=params).status_code == OK
@@ -1330,7 +1331,7 @@ class TestROLE:
         finally:
             # the assignment and the permission have to go first: a role still in use cannot be deleted
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice'))
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'alice'))
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_invalid_account_role_expires_at_is_rejected(self):
@@ -1402,7 +1403,7 @@ class TestROLE:
 
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice')).status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'alice')).status_code == CREATED
             # an assignment whose activation date is in the future does not grant anything yet, although it is listed
             assert _post(_account_roles_path('bob', role_name), 'root', json={'activates_at': 'Fri, 01 Jan 2100 00:00:00 UTC'}).status_code == CREATED
             assert role_name in [role['role'] for role in _get(_account_roles_path('bob'), 'root').json()['roles']]
@@ -1414,7 +1415,7 @@ class TestROLE:
         finally:
             # the assignment and the permission have to go first: a role still in use cannot be deleted
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', 'alice'))
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'alice'))
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_account_role_expiring_before_activation_is_rejected(self):
@@ -1559,8 +1560,8 @@ class TestROLE:
             ('POST', _account_roles_path('alice', 'non_existing_role'), None),
             ('POST', _account_roles_path('non_existing_account', 'data-scientist'), None),
             ('DELETE', _account_roles_path('bob', 'data-scientist'), None),
-            ('POST', _role_path('non_existing_role', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'root')),
+            ('POST', _role_path('non_existing_role', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            ('DELETE', _role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'root')),
         ],
         ids=[
             'delete non-existing role',
@@ -1582,23 +1583,52 @@ class TestROLE:
         scope_pattern = 'rbac_future_%s' % uuid4().hex[:12]
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
-            assert _post(_role_path(role_name, 'permissions', 'scope'), 'root', json=_scope_permission('read', scope_pattern)).status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', scope_pattern)).status_code == CREATED
             permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
-            assert permissions == [{'type': 'scope', 'scope_pattern': scope_pattern, 'operation': 'read'}]
+            assert permissions == [{'type': 'did', 'did_pattern': scope_pattern + ':*', 'operation': 'read'}]
         finally:
             _delete(_role_path(role_name), 'root', json={'force': True})
 
-    @pytest.mark.parametrize('scope_pattern', ['*atlas', 'at*las', 'at**'], ids=['leading wildcard', 'embedded wildcard', 'several wildcards'])
-    def test_invalid_scope_pattern_is_rejected(self, scope_pattern):
-        """RBAC(ADMIN): a '*' is only accepted on its own or closing a scope pattern"""
-        assert _post(_role_path('data-scientist', 'permissions', 'scope'), 'root', json=_scope_permission('read', scope_pattern)).status_code == BAD_REQUEST
+    @pytest.mark.parametrize('did_pattern', ['atlas:raw1', 'atlas:raw*'], ids=['DID', 'name pattern'])
+    def test_permission_on_did_pattern(self, did_pattern):
+        """RBAC(ADMIN): a DID pattern may name a DID, or the DIDs of a scope whose name starts with a prefix"""
+        role_name = 'tmp_did_pattern_%s' % uuid4().hex[:8]
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', did_pattern)).status_code == CREATED
+            permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
+            assert permissions == [{'type': 'did', 'did_pattern': did_pattern, 'operation': 'read'}]
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    def test_did_pattern_without_name_part_is_stored_with_it(self):
+        """RBAC(ADMIN): a pattern without name part stands for the whole scope, and is stored and listed as 'scope:*'"""
+        role_name = 'tmp_did_pattern_%s' % uuid4().hex[:8]
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'atlas:*')).status_code == CREATED
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'atlas')).status_code == CONFLICT
+            permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
+            assert permissions == [{'type': 'did', 'did_pattern': 'atlas:*', 'operation': 'read'}]
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    @pytest.mark.parametrize(
+        'did_pattern',
+        ['*atlas', 'at*las', 'at**', 'atlas*:raw1', 'atlas*:raw*', ':raw1', 'atlas:', 'atlas:*raw', 'atlas:ra*w', 'atlas:raw:1'],
+        ids=['leading wildcard', 'embedded wildcard', 'several wildcards', 'wildcard scope with a name', 'wildcard scope with a name pattern',
+             'missing scope', 'missing name', 'leading name wildcard', 'embedded name wildcard', 'several separators'],
+    )
+    def test_invalid_did_pattern_is_rejected(self, did_pattern):
+        """RBAC(ADMIN): a '*' is only accepted closing a part of a DID pattern, and a wildcard scope part only takes the '*' name part"""
+        assert _post(_role_path('data-scientist', 'permissions', 'did'), 'root', json=_did_permission('read', did_pattern)).status_code == BAD_REQUEST
 
     @pytest.mark.parametrize(
         ('path', 'payload'),
         [
             (_role_path('data-scientist'), None),
-            (_role_path('data-scientist', 'permissions', 'scope'), _scope_permission('read', 'atlas')),
-            (_role_path('data-scientist', 'permissions', 'scope'), _scope_permission('write', 'atlas')),
+            (_role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            (_role_path('data-scientist', 'permissions', 'did'), _did_permission('write', 'atlas')),
             (_account_roles_path('alice', 'data-scientist'), None),
         ],
         ids=['duplicate role', 'duplicate read permission', 'duplicate write permission', 'duplicate account role assignment'],

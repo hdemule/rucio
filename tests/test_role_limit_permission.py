@@ -25,7 +25,7 @@ from rucio.core.account_limit import set_global_account_limit, set_local_account
 from rucio.core.rse import add_rse_attribute
 from rucio.core.rse_selector import RSESelector
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import RolePermissionType, ScopeOperationType
+from rucio.db.sqla.constants import DidOperationType, RolePermissionType
 
 INF = float('inf')
 NOCAP = ROLE_QUOTA_NOCAP
@@ -367,15 +367,15 @@ def test_limit_is_not_checked_against_requests(random_account, rse_factory, role
         permission_type = RolePermissionType.LIMIT
 
     with pytest.raises(InputValidationError):
-        core_role.has_permission(random_account, LimitRequest(operation=ScopeOperationType.WRITE), session=db_session)
+        core_role.has_permission(random_account, LimitRequest(operation=DidOperationType.WRITE), session=db_session)
 
 
 @pytest.mark.parametrize('parameters', [
-    {'scope_pattern': 'user.*'},
-    {'scope_pattern': 'user.*', 'operation': 'write', 'local': 100},
+    {'did_pattern': 'user.*'},
+    {'did_pattern': 'user.*', 'operation': 'write', 'local': 100},
     {'operation': 'write'},
-], ids=['no operation', 'limit on a scope', 'no scope pattern'])
-def test_scope_permission_parameters(role_factory, db_session, parameters):
-    """ROLE LIMIT PERMISSION (CORE): A scope permission takes a scope pattern and an operation, and nothing else."""
+], ids=['no operation', 'limit on a DID pattern', 'no DID pattern'])
+def test_did_permission_parameters(role_factory, db_session, parameters):
+    """ROLE LIMIT PERMISSION (CORE): A DID permission takes a DID pattern and an operation, and nothing else."""
     with pytest.raises(InputValidationError):
-        core_role.add_role_permission(role_factory(), RolePermissionType.SCOPE, parameters, session=db_session)
+        core_role.add_role_permission(role_factory(), RolePermissionType.DID, parameters, session=db_session)

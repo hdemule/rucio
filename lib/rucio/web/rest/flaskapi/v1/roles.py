@@ -136,11 +136,11 @@ class RolePermissions(ErrorHandlingMethodView):
 
 class RolePermission(ErrorHandlingMethodView):
     """
-    The permissions of one type of a role, e.g. `/roles/<role>/permissions/scope`.
+    The permissions of one type of a role, e.g. `/roles/<role>/permissions/did`.
 
     The request body names the permission: its target and its parameters, in the shape the permissions
-    are listed with, together with `force`, e.g. {"scope_pattern": "data*", "operation": "read"} for a
-    scope permission, or {"rse_expression": "tier=1", "global": 5000} for a limit, -1
+    are listed with, together with `force`, e.g. {"did_pattern": "data:raw*", "operation": "read"} for a
+    DID permission, or {"rse_expression": "tier=1", "global": 5000} for a limit, -1
     meaning no cap. Granting a limit which exists already overwrites it. Removing limits takes which
     of the 'local' and 'global' ones to remove, as booleans, both being removed if none is given.
     """

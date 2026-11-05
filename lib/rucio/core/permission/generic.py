@@ -26,7 +26,7 @@ from rucio.core.lifetime_exception import list_exceptions
 from rucio.core.rse import list_rse_attributes
 from rucio.core.rse_expression_parser import parse_expression
 from rucio.core.rule import get_rule
-from rucio.db.sqla.constants import IdentityType, ScopeOperationType
+from rucio.db.sqla.constants import DidOperationType, IdentityType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -199,7 +199,7 @@ def _is_admin(issuer: "InternalAccount", session: "Session") -> bool:
     return has_account_attribute(account=issuer, key='admin', session=session)
 
 
-def _rbac_grants_on_scope(issuer: "InternalAccount", scope: "InternalScope", operation: ScopeOperationType, session: "Session") -> bool:
+def _rbac_grants_on_scope(issuer: "InternalAccount", scope: "InternalScope", operation: DidOperationType, session: "Session") -> bool:
     """
     Checks if RBAC grants an account an operation on a scope, see :func:`rucio.core.role.has_permission`.
     Like every `_rbac_grants_*` helper, it does not check whether RBAC is enabled: the caller does, see :func:`_use_roles`.
@@ -210,11 +210,11 @@ def _rbac_grants_on_scope(issuer: "InternalAccount", scope: "InternalScope", ope
     :param session: The DB session to use
     :returns: True if RBAC grants the operation, otherwise False
     """
-    request = role_core.ScopePermissionRequest(operation=operation, scope=scope)
+    request = role_core.DidPermissionRequest(operation=operation, scope=scope)
     return role_core.has_permission(account=issuer, request=request, session=session)
 
 
-def _rbac_grants_on_scopes(issuer: "InternalAccount", scopes: "Iterable[InternalScope | str]", operation: ScopeOperationType, session: "Session") -> bool:
+def _rbac_grants_on_scopes(issuer: "InternalAccount", scopes: "Iterable[InternalScope | str]", operation: DidOperationType, session: "Session") -> bool:
     """
     Checks if RBAC grants an account an operation on all the given scopes, see :func:`_rbac_grants_on_scope`.
 
@@ -228,7 +228,7 @@ def _rbac_grants_on_scopes(issuer: "InternalAccount", scopes: "Iterable[Internal
     return all(_rbac_grants_on_scope(issuer, scope, operation, session) for scope in internal_scopes)
 
 
-def _rbac_grants_on_owned(issuer: "InternalAccount", scope: "InternalScope", operation: ScopeOperationType, is_owner: "Callable[[], bool]", session: "Session") -> bool:
+def _rbac_grants_on_owned(issuer: "InternalAccount", scope: "InternalScope", operation: DidOperationType, is_owner: "Callable[[], bool]", session: "Session") -> bool:
     """
     Checks if RBAC grants an account an operation on an object of a scope that it may own (a DID, a rule), see :func:`_rbac_grants_on_scope`.
     Owning the object lowers DELETE to WRITE: an account allowed to add content to a scope can also update and remove
@@ -243,12 +243,12 @@ def _rbac_grants_on_owned(issuer: "InternalAccount", scope: "InternalScope", ope
     """
     if _rbac_grants_on_scope(issuer, scope, operation, session):
         return True
-    return operation == ScopeOperationType.DELETE\
-        and _rbac_grants_on_scope(issuer, scope, ScopeOperationType.WRITE, session)\
+    return operation == DidOperationType.DELETE\
+        and _rbac_grants_on_scope(issuer, scope, DidOperationType.WRITE, session)\
         and is_owner()
 
 
-def _rbac_grants_on_did(issuer: "InternalAccount", scope: "InternalScope", name: str, operation: ScopeOperationType, session: "Session") -> bool:
+def _rbac_grants_on_did(issuer: "InternalAccount", scope: "InternalScope", name: str, operation: DidOperationType, session: "Session") -> bool:
     """
     Checks if RBAC grants an account an operation on a DID, see :func:`_rbac_grants_on_owned`.
 
@@ -263,7 +263,7 @@ def _rbac_grants_on_did(issuer: "InternalAccount", scope: "InternalScope", name:
     return _rbac_grants_on_owned(issuer, scope, operation, lambda: get_did(scope=scope, name=name, session=session)['account'] == issuer, session)
 
 
-def _rbac_grants_on_rule(issuer: "InternalAccount", rule_id: str, operations: "Iterable[ScopeOperationType]", session: "Session") -> bool:
+def _rbac_grants_on_rule(issuer: "InternalAccount", rule_id: str, operations: "Iterable[DidOperationType]", session: "Session") -> bool:
     """
     Checks if RBAC grants an account operations on a replication rule, given the scope of its DID, see :func:`_rbac_grants_on_owned`.
 
@@ -292,7 +292,7 @@ def _rbac_grants_metadata(issuer: "InternalAccount", scope: "InternalScope", nam
     :param session: The DB session to use
     :returns: True if RBAC grants the operations, otherwise False
     """
-    operations = {ScopeOperationType.DELETE if key in RBAC_DELETE_METADATA_KEYS else ScopeOperationType.WRITE for key in keys} or {ScopeOperationType.WRITE}
+    operations = {DidOperationType.DELETE if key in RBAC_DELETE_METADATA_KEYS else DidOperationType.WRITE for key in keys} or {DidOperationType.WRITE}
     return all(_rbac_grants_on_did(issuer, scope, name, operation, session) for operation in operations)
 
 
@@ -309,13 +309,13 @@ def _rbac_grants_attach(issuer: "InternalAccount", scope: "InternalScope", attac
     :param session: The DB session to use
     :returns: True if RBAC grants the attachment, otherwise False
     """
-    if not _rbac_grants_on_scope(issuer, scope, ScopeOperationType.WRITE, session):
+    if not _rbac_grants_on_scope(issuer, scope, DidOperationType.WRITE, session):
         return False
-    child_operation = ScopeOperationType.WRITE if attachment.get('rse_id') else ScopeOperationType.READ
+    child_operation = DidOperationType.WRITE if attachment.get('rse_id') else DidOperationType.READ
     return _rbac_grants_on_scopes(issuer, [did['scope'] for did in attachment.get('dids', [])], child_operation, session)
 
 
-def _rbac_grants_on_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], operation: ScopeOperationType, session: "Session") -> bool:
+def _rbac_grants_on_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], operation: DidOperationType, session: "Session") -> bool:
     """
     Checks if RBAC grants an account an operation on replicas: only on the RSEs listed in RBAC_REPLICA_RSE_SUFFIXES,
     and it requires the operation on the scopes of the files.
@@ -599,7 +599,7 @@ def perm_add_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
         or _is_admin(issuer, session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
         or kwargs['scope'].external == 'mock'\
-        or (_use_roles() and _rbac_grants_on_scope(issuer, kwargs['scope'], ScopeOperationType.WRITE, session))
+        or (_use_roles() and _rbac_grants_on_scope(issuer, kwargs['scope'], DidOperationType.WRITE, session))
 
 
 def perm_add_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -665,7 +665,7 @@ def perm_create_did_sample(issuer: "InternalAccount", kwargs: dict[str, Any], se
         or _is_admin(issuer, session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
         or kwargs['scope'].external == 'mock'\
-        or (_use_roles() and _rbac_grants_on_scope(issuer, kwargs['scope'], ScopeOperationType.WRITE, session))
+        or (_use_roles() and _rbac_grants_on_scope(issuer, kwargs['scope'], DidOperationType.WRITE, session))
 
 
 def perm_del_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -679,7 +679,7 @@ def perm_del_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "S
     """
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
-    return _use_roles() and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [ScopeOperationType.DELETE], session)
+    return _use_roles() and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [DidOperationType.DELETE], session)
 
 
 def perm_update_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -695,7 +695,7 @@ def perm_update_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session:
         return True
     return _use_roles()\
         and set(kwargs['options']).issubset(RBAC_UPDATABLE_RULE_OPTIONS)\
-        and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [ScopeOperationType.DELETE], session)
+        and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [DidOperationType.DELETE], session)
 
 
 def perm_approve_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -723,7 +723,7 @@ def perm_reduce_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     """
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
-    return _use_roles() and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [ScopeOperationType.DELETE], session)
+    return _use_roles() and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [DidOperationType.DELETE], session)
 
 
 def perm_move_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -741,7 +741,7 @@ def perm_move_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     return _use_roles()\
         and not kwargs['override'].get('locked')\
         and kwargs['override'].get('account', issuer) == issuer\
-        and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [ScopeOperationType.WRITE, ScopeOperationType.DELETE], session)
+        and _rbac_grants_on_rule(issuer, kwargs['rule_id'], [DidOperationType.WRITE, DidOperationType.DELETE], session)
 
 
 def perm_update_subscription(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -773,7 +773,7 @@ def perm_detach_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session:
         or _is_admin(issuer, session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
         or kwargs['scope'].external == 'mock'\
-        or (_use_roles() and _rbac_grants_on_did(issuer, kwargs['scope'], kwargs['name'], ScopeOperationType.DELETE, session))
+        or (_use_roles() and _rbac_grants_on_did(issuer, kwargs['scope'], kwargs['name'], DidOperationType.DELETE, session))
 
 
 def perm_set_metadata_bulk(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -817,7 +817,7 @@ def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
 
     # Closing a collection prevents any further change of its content, so RBAC requires DELETE on it.
     return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
-        or (_use_roles() and _rbac_grants_on_did(issuer, kwargs['scope'], kwargs['name'], ScopeOperationType.DELETE, session))
+        or (_use_roles() and _rbac_grants_on_did(issuer, kwargs['scope'], kwargs['name'], DidOperationType.DELETE, session))
 
 
 def perm_add_protocol(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -942,7 +942,7 @@ def perm_delete_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], sess
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _use_roles() and _rbac_grants_on_replicas(issuer, kwargs, ScopeOperationType.DELETE, session)
+    return _use_roles() and _rbac_grants_on_replicas(issuer, kwargs, DidOperationType.DELETE, session)
 
 
 def perm_update_replicas_states(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -955,7 +955,7 @@ def perm_update_replicas_states(issuer: "InternalAccount", kwargs: dict[str, Any
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer) or _is_admin(issuer, session)\
-        or (_use_roles() and _rbac_grants_on_replicas(issuer, kwargs, ScopeOperationType.DELETE, session))
+        or (_use_roles() and _rbac_grants_on_replicas(issuer, kwargs, DidOperationType.DELETE, session))
 
 
 def perm_queue_requests(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1390,7 +1390,7 @@ def perm_delete_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], sess
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer) or _is_admin(issuer, session)\
-        or (_use_roles() and _rbac_grants_on_did(issuer, kwargs['scope'], kwargs['name'], ScopeOperationType.DELETE, session))
+        or (_use_roles() and _rbac_grants_on_did(issuer, kwargs['scope'], kwargs['name'], DidOperationType.DELETE, session))
 
 
 def perm_list_account_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1431,4 +1431,4 @@ def perm_read_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
     return not _use_roles()\
         or _is_root(issuer)\
         or _is_admin(issuer, session)\
-        or _rbac_grants_on_scope(issuer, kwargs['scope'], ScopeOperationType.READ, session)
+        or _rbac_grants_on_scope(issuer, kwargs['scope'], DidOperationType.READ, session)

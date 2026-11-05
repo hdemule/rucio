@@ -59,24 +59,24 @@ SUCCESS = 0
 FAILURE = 1
 
 
-# Client-side representation of the operations a scope permission can grant.
-class ScopeOperationType(Enum):
+# Client-side representation of the operations a DID permission can grant.
+class DidOperationType(Enum):
     READ = 'read'
     WRITE = 'write'
     DELETE = 'delete'
 
 
 # The letter shown for each operation, in the order the operations are rendered.
-OPERATION_LETTERS: dict[ScopeOperationType, str] = {
-    ScopeOperationType.READ: 'r',
-    ScopeOperationType.WRITE: 'w',
-    ScopeOperationType.DELETE: 'd',
+OPERATION_LETTERS: dict[DidOperationType, str] = {
+    DidOperationType.READ: 'r',
+    DidOperationType.WRITE: 'w',
+    DidOperationType.DELETE: 'd',
 }
 
 
 def format_operations(operations: "Iterable[str]") -> str:
     """
-    Render the operations granted on a scope compactly, e.g. 'rw-' for read and write, 'r--' for read only.
+    Render the operations granted on a DID pattern compactly, e.g. 'rw-' for read and write, 'r--' for read only.
 
     :param operations: The operation values that are granted, e.g. 'read', 'write' and/or 'delete'.
     :returns: One character per known operation, with '-' where the operation is not granted.
@@ -111,7 +111,7 @@ def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
     tree by its middle line, the trunk running along the lines above it, and along those below it
     unless it is the last branch.
 
-    :param root: The first line of the tree, e.g. a role name or a scope pattern.
+    :param root: The first line of the tree, e.g. a role name or a DID pattern.
     :param branches: One entry per branch, listed under `root` in the given order.
     :param placeholder: The line listed under `root` if there is no branch.
     :returns: The lines of the tree, joined by newlines.
@@ -283,19 +283,19 @@ def permission_lines(
     :param sizes: How the sizes of the limits are rendered.
     :param used: Gives the bytes an account uses on the RSEs of an RSE expression, to render each limit with the usage
                  measured against it, see :func:`format_limits`.
-    :returns: The lines, as (type, target, operations, limits): the operations granted on a scope pattern, e.g. 'rw-'
+    :returns: The lines, as (type, target, operations, limits): the operations granted on a DID pattern, e.g. 'rw-'
               (see :func:`format_operations`), and the limits on an RSE expression (see :func:`format_limits`), '' where
               they do not apply. A permission of a type this client does not know is left out.
     """
-    ops_by_scope_pattern: dict[str, set[str]] = {}
+    ops_by_did_pattern: dict[str, set[str]] = {}
     limits: list["Mapping[str, Any]"] = []
     for permission in permissions:
-        if permission.get('type') == 'scope':
-            ops_by_scope_pattern.setdefault(permission['scope_pattern'], set()).add(permission['operation'])
+        if permission.get('type') == 'did':
+            ops_by_did_pattern.setdefault(permission['did_pattern'], set()).add(permission['operation'])
         elif permission.get('type') == 'limit':
             limits.append(permission)
 
-    lines = [('scope', scope_pattern, format_operations(ops), '') for scope_pattern, ops in sorted(ops_by_scope_pattern.items())]
+    lines = [('did', did_pattern, format_operations(ops), '') for did_pattern, ops in sorted(ops_by_did_pattern.items())]
     lines.extend(('limit', limit['rse_expression'], '', format_limits(limit, sizes, used)) for limit in sorted(limits, key=lambda limit: limit['rse_expression']))
     return lines
 
@@ -316,8 +316,8 @@ def format_permission_tree(
     RSEs lists them one per line, bracketed in the identifier column, its limit on the middle one:
 
         rse-pro
-        |-- SCOPE   *        r--
-        |-- SCOPE   atlas    rw-
+        |-- DID     *:*      r--
+        |-- DID     atlas:*  rw-
         |-- LIMIT   MOCK     local: 1 MB
         |         | MOCK2 |
         `-- LIMIT | MOCK3 |- global: 100 kB
@@ -773,14 +773,14 @@ class RoleOperations(click.ParamType):
     name = "operations"
     HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd', 'rwd' or 'read,write'"
 
-    def convert(self, value, param, ctx) -> list[ScopeOperationType]:
+    def convert(self, value, param, ctx) -> list[DidOperationType]:
         """Turn a command line value into the requested operations, deduplicated and in canonical order."""
         if isinstance(value, list):
             return value
         by_letter = {letter: operation for operation, letter in OPERATION_LETTERS.items()}
-        by_name = {operation.value: operation for operation in ScopeOperationType}
+        by_name = {operation.value: operation for operation in DidOperationType}
 
-        requested: set[ScopeOperationType] = set()
+        requested: set[DidOperationType] = set()
         for token in value.lower().replace(' ', '').split(','):
             if token in by_name:
                 requested.add(by_name[token])
