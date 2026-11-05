@@ -175,7 +175,7 @@ def get_replication_rule(rule_id: str, issuer: str, vo: str = DEFAULT_VO) -> dic
             raise _rule_not_found(rule_id, error)
 
         scope = result['scope'].external
-        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replication_rule', kwargs={'scope': scope}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replication_rule', kwargs={'scope': scope, 'name': result['name']}, session=session)
         if not auth_result.allowed:
             raise AccessDenied(_access_denied_message_rule_id(rule_id, issuer))
 
@@ -212,7 +212,7 @@ def list_replication_rules(
 
     with db_session(DatabaseOperationType.READ) as session:
         rules = rule.list_rules(filters, session=session)
-        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_replication_rules', session=session)):
+        for r in role.filter_iterable_by_did_access(rules, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_replication_rules', session=session)):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -235,13 +235,13 @@ def list_replication_rule_history(
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not access rules at other VOs. %s' % (issuer, auth_result.message))
 
-        # the history outlives the rule, so the scope is also looked up in the rule history
+        # the history outlives the rule, so its DID is also looked up in the rule history
         try:
-            scope = rule.get_rule_scope(rule_id, session=session)
+            scope, name = rule.get_rule_did(rule_id, session=session)
         except RucioException as error:
             raise _rule_not_found(rule_id, error)
 
-        auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_history', kwargs={'scope': scope.external}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_replication_rule_history', kwargs={'scope': scope.external, 'name': name}, session=session)
         if not auth_result.allowed:
             raise AccessDenied(_access_denied_message_rule_id(rule_id, issuer))
 
@@ -288,13 +288,13 @@ def list_associated_replication_rules_for_file(
     scope_internal = InternalScope(scope, vo=vo)
     internal_issuer = InternalAccount(issuer, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
-        auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_associated_replication_rules_for_file', kwargs={'scope': scope, 'name': name}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot retrieve associated replication rules of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         # the rules protecting a file may be set on its parent collections, which may live in other scopes
         rules = rule.list_associated_rules_for_file(scope=scope_internal, name=name, session=session)
-        for r in role.filter_iterable_by_scope_access(rules, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_associated_replication_rules_for_file', session=session)):
+        for r in role.filter_iterable_by_did_access(rules, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_associated_replication_rules_for_file', session=session)):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -419,8 +419,9 @@ def examine_replication_rule(
         except RucioException as error:
             raise _rule_not_found(rule_id, error)
 
-        scope = result['scope'].external
-        auth_result = has_permission(issuer=issuer, vo=vo, action='examine_replication_rule', kwargs={'scope': scope}, session=session)
+        # the examination does not give the name of the DID of the rule
+        scope, name = rule.get_rule_did(rule_id, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='examine_replication_rule', kwargs={'scope': scope.external, 'name': name}, session=session)
         if not auth_result.allowed:
             raise AccessDenied(_access_denied_message_rule_id(rule_id, issuer))
 

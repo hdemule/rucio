@@ -51,7 +51,7 @@ def list_scopes(issuer: str, filter_: Optional[dict[str, Any]] = None, vo: str =
 
     with db_session(DatabaseOperationType.READ) as session:
         internal_issuer = InternalAccount(issuer, vo=vo)
-        can_access = role.scope_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_scopes', session=session))
+        can_access = role.scope_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_scopes', session=session), any_did=True)
         return [scope.external for scope in core_scope.list_scopes(filter_=filter_, session=session) if can_access(scope)]
 
 
@@ -74,7 +74,7 @@ def list_scopes_with_account(account: str, filter_: Optional[dict[str, Any]] = N
     with db_session(DatabaseOperationType.READ) as session:
         internal_account = InternalAccount(account, vo=vo)
         scopes = core_scope.list_scopes_with_account(account=internal_account, filter_=filter_, session=session)
-        for scope in role.filter_iterable_by_scope_access(items=scopes, account=internal_account, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_account, 'list_scopes_with_account', session=session)):
+        for scope in role.filter_iterable_by_scope_access(items=scopes, account=internal_account, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_account, 'list_scopes_with_account', session=session), any_did=True):
             yield gateway_update_return_dict(scope, session=session)
 
 
@@ -127,7 +127,7 @@ def get_scopes(
 
     with db_session(DatabaseOperationType.READ) as session:
         internal_issuer = InternalAccount(issuer, vo=vo)
-        can_access = role.scope_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_scopes', session=session))
+        can_access = role.scope_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_scopes', session=session), any_did=True)
         return [scope.external for scope in core_scope.get_scopes(internal_account, session=session) if can_access(scope)]
 
 

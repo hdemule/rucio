@@ -561,7 +561,8 @@ def set_account_role_activates_at(account: "InternalAccount", role: str, activat
     :raises RoleAssignmentNotFound: If the role is not assigned to the account.
     :raises InputValidationError: If the date is not valid, or if it is not before the `expires_at` of the assignment.
     """
-    return set_account_role_dates(account, role, activates_at=activates_at, session=session)["activates_at"]
+    # an activation date is always stored, None meaning now, see :func:`set_account_role_dates`
+    return cast("datetime", set_account_role_dates(account, role, activates_at=activates_at, session=session)["activates_at"])
 
 
 def set_account_role_dates(
@@ -1336,6 +1337,28 @@ def has_permission(account: "InternalAccount", request: PermissionRequest, *, se
     return any(handler.matches(request, target, session=session) for target in handler.granted_targets(account, request.operation, session=session))
 
 
+def has_did_permission_in_scope(account: "InternalAccount", scope: "InternalScope", operation: DidOperationType, *, session: "Session") -> bool:
+    """
+    Tell whether RBAC grants the account an operation on some DIDs of a scope, whatever their names.
+
+    This is the case if the account has implicit access to the scope (as its owner), or if one of its roles grants
+    the operation on a DID pattern whose scope part matches the scope: 'data:raw*' and 'data*:*' both count for the
+    scope 'data'. Like :func:`has_permission`, neither whether RBAC is enabled nor root and admin privileges are looked at.
+
+    :param account: The account to check.
+    :param scope: The scope.
+    :param operation: The operation, e.g. `DidOperationType.READ`.
+    :param session: The database session.
+    """
+    whole_scope = DidPermissionRequest(operation=operation, scope=scope)
+    handler = _request_handler(whole_scope)
+    if handler.implicit_access(account, whole_scope, session=session):
+        return True
+    external = str(scope.external)
+    return any(_prefix_pattern_matches(external, target.partition(DID_SEPARATOR)[0])
+               for target in handler.granted_targets(account, operation, session=session))
+
+
 def _permission_checker(*, account: "InternalAccount", session: "Session") -> "Callable[[PermissionRequest], bool]":
     """
     Build a callable telling whether RBAC grants the account a request, as :func:`has_permission` does,
@@ -1428,28 +1451,90 @@ def scope_access_checker(
     session: "Session",
     operation: DidOperationType = DidOperationType.READ,
     skip_filtering: bool = False,
+    any_did: bool = False,
 ) -> "Callable[[Optional[InternalScope]], bool]":
     """
     Build a callable telling whether the account may perform an operation on a given scope, see :func:`_permission_checker`.
 
-    This is meant for responses where the scope is not stored under a single dictionary key
-    (e.g. 'scope:name' strings or nested dictionaries), for which :func:`filter_iterable_by_scope_access` does not fit.
+    By default, the operation must be granted on the whole scope, by a pattern with the '*' name part: this is meant
+    for items standing for the whole content of a scope, e.g. counts. With `any_did`, a grant on some DIDs of the scope
+    is enough, as in :func:`has_did_permission_in_scope`: this is meant for listing the scopes themselves.
+    Items standing for DIDs are filtered with :func:`did_access_checker` instead.
 
     :param account: The account for which to check access.
     :param session: The database session.
     :param operation: The type of operation to check access for.
     :param skip_filtering: Grant access to every scope, without checking it, see :func:`is_filter_disabled`.
+    :param any_did: Grant access to a scope if the operation is granted on some of its DIDs.
     :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused, unless `skip_filtering` is given.
     """
     if skip_filtering:
         return lambda scope: True
 
     check = _permission_checker(account=account, session=session)
+    # the scope parts of the patterns granting the operation, e.g. 'data' for 'data:raw*'
+    scope_parts = [target.partition(DID_SEPARATOR)[0] for target in _permission_handler(RolePermissionType.DID).granted_targets(account, operation, session=session)] if any_did else []
 
     def _can_access(scope: "Optional[InternalScope]") -> bool:
         if scope is None or not isinstance(scope, InternalScope):
             return False
-        return check(DidPermissionRequest(operation=operation, scope=scope))
+        if check(DidPermissionRequest(operation=operation, scope=scope)):
+            return True
+        external = str(scope.external)
+        return any(_prefix_pattern_matches(external, scope_part) for scope_part in scope_parts)
+
+    return _can_access
+
+
+def _did_owner(scope: "InternalScope", name: str, *, session: "Session") -> "Optional[InternalAccount]":
+    """The account owning a DID, None if the DID does not exist."""
+    stmt = select(models.DataIdentifier.account).where(models.DataIdentifier.scope == scope, models.DataIdentifier.name == name)
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def did_access_checker(
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: DidOperationType = DidOperationType.READ,
+    skip_filtering: bool = False,
+) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
+    """
+    Build a callable telling whether the account may perform an operation on a given DID, as the permission policy
+    decides it with RBAC (see `_rbac_reads_did` in :mod:`rucio.core.permission.generic`): a role grants the operation
+    on a DID pattern matching the DID, or the account owns the DID and a role grants it some READ in its scope.
+    Root, the holders of the admin role and the owner of the scope may access every DID of the scope.
+
+    The roles of the account are looked up once and the whole-scope decisions are kept per scope, see
+    :func:`scope_access_checker`, but the DIDs are decided one by one, so that a long listing is not kept in memory.
+    The owner of a DID is only looked up when no pattern matches it, and some READ is granted in its scope.
+
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param skip_filtering: Grant access to every DID, without checking it, see :func:`is_filter_disabled`.
+    :returns: A callable taking a scope and a name, returning True if the account may access the DID. A scope that is None or not an InternalScope is refused, and so is a name that is None, unless the whole scope is granted or `skip_filtering` is given.
+    """
+    if skip_filtering:
+        return lambda scope, name: True
+
+    whole_scope = scope_access_checker(account=account, session=session, operation=operation)
+    reads_in_scope = scope_access_checker(account=account, session=session, operation=DidOperationType.READ, any_did=True)
+    # the patterns with the '*' name part are already looked at by `whole_scope`
+    name_patterns = [target for target in _permission_handler(RolePermissionType.DID).granted_targets(account, operation, session=session)
+                     if target.partition(DID_SEPARATOR)[2] != DID_WILDCARD]
+    scopes_read: dict[InternalScope, bool] = {}
+
+    def _can_access(scope: "Optional[InternalScope]", name: Optional[str]) -> bool:
+        if whole_scope(scope):
+            return True
+        if scope is None or not isinstance(scope, InternalScope) or name is None:
+            return False
+        if any(_did_pattern_matches(scope, name, did_pattern) for did_pattern in name_patterns):
+            return True
+        if scope not in scopes_read:
+            scopes_read[scope] = reads_in_scope(scope)
+        return scopes_read[scope] and _did_owner(scope, name, session=session) == account
 
     return _can_access
 
@@ -1462,9 +1547,11 @@ def filter_iterable_by_scope_access(
     operation: DidOperationType = DidOperationType.READ,
     scope_keyword: str = "scope",
     skip_filtering: bool = False,
+    any_did: bool = False,
 ) -> "Iterator[dict[str, Any]]":
     """
     Yield only items whose scope the account may perform an operation on, see :func:`scope_access_checker`.
+    Items standing for DIDs are filtered with :func:`filter_iterable_by_did_access` instead.
 
     :param items: An iterable of dictionaries representing items with associated scopes.
     :param account: The account for which to check access.
@@ -1472,12 +1559,42 @@ def filter_iterable_by_scope_access(
     :param operation: The type of operation to check access for.
     :param scope_keyword: The key in the item dictionaries that contains the associated scope.
     :param skip_filtering: Yield every item, without checking its scope, see :func:`is_filter_disabled`.
+    :param any_did: Yield an item if the operation is granted on some DIDs of its scope.
     :returns: An iterator over the items that the account has access to.
     """
-    can_access = scope_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering)
+    can_access = scope_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering, any_did=any_did)
 
     for item in items:
         if can_access(item.get(scope_keyword)):
+            yield item
+
+
+def filter_iterable_by_did_access(
+    items: "Iterable[dict[str, Any]]",
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: DidOperationType = DidOperationType.READ,
+    scope_keyword: str = "scope",
+    name_keyword: str = "name",
+    skip_filtering: bool = False,
+) -> "Iterator[dict[str, Any]]":
+    """
+    Yield only items whose DID the account may perform an operation on, see :func:`did_access_checker`.
+
+    :param items: An iterable of dictionaries representing items with associated DIDs.
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param scope_keyword: The key in the item dictionaries that contains the scope of the DID.
+    :param name_keyword: The key in the item dictionaries that contains the name of the DID.
+    :param skip_filtering: Yield every item, without checking its DID, see :func:`is_filter_disabled`.
+    :returns: An iterator over the items that the account has access to.
+    """
+    can_access = did_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering)
+
+    for item in items:
+        if can_access(item.get(scope_keyword), item.get(name_keyword)):
             yield item
 
 
@@ -1588,7 +1705,7 @@ def rse_quota_left(
 
         # a role has a single local limit per RSE
         local_left = float('inf') if local_grant.bytes == ROLE_QUOTA_NOCAP else local_grant.bytes - usage.get(rse_id, 0)
-        global_left = {
+        global_left: dict[str, float] = {
             cast(str, grant.rse_expression): grant.bytes - sum(usage.get(covered, 0) for covered in grant.rse_ids)
             for grant in role_grants
             if grant.locality == LimitLocality.GLOBAL and grant.bytes != ROLE_QUOTA_NOCAP

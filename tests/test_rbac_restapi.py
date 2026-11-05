@@ -991,7 +991,7 @@ _OWNERSHIP_CASES = pytest.mark.parametrize(
 
 
 class TestOWNERSHIP:
-    """RBAC(USER): DELETE on the content of a scope requires DELETE on the scope, or owning the content and WRITE on the scope"""
+    """RBAC(USER): altering existing content requires DELETE on it, or owning it with some READ in its scope; WRITE alone does not alter the content of other accounts"""
 
     @_OWNERSHIP_CASES
     def test_remove_did(self, vo, owned_data, owner, account, allowed):
@@ -1005,17 +1005,32 @@ class TestOWNERSHIP:
         name = owned_data[owner]['dataset']
         assert _allowed(lambda: gateway_did.delete_metadata(scope='atlas', name=name, key='rbac_test_key', issuer=account, vo=vo)) == allowed
 
-    @_OWNERSHIP_CASES
+    @pytest.mark.parametrize(('owner', 'account', 'allowed'), [('alice', 'alice', False), ('root', 'alice', False), ('bob', 'bob', False), ('alice', 'root', True)],
+                             ids=['own dataset with WRITE', 'dataset of another account with WRITE', 'own dataset without WRITE', 'admin'])
     def test_close_dataset(self, vo, owned_data, owner, account, allowed):
+        """Closing a dataset is left to root/admin and to the owner of the scope: no role grants it, even on owned datasets"""
         name = owned_data[owner]['dataset']
         assert _allowed(lambda: gateway_did.set_status(scope='atlas', name=name, issuer=account, vo=vo, open=False)) == allowed
 
     @_OWNERSHIP_CASES
     def test_detach_dids(self, vo, owned_data, owner, account, allowed):
-        """The ownership of the collection matters, not the one of its content"""
+        """Detaching the content of the owner of a collection takes owning the collection, or DELETE on it"""
         data = owned_data[owner]
         dids = [{'scope': 'atlas', 'name': data['file']}]
         assert _allowed(lambda: gateway_did.detach_dids(scope='atlas', name=data['dataset'], dids=dids, issuer=account, vo=vo)) == allowed
+
+    @pytest.mark.parametrize(('owner', 'account', 'allowed'), [('alice', 'alice', True), ('root', 'alice', False), ('bob', 'bob', False)],
+                             ids=['own content with WRITE', 'content of another account without DELETE', 'own content without WRITE'])
+    def test_detach_dids_from_writable_dataset(self, vo, owned_data, owner, account, allowed):
+        """WRITE on a collection of another account detaches the content the account owns, not the content of others"""
+        dataset = owned_data['root']['dataset']
+        file = owned_data[owner]['file']
+        if owner != 'root':
+            # the file of root is already in the dataset of root
+            scope = InternalScope('atlas', vo=vo)
+            did_core.attach_dids(scope=scope, name=dataset, dids=[{'scope': scope, 'name': file}], account=InternalAccount('root', vo=vo))
+        dids = [{'scope': 'atlas', 'name': file}]
+        assert _allowed(lambda: gateway_did.detach_dids(scope='atlas', name=dataset, dids=dids, issuer=account, vo=vo)) == allowed
 
     @_OWNERSHIP_CASES
     def test_delete_rule(self, vo, owned_data, owner, account, allowed):
@@ -1024,8 +1039,15 @@ class TestOWNERSHIP:
 
     @_OWNERSHIP_CASES
     def test_update_rule(self, vo, owned_data, owner, account, allowed):
+        """Updating the comment of a rule of another account alters it, so WRITE is not enough"""
         rule_id = owned_data[owner]['rule']
         assert _allowed(lambda: gateway_rule.update_replication_rule(rule_id=rule_id, options={'comment': 'RBAC test'}, issuer=account, vo=vo)) == allowed
+
+    @_OWNERSHIP_CASES
+    def test_update_rule_lifetime(self, vo, owned_data, owner, account, allowed):
+        """The lifetime of a rule leads to the deletion of its replicas: like any update, it requires DELETE or owning the rule"""
+        rule_id = owned_data[owner]['rule']
+        assert _allowed(lambda: gateway_rule.update_replication_rule(rule_id=rule_id, options={'lifetime': 86400}, issuer=account, vo=vo)) == allowed
 
     @pytest.mark.parametrize(('owner', 'account', 'allowed'), [('alice', 'alice', False), ('bob', 'bob', False), ('alice', 'root', True)],
                              ids=['own replica with WRITE', 'own replica without WRITE', 'admin'])
@@ -1033,6 +1055,66 @@ class TestOWNERSHIP:
         """`rucio replica remove` is an operator action: owning the replica is not enough"""
         name = owned_data[owner]['file']
         assert _allowed(lambda: gateway_replica.set_tombstone(rse=rbac_data.rse, scope='atlas', name=name, issuer=account, vo=vo)) == allowed
+
+
+@pytest.fixture
+def bob_reads_file_a(vo, rbac_data):
+    """
+    Bob, who reads nothing otherwise, reads alice's file `file_a` through a name pattern, and owns a dataset in the
+    scope 'alice': the DID the pattern matches and the owned dataset are what he may read in the scope. Yields the
+    'scope:name' of the dataset.
+    """
+    role_name = 'tmp_read_%s' % uuid4().hex[:12]
+    permission = _did_permission('read', rbac_data.file_a)
+    owned = 'alice:%s_owned_ds' % uuid4().hex[:12]
+    with db_session(DatabaseOperationType.WRITE) as session:
+        did_core.add_did(scope=InternalScope('alice', vo=vo), name=_name(owned), did_type=DIDType.DATASET, account=InternalAccount('bob', vo=vo), session=session)
+
+    assert _post(_role_path(role_name), 'root').status_code == CREATED
+    try:
+        assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=permission).status_code == CREATED
+        assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
+        yield owned
+    finally:
+        _delete(_account_roles_path('bob', role_name), 'root')
+        _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=permission)
+        assert _delete(_role_path(role_name), 'root').status_code == OK
+
+
+class TestNAMEPATTERN:
+    """RBAC(USER): READ on a name pattern reads the DIDs it matches and the DIDs the account owns in the scope, nothing else"""
+
+    def test_get_did(self, rbac_data, bob_reads_file_a):
+        assert _get(_did_path(rbac_data.file_a), 'bob').status_code == OK
+        assert _get(_did_path(bob_reads_file_a), 'bob').status_code == OK
+        assert _get(_did_path(rbac_data.dataset_a), 'bob').status_code == FORBIDDEN
+
+    def test_list_dids(self, rbac_data, bob_reads_file_a):
+        path = '/dids/alice/dids/search'
+        expected = {rbac_data.file_a, bob_reads_file_a}
+        _assert_visible(_get(path, 'bob', params={'name': '*', 'type': 'all', 'long': True}), expected)
+        # the short format only yields names
+        _assert_visible(_get(path, 'bob', params={'name': '*', 'type': 'all'}), {_name(did) for did in expected}, key=set)
+
+    def test_list_content(self, rbac_data, bob_reads_file_a):
+        """The content of a collection is only listed to who reads the collection"""
+        assert _get(_did_path(rbac_data.dataset_a, 'dids'), 'bob').status_code == FORBIDDEN
+        _assert_visible(_get(_did_path(bob_reads_file_a, 'dids'), 'bob'), set())
+
+    def test_list_parent_dids(self, rbac_data, bob_reads_file_a):
+        """The parents of a readable file are filtered per DID: bob reads neither dataset holding `file_a`"""
+        _assert_visible(_get(_did_path(rbac_data.file_a, 'parents'), 'bob'), set())
+
+    def test_list_replicas(self, rbac_data, bob_reads_file_a):
+        payload = {'dids': [{'scope': 'alice', 'name': _name(rbac_data.file_a)}]}
+        _assert_visible(_post('/replicas/list', 'bob', json=payload), {rbac_data.file_a})
+        payload = {'dids': [{'scope': 'alice', 'name': _name(rbac_data.dataset_a)}]}
+        assert _post('/replicas/list', 'bob', json=payload).status_code == FORBIDDEN
+
+    def test_list_scopes(self, bob_reads_file_a):
+        """A scope is listed to who reads some of its DIDs"""
+        assert 'alice' in _get('/scopes/', 'bob').json()
+        assert 'root' not in _get('/scopes/', 'bob').json()
 
 
 class TestSCOPE:
@@ -1611,6 +1693,23 @@ class TestROLE:
             permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
             assert permissions == [{'type': 'did', 'did_pattern': 'atlas:*', 'operation': 'read'}]
         finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    def test_name_pattern_grants_creating_matching_dids(self):
+        """RBAC(USER): WRITE on a name pattern lets an account create the DIDs whose name matches, and only those"""
+        role_name = 'tmp_did_create_%s' % uuid4().hex[:8]
+        prefix = 'rbac_%s' % uuid4().hex[:12]
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            # bob owns no scope and holds no role: only the name pattern lets him write into the scope of root
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('write', 'root:%s*' % prefix)).status_code == CREATED
+            assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
+
+            dataset = {'type': 'DATASET', 'lifetime': 3600}
+            assert _post(_did_path('root:%s_ds' % prefix), 'bob', json=dataset).status_code == CREATED
+            assert _post(_did_path('root:other_%s' % prefix), 'bob', json=dataset).status_code == FORBIDDEN
+        finally:
+            _delete(_account_roles_path('bob', role_name), 'root')
             _delete(_role_path(role_name), 'root', json={'force': True})
 
     @pytest.mark.parametrize(

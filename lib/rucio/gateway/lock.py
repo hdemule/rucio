@@ -53,7 +53,7 @@ def get_dataset_locks(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks', kwargs={'scope': scope}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks', kwargs={'scope': scope, 'name': name}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot retrieve dataset locks of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
@@ -101,7 +101,7 @@ def get_dataset_locks_bulk(
 
     with db_session(DatabaseOperationType.READ) as session:
         for did in dids_converted:
-            auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks_bulk', kwargs={'scope': str(did["scope"])}, session=session)
+            auth_result = has_permission(issuer=issuer, vo=vo, action='get_dataset_locks_bulk', kwargs={'scope': str(did["scope"]), 'name': did['name']}, session=session)
             if not auth_result.allowed:
                 raise AccessDenied('Account %s cannot retrieve dataset locks of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, str(did['scope']), did['name']))
 
@@ -133,7 +133,7 @@ def get_dataset_locks_by_rse(
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
         locks = lock.get_dataset_locks_by_rse_id(rse_id=rse_id, session=session)
 
-        for lock_object in role.filter_iterable_by_scope_access(locks, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_dataset_locks_by_rse', session=session)):
+        for lock_object in role.filter_iterable_by_did_access(locks, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_dataset_locks_by_rse', session=session)):
             yield gateway_update_return_dict(lock_object, session=session)
 
 
@@ -157,7 +157,7 @@ def get_replica_locks_for_rule_id(
             return
 
         scope_str = str(rule['scope'])
-        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope_str}, session=session)
+        auth_result = has_permission(issuer=issuer, vo=vo, action='get_replica_locks_for_rule_id', kwargs={'scope': scope_str, 'name': rule['name']}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot retrieve replica locks for replication rule with id %s. The rule is outside the account\'s authorized scopes.' % (issuer, rule_id))
 
@@ -165,7 +165,7 @@ def get_replica_locks_for_rule_id(
         locks = lock.get_replica_locks_for_rule_id(rule_id=rule_id, session=session)
 
         internal_issuer = InternalAccount(issuer, vo=vo)
-        for lock_object in role.filter_iterable_by_scope_access(locks, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_replica_locks_for_rule_id', session=session)):
+        for lock_object in role.filter_iterable_by_did_access(locks, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_replica_locks_for_rule_id', session=session)):
             if lock_object['scope'].vo != vo:  # rule is on a different VO, so don't return any locks
                 LOGGER.debug('rule id %s is not present on VO %s' % (rule_id, vo))
                 break
