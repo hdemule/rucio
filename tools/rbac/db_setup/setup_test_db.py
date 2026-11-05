@@ -39,11 +39,11 @@ alice), RSE_USERDISK by an account limit of alice (see `DEV_RSE_ROLE_LIMITS` and
 The policy package only lets a non-admin account register replicas on an RSE whose name ends with
 one of its user suffixes (e.g. USERDISK), which RSE1 to RSE3 do not. RSE_USERDISK does: alice
 uploads there herself, as a temporary deposit, then adds rules to get the data onto RSE1 to RSE3,
-which count against her limits there. Without --register-after-upload, the upload registers the
-replica first and marks it available once written, which requires DELETE on the scope, e.g.:
+which count against her limits there. The upload registers the replica and marks it available once
+written, both being writes that WRITE on the DID grants, e.g.:
 
     export ALICE=/opt/rucio/etc/rucio-alice.cfg
-    RUCIO_CONFIG=$ALICE rucio upload --rse RSE_USERDISK --scope atlas --lifetime 86400 --register-after-upload /tmp/myfile
+    RUCIO_CONFIG=$ALICE rucio upload --rse RSE_USERDISK --scope atlas --lifetime 86400 /tmp/myfile
     RUCIO_CONFIG=$ALICE rucio rule add atlas:myfile --copies 1 --rses RSE1
     rucio-abacus-account --run-once    # no daemon runs in the dev environment, this applies the new usage
     RUCIO_CONFIG=$ALICE rucio role account list --me --detail
@@ -77,7 +77,7 @@ from rucio.common.constants import DEFAULT_VO, ROLE_QUOTA_NOCAP  # noqa: E402
 from rucio.common.exception import RucioException  # noqa: E402
 from rucio.common.types import InternalAccount, InternalScope  # noqa: E402
 from rucio.db.sqla import models  # noqa: E402
-from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RolePermissionType, ScopeOperationType  # noqa: E402
+from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DidOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RolePermissionType  # noqa: E402
 from rucio.db.sqla.session import db_session, get_engine  # noqa: E402
 
 POLICY_PACKAGE = 'rbac_rucio_policy_package'
@@ -110,10 +110,10 @@ DATASETS = {
 RULE_DIDS = [('alice', 'file1.png'), ('root', 'file1.png')]
 # the DID with a transfer request, and a past one in the history, towards the RSE
 REQUEST_DID = ('alice', 'file1.png')
-# role -> (operations granted on scope pattern, accounts holding the role)
+# role -> (operations granted on DID pattern, accounts holding the role)
 ROLES = {
-    'data-scientist': ({('read', 'atlas'), ('write', 'atlas'), ('read', 'archive')}, {'alice'}),
-    'superuser': ({('read', '*')}, {'jdoe', 'panda'}),
+    'data-scientist': ({('read', 'atlas:*'), ('write', 'atlas:*'), ('read', 'archive:*')}, {'alice'}),
+    'superuser': ({('read', '*:*')}, {'jdoe', 'panda'}),
 }
 ACCOUNTS_WITHOUT_ROLES = ['bob']
 
@@ -271,7 +271,7 @@ def _model_enums() -> dict[str, set[str]]:
 
 
 def check_enums() -> Optional[str]:
-    """Compare the enum type each column uses in the database with the models, e.g. a ScopeOperationType value added after the type was created."""
+    """Compare the enum type each column uses in the database with the models, e.g. a DidOperationType value added after the type was created."""
     if get_engine().dialect.name != 'postgresql':
         return None
     rows = _read(text(
@@ -439,9 +439,10 @@ def check_role(role: str) -> Optional[str]:
 
 def check_role_permissions(role: str, expected: set[tuple[str, str]]) -> Callable[[], Optional[str]]:
     def check() -> Optional[str]:
-        rows = _read(select(models.RoleScopePermissionAssociation.operation, models.RoleScopePermissionAssociation.scope_pattern).where(
-            models.RoleScopePermissionAssociation.role == role))
-        missing = expected - {(row[0].value, row[1]) for row in rows}
+        model = models.RoleDidPermissionAssociation
+        rows = _read(select(model.did_pattern, *(getattr(model, operation.column) for operation in DidOperationType)).where(model.role == role))
+        granted = {(operation.value, row[0]) for row in rows for operation, is_granted in zip(DidOperationType, row[1:]) if is_granted}
+        missing = expected - granted
         if missing:
             return 'missing %s' % ', '.join('%s on %s' % permission for permission in sorted(missing))
     return check
@@ -676,8 +677,8 @@ def _provision_roles() -> None:
         role_core.sync_roles_from_policy_package(session=session)
     with db_session(DatabaseOperationType.WRITE) as session:
         for role, (permissions, holders) in ROLES.items():
-            for operation, scope_pattern in sorted(permissions):
-                role_core.add_role_permission(role, RolePermissionType.SCOPE, {'scope_pattern': scope_pattern, 'operation': ScopeOperationType(operation)}, session=session)
+            for operation, did_pattern in sorted(permissions):
+                role_core.add_role_permission(role, RolePermissionType.DID, {'did_pattern': did_pattern, 'operation': DidOperationType(operation)}, session=session)
             for account in sorted(holders):
                 role_core.add_account_role(_account(account), role, session=session)
 

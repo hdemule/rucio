@@ -105,7 +105,7 @@ MODELS_WITH_CONSTRAINTS = (
     models.Scope,
     models.Roles,
     models.AccountRoleAssociation,
-    models.RoleScopePermissionAssociation,
+    models.RoleDidPermissionAssociation,
 )
 
 ROLES_TABLE = 'roles'
