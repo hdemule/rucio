@@ -212,6 +212,40 @@ def _is_admin(issuer: "InternalAccount", session: "Session") -> bool:
     return has_account_attribute(account=issuer, key='admin', session=session)
 
 
+def _did_exists(scope: "InternalScope", name: str, session: "Session") -> bool:
+    """
+    Checks if a DID exists.
+
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param session: The DB session to use
+    :returns: True if the DID exists, otherwise False
+    """
+    try:
+        get_did(scope=scope, name=name, session=session)
+        return True
+    except DataIdentifierNotFound:
+        return False
+
+
+def _internal_dids(issuer: "InternalAccount", dids: "Iterable[Mapping[str, Any]]") -> "list[tuple[InternalScope, str]]":
+    """
+    The distinct DIDs given as dictionaries with a 'scope' and a 'name', as (scope, name), external scopes being resolved in the VO of the issuer.
+
+    :param issuer: Account identifier which issues the command.
+    :param dids: The DIDs.
+    :returns: The DIDs, in the order they are first given.
+    """
+    internal = {}
+    for did in dids:
+        scope = did['scope'] if isinstance(did['scope'], InternalScope) else InternalScope(did['scope'], vo=issuer.vo)
+        internal.setdefault((scope, did['name']), None)
+    return list(internal)
+
+
+# ----- RBAC helpers -----
+
+
 def _rbac_permission_access(issuer: "InternalAccount", scope: "InternalScope", name: Optional[str], operation: DidOperationType, session: "Session") -> bool:
     """
     Checks if a role grants an account an operation on a DID, or on a whole scope without `name`, see :func:`rucio.core.role.has_permission`.
@@ -279,37 +313,6 @@ def _rbac_rule_ownership_access(issuer: "InternalAccount", rule: "Mapping[str, A
     :returns: True if the account owns the rule, otherwise False (also if it does not exist)
     """
     return rule['account'] == issuer and role_core.has_any_scope_prefix_access(account=issuer, scope=rule['scope'], operation=DidOperationType.READ, session=session)
-
-
-def _did_exists(scope: "InternalScope", name: str, session: "Session") -> bool:
-    """
-    Checks if a DID exists.
-
-    :param scope: The scope of the DID.
-    :param name: The name of the DID.
-    :param session: The DB session to use
-    :returns: True if the DID exists, otherwise False
-    """
-    try:
-        get_did(scope=scope, name=name, session=session)
-        return True
-    except DataIdentifierNotFound:
-        return False
-
-
-def _internal_dids(issuer: "InternalAccount", dids: "Iterable[Mapping[str, Any]]") -> "list[tuple[InternalScope, str]]":
-    """
-    The distinct DIDs given as dictionaries with a 'scope' and a 'name', as (scope, name), external scopes being resolved in the VO of the issuer.
-
-    :param issuer: Account identifier which issues the command.
-    :param dids: The DIDs.
-    :returns: The DIDs, in the order they are first given.
-    """
-    internal = {}
-    for did in dids:
-        scope = did['scope'] if isinstance(did['scope'], InternalScope) else InternalScope(did['scope'], vo=issuer.vo)
-        internal.setdefault((scope, did['name']), None)
-    return list(internal)
 
 
 def _rbac_can_read_did(issuer: "InternalAccount", scope: "InternalScope", name: str, session: "Session") -> bool:
@@ -606,6 +609,9 @@ def _is_replica_being_copied(rse_id: str, scope: "InternalScope", name: str, ses
         return get_replica(rse_id=rse_id, scope=scope, name=name, session=session)['state'] == ReplicaState.COPYING
     except ReplicaNotFound:
         return False
+
+
+# ----- Permission functions -----
 
 
 def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
