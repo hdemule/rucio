@@ -823,10 +823,6 @@ class CheckedPermissionTypeHandler(PermissionTypeHandler, Generic[RequestT]):
         """Tell whether a stored target covers the resource of the request."""
         raise NotImplementedError
 
-    def implicit_access(self, account: "InternalAccount", request: RequestT, *, session: "Session") -> bool:
-        """Tell whether the account may perform the request without holding any role, e.g. as the owner of the resource."""
-        return False
-
 
 _PERMISSION_HANDLERS: dict[RolePermissionType, PermissionTypeHandler] = {}
 
@@ -973,7 +969,9 @@ class DidPermissionHandler(CheckedPermissionTypeHandler[DidPermissionRequest]):
     """
     Operations on DIDs, granted on DID patterns, see :func:`_validate_did_pattern`.
 
-    The operations are those of `DidOperationType`: 'read', 'write' and 'delete'. The owner of a scope may perform any operation on its DIDs without holding any role.
+    The operations are those of `DidOperationType`: 'read', 'write' and 'delete'. Only what the roles grant is
+    looked at: who may act without a role (root, admins, the owner of a scope, ...) is the permission policy's business,
+    see :mod:`rucio.core.permission.generic`.
     """
     permission_type = RolePermissionType.DID
     model = models.RoleDidPermissionAssociation
@@ -988,9 +986,6 @@ class DidPermissionHandler(CheckedPermissionTypeHandler[DidPermissionRequest]):
 
     def matches(self, request: DidPermissionRequest, target: str, *, session: "Session") -> bool:
         return _did_pattern_matches(request.scope, request.name, target)
-
-    def implicit_access(self, account: "InternalAccount", request: DidPermissionRequest, *, session: "Session") -> bool:
-        return is_scope_owner(scope=request.scope, account=account, session=session)
 
 
 # --- Limits -----------------------------------------------------------------------------------
@@ -1316,13 +1311,11 @@ def delete_role_permission(
 
 def has_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
     """
-    Tell whether RBAC grants the account the request, of any checked permission type.
+    Tell whether the roles of the account grant it the request, of any checked permission type: one of its roles
+    grants it through an assignment which is active, activated already and not expired yet.
 
-    The account may perform the request if it has implicit access to the resource (e.g. as the owner of a scope),
-    or if one of its roles grants it through an assignment which is active: activated already and not expired yet.
-
-    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`, nor are root and admin privileges:
-    both are the permission policy's business, which checks them before asking RBAC, see :mod:`rucio.core.permission.generic`.
+    Only the roles are looked at. Whether RBAC is enabled (see :func:`is_rbac_enabled`), root and admin privileges
+    and the ownership of the resource (e.g. of a scope) are the permission policy's business, see :mod:`rucio.core.permission.generic`.
 
         has_permission(account, DidPermissionRequest(operation=DidOperationType.READ, scope=scope), session=session)
 
@@ -1332,8 +1325,6 @@ def has_permission(account: "InternalAccount", request: PermissionRequest, *, se
     :raises InputValidationError: If the request is not one of a registered permission type checked against requests.
     """
     handler = _request_handler(request)
-    if handler.implicit_access(account, request, session=session):
-        return True
     return any(handler.matches(request, target, session=session) for target in handler.granted_targets(account, request.operation, session=session))
 
 
@@ -1343,19 +1334,16 @@ def has_any_scope_prefix_access(account: "InternalAccount", scope: "InternalScop
     only the scope part of the account's DID patterns is compared to the scope, their name part is ignored.
 
     For the scope 'data': 'data:raw1', 'data:raw*', 'data:*', 'da*:*' and '*:*' all count, 'other:*' does not.
-    The owner of the scope always passes (implicit access, as in :func:`has_permission`).
-    Like :func:`has_permission`, neither whether RBAC is enabled nor root and admin privileges are looked at.
+    Like :func:`has_permission`, only the roles are looked at: not whether RBAC is enabled, root and admin privileges, nor the owner of the scope.
 
     :param account: The account to check.
     :param scope: The scope.
     :param operation: The operation, e.g. `DidOperationType.READ`.
     :param session: The database session.
-    :returns: True if a DID pattern of the account's roles grants the operation in the scope, or if the account owns the scope.
+    :returns: True if a DID pattern of the account's roles grants the operation in the scope.
     """
     whole_scope = DidPermissionRequest(operation=operation, scope=scope)
     handler = _request_handler(whole_scope)
-    if handler.implicit_access(account, whole_scope, session=session):
-        return True
     external = str(scope.external)
     return any(_prefix_pattern_matches(external, target.partition(DID_SEPARATOR)[0])
                for target in handler.granted_targets(account, operation, session=session))
@@ -1382,7 +1370,7 @@ def _permission_checker(*, account: "InternalAccount", session: "Session") -> "C
 
     def _decide(request: PermissionRequest) -> bool:
         handler = _request_handler(request)
-        if privileged or handler.implicit_access(account, request, session=session):
+        if privileged:
             return True
 
         key = (handler.permission_type, request.operation)
@@ -1463,6 +1451,9 @@ def scope_access_checker(
     is enough, as in :func:`has_any_scope_prefix_access`: this is meant for listing the scopes themselves.
     Items standing for DIDs are filtered with :func:`did_access_checker` instead.
 
+    The owner of a scope may access it, as the permission policy decides it (see `_rbac_permission_access` in
+    :mod:`rucio.core.permission.generic`): listings are filtered here directly, not through the permission policy.
+
     :param account: The account for which to check access.
     :param session: The database session.
     :param operation: The type of operation to check access for.
@@ -1476,11 +1467,16 @@ def scope_access_checker(
     check = _permission_checker(account=account, session=session)
     # the scope parts of the patterns granting the operation, e.g. 'data' for 'data:raw*'
     scope_parts = [target.partition(DID_SEPARATOR)[0] for target in _permission_handler(RolePermissionType.DID).granted_targets(account, operation, session=session)] if any_did else []
+    owned_scopes: dict[InternalScope, bool] = {}
 
     def _can_access(scope: "Optional[InternalScope]") -> bool:
         if scope is None or not isinstance(scope, InternalScope):
             return False
         if check(DidPermissionRequest(operation=operation, scope=scope)):
+            return True
+        if scope not in owned_scopes:
+            owned_scopes[scope] = is_scope_owner(scope=scope, account=account, session=session)
+        if owned_scopes[scope]:
             return True
         external = str(scope.external)
         return any(_prefix_pattern_matches(external, scope_part) for scope_part in scope_parts)
@@ -1505,7 +1501,7 @@ def did_access_checker(
     Build a callable telling whether the account may perform an operation on a given DID, as the permission policy
     decides it with RBAC (see `_rbac_can_read_did` in :mod:`rucio.core.permission.generic`): a role grants the operation
     on a DID pattern matching the DID, or the account owns the DID and a role grants it some READ in its scope.
-    Root, the holders of the admin role and the owner of the scope may access every DID of the scope.
+    Root, the holders of the admin role and the owner of the scope may access every DID of the scope, see :func:`scope_access_checker`.
 
     The roles of the account are looked up once and the whole-scope decisions are kept per scope, see
     :func:`scope_access_checker`, but the DIDs are decided one by one, so that a long listing is not kept in memory.

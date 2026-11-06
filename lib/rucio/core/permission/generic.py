@@ -253,7 +253,10 @@ def _rbac_permission_access(issuer: "InternalAccount", scope: "InternalScope", n
 
     Giving the name only extends what is granted: a DID pattern covering the whole scope ('data:*') grants
     the DIDs of the scope as well as the scope, while a name pattern ('data:raw*') only grants the DIDs it matches.
-    The owner of the scope is granted everything in it.
+
+    The owner of the scope is granted every operation on it and on its DIDs, as if a role granted it 'read', 'write'
+    and 'delete' on '<scope>:*'. This is decided here, not by the roles (see :func:`rucio.core.role.has_permission`),
+    so it applies wherever a check asks for an operation, e.g. to the DIDs of its scope attached into another scope.
 
     :param issuer: Account identifier which issues the command.
     :param scope: The scope to check, or the scope of the DID.
@@ -262,6 +265,8 @@ def _rbac_permission_access(issuer: "InternalAccount", scope: "InternalScope", n
     :param session: The DB session to use
     :returns: True if RBAC grants the operation, otherwise False
     """
+    if rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session):
+        return True
     request = role_core.DidPermissionRequest(operation=operation, scope=scope, name=name)
     return role_core.has_permission(account=issuer, request=request, session=session)
 
@@ -1726,4 +1731,5 @@ def perm_read_scope(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
         return True
     if kwargs.get('name'):
         return _rbac_can_read_did(issuer, kwargs['scope'], kwargs['name'], session)
-    return role_core.has_any_scope_prefix_access(account=issuer, scope=kwargs['scope'], operation=DidOperationType.READ, session=session)
+    return rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+        or role_core.has_any_scope_prefix_access(account=issuer, scope=kwargs['scope'], operation=DidOperationType.READ, session=session)
