@@ -1337,18 +1337,20 @@ def has_permission(account: "InternalAccount", request: PermissionRequest, *, se
     return any(handler.matches(request, target, session=session) for target in handler.granted_targets(account, request.operation, session=session))
 
 
-def has_did_permission_in_scope(account: "InternalAccount", scope: "InternalScope", operation: DidOperationType, *, session: "Session") -> bool:
+def has_any_scope_prefix_access(account: "InternalAccount", scope: "InternalScope", operation: DidOperationType, *, session: "Session") -> bool:
     """
-    Tell whether RBAC grants the account an operation on some DIDs of a scope, whatever their names.
+    Tell whether RBAC grants the account an operation on at least one DID of a scope, whatever its name:
+    only the scope part of the account's DID patterns is compared to the scope, their name part is ignored.
 
-    This is the case if the account has implicit access to the scope (as its owner), or if one of its roles grants
-    the operation on a DID pattern whose scope part matches the scope: 'data:raw*' and 'data*:*' both count for the
-    scope 'data'. Like :func:`has_permission`, neither whether RBAC is enabled nor root and admin privileges are looked at.
+    For the scope 'data': 'data:raw1', 'data:raw*', 'data:*', 'da*:*' and '*:*' all count, 'other:*' does not.
+    The owner of the scope always passes (implicit access, as in :func:`has_permission`).
+    Like :func:`has_permission`, neither whether RBAC is enabled nor root and admin privileges are looked at.
 
     :param account: The account to check.
     :param scope: The scope.
     :param operation: The operation, e.g. `DidOperationType.READ`.
     :param session: The database session.
+    :returns: True if a DID pattern of the account's roles grants the operation in the scope, or if the account owns the scope.
     """
     whole_scope = DidPermissionRequest(operation=operation, scope=scope)
     handler = _request_handler(whole_scope)
@@ -1458,7 +1460,7 @@ def scope_access_checker(
 
     By default, the operation must be granted on the whole scope, by a pattern with the '*' name part: this is meant
     for items standing for the whole content of a scope, e.g. counts. With `any_did`, a grant on some DIDs of the scope
-    is enough, as in :func:`has_did_permission_in_scope`: this is meant for listing the scopes themselves.
+    is enough, as in :func:`has_any_scope_prefix_access`: this is meant for listing the scopes themselves.
     Items standing for DIDs are filtered with :func:`did_access_checker` instead.
 
     :param account: The account for which to check access.
@@ -1501,7 +1503,7 @@ def did_access_checker(
 ) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
     """
     Build a callable telling whether the account may perform an operation on a given DID, as the permission policy
-    decides it with RBAC (see `_rbac_reads_did` in :mod:`rucio.core.permission.generic`): a role grants the operation
+    decides it with RBAC (see `_rbac_can_read_did` in :mod:`rucio.core.permission.generic`): a role grants the operation
     on a DID pattern matching the DID, or the account owns the DID and a role grants it some READ in its scope.
     Root, the holders of the admin role and the owner of the scope may access every DID of the scope.
 

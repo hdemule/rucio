@@ -180,14 +180,14 @@ def test_ownership_needs_read_in_scope(random_account, grant, catalogue, db_sess
     own = '%s_own' % grant.prefix
     catalogue.add(own, owner=random_account)
     grant('mock:%(prefix)s_new*', 'w')
-    assert not generic._rbac_reads_in_scope(random_account, MOCK, db_session)
-    assert not generic._rbac_alters_did(random_account, MOCK, own, db_session)
-    assert not generic._rbac_reads_did(random_account, MOCK, own, db_session)
+    assert not core_role.has_any_scope_prefix_access(account=random_account, scope=MOCK, operation=DidOperationType.READ, session=db_session)
+    assert not generic._rbac_can_alter_did(random_account, MOCK, own, db_session)
+    assert not generic._rbac_can_read_did(random_account, MOCK, own, db_session)
 
     grant('mock:%(prefix)s_calib*', 'r')
-    assert generic._rbac_reads_in_scope(random_account, MOCK, db_session)
-    assert generic._rbac_alters_did(random_account, MOCK, own, db_session)
-    assert generic._rbac_reads_did(random_account, MOCK, own, db_session)
+    assert core_role.has_any_scope_prefix_access(account=random_account, scope=MOCK, operation=DidOperationType.READ, session=db_session)
+    assert generic._rbac_can_alter_did(random_account, MOCK, own, db_session)
+    assert generic._rbac_can_read_did(random_account, MOCK, own, db_session)
 
 
 def test_filtering_listings_per_did(random_account, grant, catalogue, db_session):
@@ -230,10 +230,10 @@ def test_altering_existing_dids(random_account, grant, catalogue, db_session, op
     name = '%s_file' % grant.prefix
     catalogue.add(name, owner=random_account if owned else 'someone else')
     grant('mock:%(prefix)s*', operations)
-    assert generic._rbac_alters_did(random_account, MOCK, name, db_session) is allowed
-    assert generic._rbac_grants_metadata(random_account, MOCK, name, ['project'], db_session) is allowed
+    assert generic._rbac_can_alter_did(random_account, MOCK, name, db_session) is allowed
+    assert generic._rbac_can_alter_metadata(random_account, MOCK, name, ['project'], db_session) is allowed
     # the keys held by Rucio are granted by no role, not even to the owner
-    assert not generic._rbac_grants_metadata(random_account, MOCK, name, ['bytes'], db_session)
+    assert not generic._rbac_can_alter_metadata(random_account, MOCK, name, ['bytes'], db_session)
 
 
 def test_attaching(random_account, grant, catalogue, db_session):
@@ -248,11 +248,11 @@ def test_attaching(random_account, grant, catalogue, db_session):
     grant('mock:%(prefix)s_f1', 'r')
     grant('mock:%(prefix)s_f3', 'w')
 
-    assert generic._rbac_grants_attach(random_account, MOCK, collection, db_session)
-    assert generic._rbac_grants_content(random_account, [{'scope': 'mock', 'name': readable}], False, db_session)
-    assert not generic._rbac_grants_content(random_account, [{'scope': 'mock', 'name': unreadable}], False, db_session)
-    assert generic._rbac_grants_content(random_account, [{'scope': 'mock', 'name': new_file}], True, db_session)
-    assert not generic._rbac_grants_content(random_account, [{'scope': 'mock', 'name': new_file}], False, db_session)
+    assert generic._rbac_can_attach_into(random_account, MOCK, collection, db_session)
+    assert generic._rbac_can_attach_dids(random_account, [{'scope': 'mock', 'name': readable}], False, db_session)
+    assert not generic._rbac_can_attach_dids(random_account, [{'scope': 'mock', 'name': unreadable}], False, db_session)
+    assert generic._rbac_can_attach_dids(random_account, [{'scope': 'mock', 'name': new_file}], True, db_session)
+    assert not generic._rbac_can_attach_dids(random_account, [{'scope': 'mock', 'name': new_file}], False, db_session)
 
 
 def test_detaching(random_account, grant, catalogue, db_session):
@@ -267,10 +267,10 @@ def test_detaching(random_account, grant, catalogue, db_session):
     grant('mock:%(prefix)s_ds2', 'd')
 
     owned_did, not_owned_did = {'scope': 'mock', 'name': owned}, {'scope': 'mock', 'name': not_owned}
-    assert generic._rbac_grants_detach(random_account, MOCK, writable, [owned_did], db_session)
-    assert not generic._rbac_grants_detach(random_account, MOCK, writable, [not_owned_did], db_session)
-    assert not generic._rbac_grants_detach(random_account, MOCK, writable, [owned_did, not_owned_did], db_session)
-    assert generic._rbac_grants_detach(random_account, MOCK, deletable, [not_owned_did], db_session)
+    assert generic._rbac_can_detach_from(random_account, MOCK, writable, [owned_did], db_session)
+    assert not generic._rbac_can_detach_from(random_account, MOCK, writable, [not_owned_did], db_session)
+    assert not generic._rbac_can_detach_from(random_account, MOCK, writable, [owned_did, not_owned_did], db_session)
+    assert generic._rbac_can_detach_from(random_account, MOCK, deletable, [not_owned_did], db_session)
 
 
 def test_creating_dids(random_account, grant, catalogue, db_session):
@@ -279,18 +279,18 @@ def test_creating_dids(random_account, grant, catalogue, db_session):
 
     new = {'scope': MOCK, 'name': '%s_ds' % grant.prefix}
     grant('mock:%(prefix)s*', 'w')
-    assert generic._rbac_grants_did_creation(random_account, new, db_session)
-    assert generic._rbac_grants_did_creation(random_account, {**new, 'meta': {'project': 'p'}}, db_session)
-    assert not generic._rbac_grants_did_creation(random_account, {**new, 'meta': {'bytes': 1}}, db_session)
+    assert generic._rbac_can_create_did(random_account, new, db_session)
+    assert generic._rbac_can_create_did(random_account, {**new, 'meta': {'project': 'p'}}, db_session)
+    assert not generic._rbac_can_create_did(random_account, {**new, 'meta': {'bytes': 1}}, db_session)
     # removing it later needs to own it, which needs some READ in the scope
-    assert not generic._rbac_grants_did_creation(random_account, {**new, 'meta': {'lifetime': 3600}}, db_session)
+    assert not generic._rbac_can_create_did(random_account, {**new, 'meta': {'lifetime': 3600}}, db_session)
     # its rules copy data, which needs to read it
-    assert not generic._rbac_grants_creation_content(random_account, {**new, 'rules': [{'copies': 1}]}, db_session)
+    assert not generic._rbac_can_create_did_with(random_account, {**new, 'rules': [{'copies': 1}]}, db_session)
 
     grant('mock:%(prefix)s_calib*', 'r')
-    assert generic._rbac_grants_did_creation(random_account, {**new, 'meta': {'lifetime': 3600}}, db_session)
-    assert generic._rbac_grants_creation_content(random_account, {**new, 'rules': [{'copies': 1}]}, db_session)
-    assert not generic._rbac_grants_did_creation(random_account, {'scope': MOCK, 'name': 'other_ds'}, db_session)
+    assert generic._rbac_can_create_did(random_account, {**new, 'meta': {'lifetime': 3600}}, db_session)
+    assert generic._rbac_can_create_did_with(random_account, {**new, 'rules': [{'copies': 1}]}, db_session)
+    assert not generic._rbac_can_create_did(random_account, {'scope': MOCK, 'name': 'other_ds'}, db_session)
 
 
 def test_rules_need_read(random_account, grant, catalogue, db_session):
@@ -301,8 +301,8 @@ def test_rules_need_read(random_account, grant, catalogue, db_session):
     catalogue.add(readable, owner='someone else')
     catalogue.add(unreadable, owner='someone else')
     grant('mock:%(prefix)s_r', 'r')
-    assert generic._rbac_reads_dids(random_account, [{'scope': 'mock', 'name': readable}], db_session)
-    assert not generic._rbac_reads_dids(random_account, [{'scope': 'mock', 'name': readable}, {'scope': 'mock', 'name': unreadable}], db_session)
+    assert generic._rbac_can_read_dids(random_account, [{'scope': 'mock', 'name': readable}], db_session)
+    assert not generic._rbac_can_read_dids(random_account, [{'scope': 'mock', 'name': readable}, {'scope': 'mock', 'name': unreadable}], db_session)
 
 
 def test_registering_replicas(random_account, grant, catalogue, db_session):
@@ -315,7 +315,7 @@ def test_registering_replicas(random_account, grant, catalogue, db_session):
     grant('mock:%(prefix)s_r', 'r')
 
     def registers(*names: str) -> bool:
-        return generic._rbac_grants_replica_registration(random_account, {'scopes': [MOCK], 'dids': [{'scope': 'mock', 'name': name} for name in names]}, db_session)
+        return generic._rbac_can_register_replicas(random_account, {'scopes': [MOCK], 'dids': [{'scope': 'mock', 'name': name} for name in names]}, db_session)
 
     assert registers(readable, new_file)
     assert not registers(unreadable)
@@ -339,8 +339,8 @@ def test_marking_replica_available(random_account, grant, catalogue, db_session,
     catalogue.add(name, owner=random_account if owned else 'someone else', state=state)
 
     kwargs = {'rse': 'SOME_USERDISK', 'rse_id': 'some-rse', 'scopes': [MOCK], 'dids': [{'scope': 'mock', 'name': name, 'state': 'A', 'path': path}]}
-    assert generic._rbac_grants_replica_states(random_account, kwargs, db_session) is allowed
-    assert not generic._rbac_grants_replica_states(random_account, {**kwargs, 'rse': 'SOME_DATADISK'}, db_session)
+    assert generic._rbac_can_update_replica_states(random_account, kwargs, db_session) is allowed
+    assert not generic._rbac_can_update_replica_states(random_account, {**kwargs, 'rse': 'SOME_DATADISK'}, db_session)
 
 
 @pytest.mark.parametrize(('operations', 'owned', 'lock_by_other', 'allowed'), [
@@ -362,10 +362,10 @@ def test_invalidating_and_deleting_replicas(random_account, grant, catalogue, db
 
     did = {'scope': 'mock', 'name': name}
     deletion = {'rse': 'SOME_USERDISK', 'rse_id': 'some-rse', 'scopes': [MOCK], 'dids': [did]}
-    assert generic._rbac_grants_replica_deletion(random_account, deletion, db_session) is allowed
+    assert generic._rbac_can_delete_replicas(random_account, deletion, db_session) is allowed
     for state in ('U', 'D', 'T', 'B'):
         update = {**deletion, 'dids': [{**did, 'state': state}]}
-        assert generic._rbac_grants_replica_states(random_account, update, db_session) is allowed
+        assert generic._rbac_can_update_replica_states(random_account, update, db_session) is allowed
 
 
 def test_creating_dids_for_another_account(random_account, grant, catalogue, db_session):
@@ -374,9 +374,9 @@ def test_creating_dids_for_another_account(random_account, grant, catalogue, db_
 
     grant('mock:%(prefix)s*', 'rw')
     new = {'scope': MOCK, 'name': '%s_ds' % grant.prefix}
-    assert generic._rbac_grants_did_creation(random_account, {**new, 'account': random_account}, db_session)
-    assert not generic._rbac_grants_did_creation(random_account, {**new, 'account': InternalAccount('root')}, db_session)
-    assert not generic._rbac_grants_did_creation(random_account, {**new, 'account': 'root'}, db_session)
+    assert generic._rbac_can_create_did(random_account, {**new, 'account': random_account}, db_session)
+    assert not generic._rbac_can_create_did(random_account, {**new, 'account': InternalAccount('root')}, db_session)
+    assert not generic._rbac_can_create_did(random_account, {**new, 'account': 'root'}, db_session)
 
 
 def test_finishing_the_upload_of_a_copy(random_account, grant, catalogue, db_session):
@@ -388,12 +388,12 @@ def test_finishing_the_upload_of_a_copy(random_account, grant, catalogue, db_ses
     catalogue.add(name, owner='someone else', state=ReplicaState.COPYING, lock_accounts=[random_account])
     did = {'scope': 'mock', 'name': name}
     kwargs = {'rse': 'SOME_USERDISK', 'rse_id': 'some-rse', 'scopes': [MOCK]}
-    assert generic._rbac_grants_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'A'}]}, db_session)
-    assert not generic._rbac_grants_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'A', 'path': 'new/path'}]}, db_session)
-    assert not generic._rbac_grants_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'U'}]}, db_session)
+    assert generic._rbac_can_update_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'A'}]}, db_session)
+    assert not generic._rbac_can_update_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'A', 'path': 'new/path'}]}, db_session)
+    assert not generic._rbac_can_update_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'U'}]}, db_session)
 
     catalogue.add(name, owner='someone else', state=ReplicaState.COPYING, lock_accounts=['someone else'])
-    assert not generic._rbac_grants_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'A'}]}, db_session)
+    assert not generic._rbac_can_update_replica_states(random_account, {**kwargs, 'dids': [{**did, 'state': 'A'}]}, db_session)
 
 
 def test_recursive_metadata_is_not_granted(random_account, grant, catalogue, db_session, monkeypatch):

@@ -258,11 +258,11 @@ Results from running the real checks of `generic.py` over the world below. Each 
 - `lib/rucio/core/role.py`:
   - patterns: `_validate_did_pattern`, `_did_pattern_matches`;
   - requests: `DidPermissionRequest`, `has_permission`;
-  - "some grant in the scope": `has_did_permission_in_scope`;
+  - "some grant in the scope": `has_any_scope_prefix_access`;
   - listings: `did_access_checker`, `filter_iterable_by_did_access` (per DID), `scope_access_checker`, `filter_iterable_by_scope_access` (per scope, `any_did` for the scope listings).
 - `lib/rucio/core/permission/generic.py`:
   - constants: `RBAC_*` (protected and deletion keys, rule options, replica RSE suffixes);
-  - helpers: `_rbac_owns`, `_rbac_reads_did`, `_rbac_alters_did`, `_rbac_alters_rule`, `_rbac_grants_did_creation`, `_rbac_grants_creation_content`, `_rbac_grants_content`, `_rbac_grants_attach`, `_rbac_grants_detach`, `_rbac_grants_replica_registration`, `_rbac_grants_replica_deletion`, `_rbac_grants_replica_state(s)`;
+  - helpers: `_rbac_permission_access`, `_rbac_did_ownership_access`, `_rbac_new_did_ownership_access`, `_rbac_rule_ownership_access`, `_rbac_can_read_did`, `_rbac_can_alter_did`, `_rbac_can_alter_rule`, `_rbac_can_alter_metadata`, `_rbac_can_create_did`, `_rbac_can_create_did_with`, `_rbac_can_attach_dids`, `_rbac_can_attach_into`, `_rbac_can_detach_from`, `_rbac_can_register_replicas`, `_rbac_can_delete_replicas`, `_rbac_can_update_replica_state(s)`;
   - read check: `perm_read_scope`.
 - Tests:
   - `tests/test_role_did_permission.py` (patterns, helpers);
