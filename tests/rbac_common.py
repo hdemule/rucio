@@ -36,8 +36,13 @@ The names never contain an account name ('root', 'alice', 'bob'), since the gene
 normalise the account names out of the error messages.
 """
 
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+from sqlalchemy import Table, and_, or_
 
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.core import did as did_core
@@ -47,6 +52,9 @@ from rucio.core import rule as rule_core
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import BadFilesStatus, DatabaseOperationType, DIDType, LifetimeExceptionsState
 from rucio.db.sqla.session import db_session
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _BYTES = 1
 _ADLER32 = '0cc737eb'
@@ -71,6 +79,74 @@ class RBACTestData:
     pfn_r: str
     exception_a: str
     exception_r: str
+
+
+def _row_key(table: Table, row: dict[str, Any]) -> tuple:
+    """The primary key of a row, or the whole row for a table without one (the history tables)."""
+    columns = table.primary_key.columns if table.primary_key.columns else table.columns
+    return tuple(row[column.name] for column in columns)
+
+
+def _snapshot() -> dict[str, list[dict[str, Any]]]:
+    """Every row of every table of the models, by table."""
+    with db_session(DatabaseOperationType.READ) as session:
+        return {table.key: [dict(row._mapping) for row in session.execute(table.select())] for table in models.BASE.metadata.sorted_tables}
+
+
+def _matching(table: Table, keys: list[tuple]) -> Any:
+    """A clause matching the rows of a table whose key (see `_row_key`) is one of the given ones."""
+    columns = list(table.primary_key.columns if table.primary_key.columns else table.columns)
+    return or_(*(and_(*(column.is_(None) if value is None else column == value for column, value in zip(columns, key))) for key in keys))
+
+
+def _restore(snapshot: dict[str, list[dict[str, Any]]]) -> None:
+    """
+    Bring every table back to the snapshot: remove the rows added since, put back the rows removed since, and undo
+    the changes of the rows changed since, in an order the foreign keys accept. A table without primary key (a
+    history table) which changed is emptied and filled again with its rows of the snapshot.
+    """
+    tables = models.BASE.metadata.sorted_tables
+    current = _snapshot()
+    refill = set()
+    with db_session(DatabaseOperationType.WRITE) as session:
+        # the rows added since, children first
+        for table in reversed(tables):
+            if not table.primary_key.columns:
+                if Counter(_row_key(table, row) for row in current[table.key]) != Counter(_row_key(table, row) for row in snapshot[table.key]):
+                    session.execute(table.delete())
+                    refill.add(table.key)
+                continue
+            before = {_row_key(table, row) for row in snapshot[table.key]}
+            added = [_row_key(table, row) for row in current[table.key] if _row_key(table, row) not in before]
+            for index in range(0, len(added), 500):
+                session.execute(table.delete().where(_matching(table, added[index:index + 500])))
+        # the rows removed or changed since, parents first
+        for table in tables:
+            if not table.primary_key.columns:
+                if table.key in refill and snapshot[table.key]:
+                    session.execute(table.insert(), snapshot[table.key])
+                continue
+            now = {_row_key(table, row): row for row in current[table.key]}
+            removed = [row for row in snapshot[table.key] if _row_key(table, row) not in now]
+            if removed:
+                session.execute(table.insert(), removed)
+            for row in snapshot[table.key]:
+                key = _row_key(table, row)
+                if key in now and now[key] != row:
+                    session.execute(table.update().where(_matching(table, [key])).values(row))
+
+
+@contextmanager
+def database_restored() -> 'Iterator[None]':
+    """
+    Leave the database as it was before the block, whatever the block (e.g. the tests of a module, through the REST
+    API) adds, removes or changes in it: every table of the models is snapshotted first, and brought back to it after.
+    """
+    snapshot = _snapshot()
+    try:
+        yield
+    finally:
+        _restore(snapshot)
 
 
 def _did(scope: InternalScope, name: str) -> dict:

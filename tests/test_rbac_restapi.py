@@ -64,7 +64,7 @@ from rucio.gateway import replica as gateway_replica
 from rucio.gateway import rule as gateway_rule
 from rucio.gateway.did import list_files
 
-from .rbac_common import RBACTestData, create_rbac_test_data
+from .rbac_common import RBACTestData, create_rbac_test_data, database_restored
 
 # HTTP status code the REST API returns
 OK = 200
@@ -216,6 +216,13 @@ def _assert_visible(response: requests.Response, expected: set[str], decode=_str
     """Assert that the response succeeded and returned exactly the `expected` items, e.g. the `expected` 'scope:name' DIDs."""
     assert response.status_code == OK, response.text
     assert key(decode(response)) == expected
+
+
+@pytest.fixture(scope='module', autouse=True)
+def database_left_unchanged():
+    """Leave the database as the tests of this module found it: whatever they create, remove or change is undone after them (see `tests/rbac_common.py`)."""
+    with database_restored():
+        yield
 
 
 @pytest.fixture(scope='module')

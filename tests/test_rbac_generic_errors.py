@@ -28,7 +28,7 @@ from rucio.common.types import InternalScope
 from rucio.core.rule import list_rules
 from rucio.gateway import rule as gateway_rule
 
-from .rbac_common import RBACTestData, create_rbac_test_data
+from .rbac_common import RBACTestData, create_rbac_test_data, database_restored
 
 FORBIDDEN = 403
 
@@ -127,6 +127,13 @@ def _get_rule_id(name: str, vo: str, user: str = 'alice') -> str:
 
 def _name(did: str) -> str:
     return did.split(':', 1)[1]
+
+
+@pytest.fixture(scope='module', autouse=True)
+def database_left_unchanged():
+    """Leave the database as the tests of this module found it: whatever they create, remove or change is undone after them (see `tests/rbac_common.py`)."""
+    with database_restored():
+        yield
 
 
 @pytest.fixture(scope='module')
