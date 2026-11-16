@@ -437,6 +437,10 @@ class RoleDidPermissionAssociation(BASE, ModelBase):
     A DID pattern is made of a scope part and a name part: 'data*:*' (every scope starting with
     'data'), 'data:*' (the scope 'data'), 'data:raw*' or 'data:raw1', hence its length. Each operation
     of `DidOperationType` has its own boolean column, named by `DidOperationType.column`.
+
+    A row holds every operation its role grants on the DIDs its pattern matches, unless a more specific
+    pattern of the same role matches them too: within a role, the most specific pattern decides. A row
+    granting no operation is kept, since it withdraws its DIDs from the less specific rows of its role.
     """
     __tablename__ = 'role_did_permission_map'
     role: Mapped[str] = mapped_column(String(255))
