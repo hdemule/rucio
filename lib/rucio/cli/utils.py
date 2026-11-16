@@ -88,6 +88,66 @@ def format_operations(operations: "Iterable[str]") -> str:
     )
 
 
+# The letter shown for each operation a metadata permission can grant, in the order they are rendered: reading a key,
+# and writing it, i.e. adding, modifying or deleting it. Deleting a DID is not an operation on its metadata.
+METADATA_OPERATION_LETTERS: dict[DidOperationType, str] = {
+    DidOperationType.READ: 'r',
+    DidOperationType.WRITE: 'w',
+}
+
+# The keys of a metadata permission as listed by the server: '*' for every key, None for no key, which only makes the
+# matching DIDs visible.
+METADATA_ALL_KEYS = '*'
+
+
+def format_metadata_operations(operations: "Iterable[str]") -> str:
+    """
+    Render the operations a metadata permission grants compactly, e.g. 'rw' for read and write, 'r-' for read only,
+    '--' for none.
+
+    :param operations: The operation values that are granted, 'read' and/or 'write'.
+    """
+    granted = set(operations)
+    return ''.join(letter if operation.value in granted else '-' for operation, letter in METADATA_OPERATION_LETTERS.items())
+
+
+def describe_metadata_keys(keys: "Iterable[Optional[str]]") -> str:
+    """
+    Name the keys of metadata permissions, e.g. 'datatype, quality', 'every key' for '*' and 'no key' for None.
+
+    :param keys: The keys, as listed by the server.
+    """
+    keys = set(keys)
+    names = (['no key'] if None in keys else []) + (['every key'] if METADATA_ALL_KEYS in keys else [])
+    return ', '.join(names + sorted(key for key in keys if key not in (None, METADATA_ALL_KEYS)))
+
+
+def metadata_key_label(key: "Optional[str]") -> str:
+    """Name one key of a metadata permission as listed by the server, e.g. 'quality', '(every key)' for '*' and '(no key)' for None."""
+    if key is None:
+        return '(no key)'
+    return '(every key)' if key == METADATA_ALL_KEYS else key
+
+
+def format_metadata_permissions(permissions: "Iterable[Mapping[str, Any]]") -> str:
+    """
+    Render the metadata permissions of a role on a DID pattern, one line per key: its operations and the key, e.g.
+
+        rw  (every key)
+        r-  project
+
+    The permission on no key comes first, then the one on every key, then the keys in alphabetical order.
+
+    :param permissions: The metadata permissions on the DID pattern, as listed by the server.
+    """
+    def order(permission: "Mapping[str, Any]") -> tuple[int, str]:
+        key = permission['meta_key']
+        return (0, '') if key is None else (1, '') if key == METADATA_ALL_KEYS else (2, key)
+
+    return '\n'.join(f"{format_metadata_operations(permission['operations'])}  {metadata_key_label(permission['meta_key'])}"
+                     for permission in sorted(permissions, key=order))
+
+
 TREE_BRANCH = "|-- "
 TREE_LAST_BRANCH = "`-- "
 TREE_PLACEHOLDER_INDENT = "`-- "
@@ -284,18 +344,24 @@ def permission_lines(
     :param used: Gives the bytes an account uses on the RSEs of an RSE expression, to render each limit with the usage
                  measured against it, see :func:`format_limits`.
     :returns: The lines, as (type, target, operations, limits): the operations granted on a DID pattern, e.g. 'rw-'
-              (see :func:`format_operations`), and the limits on an RSE expression (see :func:`format_limits`), '' where
-              they do not apply. A permission of a type this client does not know is left out.
+              (see :func:`format_operations`), those granted on the metadata keys of a DID pattern, one key per line
+              (see :func:`format_metadata_permissions`), and the limits on an RSE expression (see
+              :func:`format_limits`), '' where they do not apply. A permission of a type this client does not know is
+              left out.
     """
     ops_by_did_pattern: dict[str, set[str]] = {}
+    metadata_by_did_pattern: dict[str, list["Mapping[str, Any]"]] = {}
     limits: list["Mapping[str, Any]"] = []
     for permission in permissions:
         if permission.get('type') == 'did':
             ops_by_did_pattern.setdefault(permission['did_pattern'], set()).add(permission['operation'])
+        elif permission.get('type') == 'metadata':
+            metadata_by_did_pattern.setdefault(permission['did_pattern'], []).append(permission)
         elif permission.get('type') == 'limit':
             limits.append(permission)
 
     lines = [('did', did_pattern, format_operations(ops), '') for did_pattern, ops in sorted(ops_by_did_pattern.items())]
+    lines.extend(('metadata', did_pattern, format_metadata_permissions(metadata), '') for did_pattern, metadata in sorted(metadata_by_did_pattern.items()))
     lines.extend(('limit', limit['rse_expression'], '', format_limits(limit, sizes, used)) for limit in sorted(limits, key=lambda limit: limit['rse_expression']))
     return lines
 
@@ -312,8 +378,9 @@ def format_permission_tree(
 
     Each line of :func:`permission_lines` is one branch, made of the same columns whatever its type,
     aligned across the branches: its TYPE, its identifier and its parameters, i.e. the operations on a
-    scope pattern or the limit on an RSE expression. A global limit on an expression matching several
-    RSEs lists them one per line, bracketed in the identifier column, its limit on the middle one:
+    DID pattern, those on the metadata keys of a DID pattern, one key per line, or the limit on an RSE
+    expression. A global limit on an expression matching several RSEs lists them one per line, bracketed
+    in the identifier column, its limit on the middle one:
 
         rse-pro
         |-- DID     *:*      r--
@@ -322,6 +389,14 @@ def format_permission_tree(
         |         | MOCK2 |
         `-- LIMIT | MOCK3 |- global: 100 kB
                   | MOCK4 |
+
+    The metadata permissions of a role on a DID pattern are one branch, a line per key:
+
+        moderator
+        |-- DID        physics:*      r--
+        |-- METADATA   physics:*      rw  (every key)
+        |                             r-  project
+        `-- METADATA   physics:raw*   --  provenance
 
     :param role: The name of the role, the root of the tree.
     :param permissions: The permissions of the role, as listed by the server.
@@ -388,7 +463,11 @@ def format_permission_trees(
         branches = []
         for permission_type, identifier, parameters in entries:
             if isinstance(identifier, str):
-                branches.append(f"{permission_type.ljust(type_width)}{identifier.ljust(id_width)}{parameters}".rstrip())
+                first, *others = parameters.split('\n')
+                branches.append('\n'.join(
+                    [f"{permission_type.ljust(type_width)}{identifier.ljust(id_width)}{first}".rstrip()]
+                    + [f"{' ' * (type_width + id_width)}{line}".rstrip() for line in others]
+                ))
                 continue
             anchor = (len(identifier) - 1) // 2
             branches.append('\n'.join(
@@ -760,38 +839,63 @@ class QuotaSize(click.ParamType):
         return int(bytes_)
 
 
-class RoleOperations(click.ParamType):
+class _LetterOperations(click.ParamType):
     """
-    One or more role operations, in any order and combination.
+    Operations given as letters, in any order and combination, e.g. 'rw' or 'wr' for read and write.
 
-    Accepted forms, case insensitive:
-      - letters among r, w and d, e.g. 'r', 'rw', 'dw', 'rwd';
-      - the same letters with '-' placeholders, as shown by `role permission list`, e.g. 'rw-', 'r-d';
-      - comma-separated operation names, e.g. 'read', 'read,delete'.
+    The dashes of `role permission list` (e.g. 'rw-') only show the operations which are not granted, they are not
+    accepted, nor are the names of the operations.
     """
 
     name = "operations"
-    HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd', 'rwd' or 'read,write'"
+    LETTERS: "Mapping[DidOperationType, str]" = OPERATION_LETTERS
+    HELP = ""
 
     def convert(self, value, param, ctx) -> list[DidOperationType]:
         """Turn a command line value into the requested operations, deduplicated and in canonical order."""
         if isinstance(value, list):
             return value
-        by_letter = {letter: operation for operation, letter in OPERATION_LETTERS.items()}
-        by_name = {operation.value: operation for operation in DidOperationType}
+        by_letter = {letter: operation for operation, letter in self.LETTERS.items()}
+        if not value:
+            self.fail(f"no operation given, expected {self.HELP}", param, ctx)
+        if '-' in value:
+            self.fail(f"{value!r}: give the operations as letters only, the dashes are only shown by `rucio role permission list`. Expected {self.HELP}", param, ctx)
+        unknown = [char for char in value if char not in by_letter]
+        if unknown:
+            self.fail(self._unknown_message(value, unknown), param, ctx)
+        requested = {by_letter[char] for char in value}
+        return [operation for operation in self.LETTERS if operation in requested]
 
-        requested: set[DidOperationType] = set()
-        for token in value.lower().replace(' ', '').split(','):
-            if token in by_name:
-                requested.add(by_name[token])
-            elif token and all(char in by_letter or char == '-' for char in token):
-                requested.update(by_letter[char] for char in token if char != '-')
-            else:
-                self.fail(f"{token!r} is not a valid operation, expected {self.HELP}", param, ctx)
+    def _unknown_message(self, value: str, unknown: "Sequence[str]") -> str:
+        return f"{value!r} is not a valid operation, {', '.join(map(repr, dict.fromkeys(unknown)))} not being one. Expected {self.HELP}"
 
-        if not requested:
-            self.fail(f"{value!r} does not contain any operation, expected {self.HELP}", param, ctx)
-        return [operation for operation in OPERATION_LETTERS if operation in requested]
+
+class RoleOperations(_LetterOperations):
+    """The operations of a DID permission: letters among r, w and d, in any order and combination, e.g. 'r', 'rw', 'dw', 'rwd'."""
+
+    HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd' or 'rwd'"
+
+
+class MetadataOperations(_LetterOperations):
+    """
+    The operations of a metadata permission: letters among r and w, in any order and combination, e.g. 'r', 'w', 'rw'
+    or 'wr', or 'none' (case insensitive) for no operation, shown as '--' by `role permission list`.
+    """
+
+    LETTERS = METADATA_OPERATION_LETTERS
+    NONE = 'none'
+    HELP = "any combination of r(ead) and w(rite), e.g. 'r', 'w' or 'rw', or 'none' for no operation"
+
+    def convert(self, value, param, ctx) -> list[DidOperationType]:
+        """Turn a command line value into the requested operations, deduplicated and in canonical order, possibly none."""
+        if isinstance(value, str) and value.lower() == self.NONE:
+            return []
+        return super().convert(value, param, ctx)
+
+    def _unknown_message(self, value: str, unknown: "Sequence[str]") -> str:
+        if set(unknown) == {OPERATION_LETTERS[DidOperationType.DELETE]}:
+            return f"{value!r}: a metadata permission has no d(elete) operation, w(rite) also deletes a key. Expected {self.HELP}"
+        return super()._unknown_message(value, unknown)
 
 
 def get_scope(did: str, client: Client) -> tuple[str, str]:

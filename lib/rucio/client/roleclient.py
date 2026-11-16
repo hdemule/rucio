@@ -179,9 +179,10 @@ class RoleClient(BaseClient):
         Returns
         -------
             A list of dictionaries, one per permission, with its `type` and, in the shape it is granted with
-            (see `add_role_permission`): a `did_pattern` and an `operation` for a 'did' permission; an
-            `rse_expression` and its `local` or `global` bytes for a 'limit', a local limit being listed
-            under the name of its RSE.
+            (see `add_role_permission`): a `did_pattern` and an `operation` for a 'did' permission; a
+            `did_pattern`, a `meta_key` ('*' for every key, None for no key) and its list of `operations`,
+            possibly empty, for a 'metadata' permission, one per key; an `rse_expression` and its `local` or
+            `global` bytes for a 'limit', a local limit being listed under the name of its RSE.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions")
         response = self._send_request(url, method=HTTPMethod.GET)
@@ -396,7 +397,7 @@ class RoleClient(BaseClient):
         role :
             The role to grant the permission to.
         permission_type :
-            The type of the permission: 'did' or 'limit'.
+            The type of the permission: 'did', 'metadata' or 'limit'.
         parameters :
             The target of the permission and its parameters, e.g.:
 
@@ -405,6 +406,13 @@ class RoleClient(BaseClient):
               scope ('data:*'), of a scope matching a name pattern ('data:raw*'), or a single DID ('data:raw1'). Only a
               trailing '*' wildcard is accepted, a pattern without name part ('data', 'data*') standing for the whole
               scope(s). The operation is 'read', 'write' or 'delete';
+            - {'did_pattern': 'data:raw*', 'keys': ['quality', 'datatype'], 'operations': ['read', 'write']} for a
+              'metadata' permission on the keys of the DIDs the pattern matches, overriding what the 'did' permissions
+              of the role grant on them. The keys are a list or a comma-separated string, '*' standing for every key;
+              without keys, the permission is on no key, only makes the DIDs visible and takes ['read']. The operations
+              are 'read' and 'write' (adding, modifying or deleting a key), an empty list withdrawing what the 'did'
+              permissions grant on the keys. The operations a role already has on a key are replaced. The keys held by
+              Rucio and those leading to the deletion of a DID (e.g. 'bytes', 'lifetime') cannot be granted 'write';
             - {'rse_expression': 'CERN-EOS-DISK', 'local': 1000} or {'rse_expression': 'tier=1', 'global': 5000} for a
               'limit', with either its local or its global bytes, `ROLE_QUOTA_NOCAP` (-1) meaning no cap. A local limit
               is set on the single RSE its expression matches, a global one on an expression matching several RSEs.
@@ -426,11 +434,14 @@ class RoleClient(BaseClient):
         role :
             The role to remove the permissions from.
         permission_type :
-            The type of the permissions: 'did' or 'limit'.
+            The type of the permissions: 'did', 'metadata' or 'limit'.
         parameters :
             The target of the permissions and the parameters identifying them, e.g.:
 
             - {'did_pattern': 'data*:*', 'operation': 'read'} for a 'did' permission, given as it is listed;
+            - {'did_pattern': 'data:*', 'keys': 'quality,comment'} for a 'metadata' permission, '*' standing for the
+              permission on every key and no keys for the one on no key. Nothing is removed if one of the keys has
+              no permission (RolePermissionNotFound);
             - {'rse_expression': 'tier=1', 'global': True} for a 'limit': the local limit on the RSE the expression
               matches and/or the global limit on the expression itself, both being looked for if neither is given.
         force :
@@ -438,7 +449,8 @@ class RoleClient(BaseClient):
 
         Returns
         -------
-            The number of permissions removed, e.g. both the local and the global limit on an RSE expression.
+            The number of permissions removed, e.g. both the local and the global limit on an RSE expression, or
+            one per metadata key.
         """
         response = self._send_permission_request(HTTPMethod.DELETE, role, permission_type, parameters, force)
         if response.status_code == codes.ok:

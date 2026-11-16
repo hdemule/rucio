@@ -8,10 +8,13 @@ from tabulate import tabulate
 
 from rucio.cli.utils import (
     DidOperationType,
+    MetadataOperations,
     OptionalDateTime,
     QuotaSize,
     RoleOperations,
     SizeFormat,
+    describe_metadata_keys,
+    format_metadata_operations,
     format_permission_trees,
     format_quota,
     format_sections,
@@ -27,6 +30,7 @@ if TYPE_CHECKING:
 
 
 OPERATIONS = RoleOperations()
+METADATA_OPERATIONS = MetadataOperations()
 QUOTA_SIZE = QuotaSize()
 
 OPTIONAL_DATE = OptionalDateTime()
@@ -398,22 +402,26 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
     lines = permission_lines(ctx.obj.client.list_role_permissions(role_name), SizeFormat.of(ctx.obj.human, exact=detail), used)
 
     # only fetch the (potentially large) list of every scope if a pattern actually needs expanding
-    needs_scopes = detail and any(permission_type == 'did' and _is_scope_wildcard(target) for permission_type, target, _, _ in lines)
+    needs_scopes = detail and any(permission_type in ('did', 'metadata') and _is_scope_wildcard(target) for permission_type, target, _, _ in lines)
     known_scopes = ctx.obj.client.list_scopes() if needs_scopes else []
 
-    did_rows, limit_rows = [], []
+    did_rows, metadata_rows, limit_rows = [], [], []
     for permission_type, target, operations, limits in lines:
-        if permission_type == 'did':
+        if permission_type in ('did', 'metadata'):
             cell = target
             if detail and _is_scope_wildcard(target):
                 cell = format_tree(target, _matching_scopes(target, known_scopes), placeholder="(no scope currently matches)")
-            did_rows.append([permission_type, cell, operations])
+            (did_rows if permission_type == 'did' else metadata_rows).append([permission_type, cell, operations])
         else:
             # a local limit is listed under the name of its single RSE, a global one by the RSEs its expression
             # currently matches, one per line, or by its expression if it matches none
             limit_rows.append([permission_type, '\n'.join(rse_names(target) or [target]), limits])
 
-    sections = [(headers, rows) for headers, rows in ((["TYPE", "IDENTIFIER", "OPERATION(S)"], did_rows), (["TYPE", "IDENTIFIER", "LIMIT"], limit_rows)) if rows]
+    sections = [(headers, rows) for headers, rows in (
+        (["TYPE", "IDENTIFIER", "OPERATION(S)"], did_rows),
+        (["TYPE", "IDENTIFIER", "OPERATION(S) ON KEY(S)"], metadata_rows),
+        (["TYPE", "IDENTIFIER", "LIMIT"], limit_rows),
+    ) if rows]
     if not sections:
         click.echo(f"No permission associated with role '{role_name}'.")
         return
@@ -467,7 +475,9 @@ def _confirm_did_pattern(ctx: click.Context, did_pattern: str, verb: str) -> boo
 
 @permission.group("did")
 def permission_did() -> None:
-    """Manage the operations a role grants on DIDs."""
+    """Manage the operations a role grants on DIDs.
+
+    What a role grants on the metadata keys of the DIDs can be set apart, see `rucio role permission metadata`."""
 
 
 @permission_did.command("add")
@@ -484,7 +494,7 @@ def did_add(ctx: click.Context, role_name: str, did_patterns: tuple[str, ...], o
     Only a trailing '*' is accepted; a pattern without name part ('data', 'data*') stands for the whole scope(s). Quote it so
     the shell does not expand it as a glob.
 
-    OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'."""
+    OPERATIONS is any combination of the letters r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd' or 'rwd'."""
     for did_pattern in map(_normalize_did_pattern, did_patterns):
         if not _confirm_did_pattern(ctx, did_pattern, "add"):
             click.echo(f"Skipped DID pattern '{did_pattern}', no permission was added on it.")
@@ -517,7 +527,7 @@ def did_remove(ctx: click.Context, role_name: str, did_patterns: tuple[str, ...]
     DID_PATTERN must be given as it is listed, see `rucio role permission list`; a pattern without name part ('data', 'data*')
     stands for the whole scope(s), as when it is added.
 
-    OPERATIONS is any combination of r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd', 'rwd' or 'read,delete'."""
+    OPERATIONS is any combination of the letters r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd' or 'rwd'."""
     did_patterns = tuple(map(_normalize_did_pattern, did_patterns))
     permissions = ctx.obj.client.list_role_permissions(role_name)
     for did_pattern in did_patterns:
@@ -542,6 +552,121 @@ def did_remove(ctx: click.Context, role_name: str, did_patterns: tuple[str, ...]
         if not_assigned:
             click.echo(f"Warning: {'/'.join(not_assigned)} permission(s) on {did_pattern} were already not assigned to role '{role_name}'.")
         click.echo(f"Removed {'/'.join(removed)} permission(s) on {did_pattern} from role '{role_name}'.")
+
+
+# --- Metadata ---------------------------------------------------------------------------------
+
+def _metadata_keys(keys: "Iterable[str]") -> list[str]:
+    """
+    The metadata keys given on the command line, each argument possibly holding several comma-separated keys.
+
+    An empty list stands for no key.
+    """
+    return sorted({key.strip() for argument in keys for key in argument.split(',') if key.strip()})
+
+
+def _assigned_metadata_operations(ctx: click.Context, role_name: str, did_pattern: str) -> dict[Optional[str], str]:
+    """The operations of the metadata permissions of a role on a DID pattern, e.g. 'r-', by key (None for no key)."""
+    return {
+        permission['meta_key']: format_metadata_operations(permission['operations'])
+        for permission in ctx.obj.client.list_role_permissions(role_name)
+        if permission.get('type') == 'metadata' and permission['did_pattern'] == did_pattern
+    }
+
+
+@permission.group("metadata")
+def permission_metadata() -> None:
+    """Manage the operations a role grants on the metadata keys of DIDs, overriding its DID permissions on them.
+
+    \b
+    r(ead) shows a key and its value, w(rite) adds, modifies or deletes it, and none ('--') grants nothing on the key,
+    withdrawing what the DID permissions of the role would grant on it. A key without a metadata permission is
+    granted what the DID permissions give: READ shows it, DELETE lets it be set. Within a role, a permission on a
+    key wins over one on every key ('*'), which wins over the DID permissions of the role; between two permissions of
+    the same kind, the one with the most specific DID pattern wins. The roles of an account add up.
+
+    \b
+    r on some keys, or on no key at all, makes the matching DIDs visible, their scope listed, their content and
+    their rules listed, without giving access to their data: no file replica, nor download. w alone allows writing the
+    keys without seeing the DIDs. The keys held by Rucio (e.g. bytes, checksums, the state of a DID) and the keys
+    leading to its deletion (e.g. lifetime) can only be read through a metadata permission."""
+
+
+@permission_metadata.command("add")
+@click.argument("role_name")
+@click.argument("did_pattern")
+@click.argument("operations", type=METADATA_OPERATIONS)
+@click.argument("keys", metavar="[KEY...]", nargs=-1)
+@click.option("--force", is_flag=True, default=False, help="Set the permissions even if the role is locked.")
+@click.pass_context
+def metadata_add(ctx: click.Context, role_name: str, did_pattern: str, operations: list[DidOperationType], keys: tuple[str, ...], force: bool) -> None:
+    """Set OPERATIONS on each KEY of the DIDs matching DID_PATTERN for ROLE_NAME, replacing the operations it had on them.
+
+    DID_PATTERN is given as for `rucio role permission did add`, e.g. 'data:*' or 'data:raw*'. Each KEY is a metadata
+    key, several of them being given as separate arguments or comma-separated, e.g. 'quality,datatype'. '*' stands for
+    every key; quote it so the shell does not expand it. Without KEY, the permission is on no key: it only makes the
+    matching DIDs visible, so OPERATIONS must be 'r'.
+
+    OPERATIONS is any combination of the letters r(ead) and w(rite), in any order, e.g. 'r', 'w' or 'rw', or 'none' to
+    grant nothing on the keys, listed as '--', which withdraws what the DID permissions of the role grant on them."""
+    did_pattern = _normalize_did_pattern(did_pattern)
+    meta_keys = _metadata_keys(keys)
+    if not _confirm_did_pattern(ctx, did_pattern, "add"):
+        click.echo(f"Skipped DID pattern '{did_pattern}', no permission was set on it.")
+        return
+
+    assigned = _assigned_metadata_operations(ctx, role_name, did_pattern)
+    parameters: dict[str, Any] = {'did_pattern': did_pattern, 'operations': [op.value for op in operations]}
+    if meta_keys:
+        parameters['keys'] = meta_keys
+    with _lock_hint(role_name):
+        ctx.obj.client.add_role_permission(role_name, 'metadata', parameters, force=force)
+
+    new = format_metadata_operations(op.value for op in operations)
+    changed: dict[str, list[Optional[str]]] = {}
+    for key in meta_keys or [None]:
+        if key in assigned and assigned[key] != new:
+            changed.setdefault(assigned[key], []).append(key)
+    for old, changed_keys in sorted(changed.items()):
+        click.echo(f"Replaced {old} by {new} on {describe_metadata_keys(changed_keys)} of {did_pattern}.")
+    if meta_keys:
+        click.echo(f"Set {new} on {describe_metadata_keys(meta_keys)} of {did_pattern} for role '{role_name}'.")
+    else:
+        click.echo(f"Set {new} on no key of {did_pattern} for role '{role_name}': the DIDs it matches are visible.")
+    if new == '-w':
+        click.echo(f"Note: without r, the DIDs matching {did_pattern} are not made visible: the keys can be written but not read.")
+
+
+@permission_metadata.command("remove")
+@click.argument("role_name")
+@click.argument("did_pattern")
+@click.argument("keys", metavar="[KEY...]", nargs=-1)
+@click.option("--force", is_flag=True, default=False, help="Remove the permissions even if the role is locked.")
+@click.pass_context
+def metadata_remove(ctx: click.Context, role_name: str, did_pattern: str, keys: tuple[str, ...], force: bool) -> None:
+    """Remove the metadata permissions of ROLE_NAME on each KEY of the DIDs matching DID_PATTERN.
+
+    DID_PATTERN and KEY are given as they are listed, see `rucio role permission list`: '*' for the permission on every
+    key, and no KEY for the one on no key. The keys then fall back to what the DID permissions of the role grant.
+    Nothing is removed if one of the keys has no metadata permission on DID_PATTERN."""
+    did_pattern = _normalize_did_pattern(did_pattern)
+    meta_keys = _metadata_keys(keys)
+    assigned = _assigned_metadata_operations(ctx, role_name, did_pattern)
+    missing = [key for key in meta_keys or [None] if key not in assigned]
+    if missing:
+        raise RolePermissionNotFound(
+            f"Role '{role_name}' has no metadata permission on {describe_metadata_keys(missing)} of {did_pattern}, nothing was removed."
+            + (f" Its metadata permissions on {did_pattern} are on: {describe_metadata_keys(assigned)}." if assigned else ""))
+    if not _confirm_did_pattern(ctx, did_pattern, "remove"):
+        click.echo(f"Skipped DID pattern '{did_pattern}', no permission was removed from it.")
+        return
+
+    parameters: dict[str, Any] = {'did_pattern': did_pattern}
+    if meta_keys:
+        parameters['keys'] = meta_keys
+    with _lock_hint(role_name):
+        ctx.obj.client.delete_role_permission(role_name, 'metadata', parameters, force=force)
+    click.echo(f"Removed the metadata permission(s) on {describe_metadata_keys(meta_keys or [None])} of {did_pattern} from role '{role_name}'.")
 
 
 # --- Limits -----------------------------------------------------------------------------------
