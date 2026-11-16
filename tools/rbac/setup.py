@@ -30,6 +30,9 @@ def main() -> None:
         models.Roles.__table__,
         models.AccountRoleAssociation.__table__,
         models.RoleDidPermissionAssociation.__table__,
+        models.RoleMetadataPermissionAssociation.__table__,
+        models.RoleLocalLimitPermissionAssociation.__table__,
+        models.RoleGlobalLimitPermissionAssociation.__table__,
     ]
     models.BASE.metadata.create_all(get_engine(), tables=tables)
     print('RBAC tables are ready.')

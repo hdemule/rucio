@@ -33,8 +33,8 @@ again, and exits with a non-zero status if anything is still missing.
 
 On top of what the tests need, the dev environment gets the RSEs RSE1 to RSE3 and RSE_USERDISK, to
 try out uploads and the limits of roles by hand. They are POSIX RSEs within the `rucio` container.
-RSE1 to RSE3 are tagged with `dev_rse=True` and covered by the limits of 'data-scientist' (held by
-alice), RSE_USERDISK by an account limit of alice (see `DEV_RSE_ROLE_LIMITS` and `DEV_RSE_ACCOUNT_LIMITS`).
+RSE1 to RSE3 are tagged with `dev_rse=True` and covered by the limits of 'user' (held by alice),
+RSE_USERDISK by an account limit of alice (see `DEV_RSE_ROLE_LIMITS` and `DEV_RSE_ACCOUNT_LIMITS`).
 
 The policy package only lets a non-admin account register replicas on an RSE whose name ends with
 one of its user suffixes (e.g. USERDISK), which RSE1 to RSE3 do not. RSE_USERDISK does: alice
@@ -50,6 +50,43 @@ written, both being writes that WRITE on the DID grants, e.g.:
 
 No transfer daemon runs in the dev environment either, so the rule on RSE1 stays REPLICATING, the
 file never being copied there: its locks count against the limits of alice all the same.
+
+The roles, see `ROLES` (their names and descriptions come from the policy package):
+
+    user       alice        rw- on atlas:*, r-- on archive:*, limits on the dev RSEs, and metadata keys of physics:*
+    moderator  carol        r-- on physics:*, and curates the metadata of physics:*
+    superuser  jdoe, panda  r-- on *:*
+
+The metadata demo is in the scope physics, owned by root: the files raw_001, raw_002, calib_001 and sim_001,
+generated and uploaded by the script, each with the same metadata keys set (see `DEMO_FILES`). Neither alice
+nor carol owns them, so what they see and may change only comes from their roles:
+
+                         project  datatype  campaign  version  stream_name  provenance  data
+    alice  raw_001/002   r        r         rw        rw       -            -           no
+           calib_001     r        -         -         -        -            -           no
+           sim_001       r        r         -         -        -            -           no
+    carol  raw_001/002   r        rw        rw        rw       rw           -           yes
+           calib_001     r        rw        rw        rw       rw           rw          yes
+           sim_001       r        rw        rw        rw       rw           rw          yes
+    bob    any           the files are not visible
+
+alice only holds metadata permissions on physics: they make the files visible, with the keys she may read,
+but not their data, so listing their replicas or downloading them is refused. carol reads the files through
+her DID permission, which shows every key, the metadata permissions of her role overriding it on the keys they
+name: '*' lets her write every key Rucio does not hold itself (not bytes, checksums, ...), project is only
+read, and provenance is withdrawn on the raw files. carol has no client configuration of her own, give her
+credentials on the command line, e.g.:
+
+    alias carol='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio --account carol -S userpass -u carol --password secret'
+    alias alice='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio'
+    rucio role permission list user
+    alice did metadata list physics:raw_001 physics:calib_001 physics:sim_001
+    alice did metadata set physics:raw_001 --key campaign --value 2026C     # allowed
+    alice did metadata set physics:sim_001 --key campaign --value 2026C     # refused: read only there
+    alice did list 'physics:*' --filter 'campaign==2026A'                   # only raw_001: campaign of calib_001 is hidden
+    alice replica list file physics:raw_001                                 # refused: no access to the data
+    carol did metadata list physics:raw_001                                 # every key but provenance
+    carol did metadata set physics:raw_001 --key project --value other      # refused: project is read only
 """
 
 import argparse
@@ -69,7 +106,7 @@ BASE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 
 sys.path.append(BASE_PATH)
 os.chdir(BASE_PATH)
 
-from sqlalchemy import Enum, select, text  # noqa: E402
+from sqlalchemy import Enum, inspect, select, text  # noqa: E402
 
 from rucio.alembicrevision import ALEMBIC_REVISION  # noqa: E402
 from rucio.common.config import config_get  # noqa: E402
@@ -78,7 +115,7 @@ from rucio.common.exception import RucioException  # noqa: E402
 from rucio.common.types import InternalAccount, InternalScope  # noqa: E402
 from rucio.db.sqla import models  # noqa: E402
 from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DidOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RolePermissionType  # noqa: E402
-from rucio.db.sqla.session import db_session, get_engine  # noqa: E402
+from rucio.db.sqla.session import DEFAULT_SCHEMA_NAME, db_session, get_engine  # noqa: E402
 
 POLICY_PACKAGE = 'rbac_rucio_policy_package'
 POLICY_PACKAGE_SOURCE = os.path.join(BASE_PATH, 'policy-packages', POLICY_PACKAGE)
@@ -91,9 +128,10 @@ ACCOUNTS = {
     'root': (AccountType.SERVICE, None, config_get('bootstrap', 'userpass_identity', raise_exception=False, default='ddmlab')),
     'alice': (AccountType.USER, 'alice@email.com', 'alice'),
     'bob': (AccountType.USER, 'bob@email.com', 'bob'),
+    'carol': (AccountType.USER, 'carol@email.com', 'carol'),
 }
-# scope -> owner; bob owns no scope of its own
-SCOPES = {'alice': 'alice', 'root': 'root', 'atlas': 'root'}
+# scope -> owner; bob and carol own no scope of their own
+SCOPES = {'alice': 'alice', 'root': 'root', 'atlas': 'root', 'physics': 'root'}
 # (scope, name) -> local file uploaded to the RSE by root, which also creates a rule on the RSE
 FILES = {
     ('alice', 'file1.png'): 'file1.png',
@@ -110,10 +148,48 @@ DATASETS = {
 RULE_DIDS = [('alice', 'file1.png'), ('root', 'file1.png')]
 # the DID with a transfer request, and a past one in the history, towards the RSE
 REQUEST_DID = ('alice', 'file1.png')
-# role -> (operations granted on DID pattern, accounts holding the role)
+# (scope, name) -> metadata: the files of the metadata demo, owned by root, generated and uploaded to the RSE by the
+# script, with the same keys set on each of them so that what each role shows of them can be compared
+_DEMO_META = {'project': 'data13_hip', 'stream_name': 'physics_Main'}
+DEMO_FILES = {
+    ('physics', 'raw_001'): dict(_DEMO_META, datatype='AOD', campaign='2026A', version='v1', provenance='T0'),
+    ('physics', 'raw_002'): dict(_DEMO_META, datatype='AOD', campaign='2026B', version='v2', provenance='T0'),
+    ('physics', 'calib_001'): dict(_DEMO_META, datatype='NTUP_TRIG', campaign='2026A', version='v1', provenance='CA', stream_name='calibration'),
+    ('physics', 'sim_001'): dict(_DEMO_META, datatype='HITS', campaign='MC26', version='v3', provenance='MC', prod_step='simul'),
+}
+
+
+@dataclass(frozen=True)
+class RoleSetup:
+    # (operation, DID pattern) of the DID permissions
+    did: frozenset[tuple[str, str]]
+    # (DID pattern, operations, keys) of the metadata permissions: no keys for the one on no key, ('*',) for every key
+    metadata: frozenset[tuple[str, tuple[str, ...], tuple[str, ...]]]
+    holders: frozenset[str]
+
+
 ROLES = {
-    'data-scientist': ({('read', 'atlas:*'), ('write', 'atlas:*'), ('read', 'archive:*')}, {'alice'}),
-    'superuser': ({('read', '*:*')}, {'jdoe', 'panda'}),
+    # reads and writes atlas, reads archive, and only reads some metadata keys of physics, without its data
+    'user': RoleSetup(
+        did=frozenset({('read', 'atlas:*'), ('write', 'atlas:*'), ('read', 'archive:*')}),
+        metadata=frozenset({
+            ('physics:*', ('read',), ('datatype', 'project')),                  # visible everywhere ...
+            ('physics:raw*', ('read', 'write'), ('campaign', 'version')),       # ... writable on the raw files only
+            ('physics:calib_001', (), ('datatype',)),                           # ... but hidden on that file
+        }),
+        holders=frozenset({'alice'}),
+    ),
+    # reads physics, and curates its metadata but its project, and the provenance of its raw files
+    'moderator': RoleSetup(
+        did=frozenset({('read', 'physics:*')}),
+        metadata=frozenset({
+            ('physics:*', ('read', 'write'), ('*',)),                           # every key Rucio does not hold ...
+            ('physics:*', ('read',), ('project',)),                             # ... but project, only read
+            ('physics:raw*', (), ('provenance',)),                              # ... and provenance, withdrawn on the raw files
+        }),
+        holders=frozenset({'carol'}),
+    ),
+    'superuser': RoleSetup(did=frozenset({('read', '*:*')}), metadata=frozenset(), holders=frozenset({'jdoe', 'panda'})),
 }
 ACCOUNTS_WITHOUT_ROLES = ['bob']
 
@@ -132,7 +208,7 @@ DEV_DEPOSIT_RSE = 'RSE_USERDISK'
 # role -> (RSE expression, locality, bytes): within the role, RSE1 to RSE3 are writable up to their local
 # limit, while the global limit caps the three of them together.
 DEV_RSE_ROLE_LIMITS = {
-    'data-scientist': [
+    'user': [
         (DEV_DEPOSIT_RSE, 'local', 1000 * MB),
         ('RSE1', 'local', 5 * MB),
         ('RSE2', 'local', 10 * MB),
@@ -258,6 +334,15 @@ def check_alembic_revision() -> Optional[str]:
     revisions = [row[0] for row in rows]
     if revisions != [ALEMBIC_REVISION]:
         return 'the database is at %s, the code expects %s: the schema is stale, rebuild it with --reset' % (revisions, ALEMBIC_REVISION)
+
+
+def check_tables() -> Optional[str]:
+    """Check that every table of the models exists, e.g. role_metadata_permission_map, added by a later migration than the database was built with."""
+    present = set(inspect(get_engine()).get_table_names(schema=DEFAULT_SCHEMA_NAME))
+    # the keys of metadata.tables carry the schema when one is configured, the names do not
+    missing = sorted({table.name for table in models.BASE.metadata.tables.values()} - present)
+    if missing:
+        return 'missing %s: rebuild it with --reset' % ', '.join(missing)
 
 
 def _model_enums() -> dict[str, set[str]]:
@@ -437,7 +522,36 @@ def check_role(role: str) -> Optional[str]:
         return 'does not exist'
 
 
-def check_role_permissions(role: str, expected: set[tuple[str, str]]) -> Callable[[], Optional[str]]:
+def check_metadata(scope: str, name: str, expected: dict[str, Any]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.did import get_metadata
+        with db_session(DatabaseOperationType.READ) as session:
+            meta = get_metadata(_scope(scope), name, session=session)
+        wrong = ['%s=%r' % (key, meta.get(key)) for key, value in sorted(expected.items()) if meta.get(key) != value]
+        if wrong:
+            return 'has %s' % ', '.join(wrong)
+    return check
+
+
+def _describe_metadata_permission(did_pattern: str, operations: tuple[str, ...], keys: tuple[str, ...]) -> str:
+    return '%s on %s of %s' % (''.join(operation[0] for operation in operations) or 'none', ','.join(keys) or 'no key', did_pattern)
+
+
+def check_role_metadata_permissions(role: str, expected: frozenset[tuple[str, tuple[str, ...], tuple[str, ...]]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.role import list_role_permissions
+        with db_session(DatabaseOperationType.READ) as session:
+            permissions = list_role_permissions(role, session=session)
+        present = {(permission['did_pattern'], permission['meta_key'], tuple(sorted(permission['operations'])))
+                   for permission in permissions if permission.get('type') == RolePermissionType.METADATA.value}
+        missing = [(did_pattern, operations, keys) for did_pattern, operations, keys in sorted(expected)
+                   if any((did_pattern, key, tuple(sorted(operations))) not in present for key in keys or (None,))]
+        if missing:
+            return 'missing %s' % ', '.join(_describe_metadata_permission(*permission) for permission in missing)
+    return check
+
+
+def check_role_permissions(role: str, expected: frozenset[tuple[str, str]]) -> Callable[[], Optional[str]]:
     def check() -> Optional[str]:
         model = models.RoleDidPermissionAssociation
         rows = _read(select(model.did_pattern, *(getattr(model, operation.column) for operation in DidOperationType)).where(model.role == role))
@@ -478,6 +592,7 @@ def run_environment_checks(report: Report, files_dir: str) -> None:
 def run_database_checks(report: Report) -> None:
     report.section('Database schema')
     report.run('alembic revision is %s' % ALEMBIC_REVISION, check_alembic_revision)
+    report.run('tables match the models', check_tables)
     report.run('enum types match the models', check_enums)
 
     report.section('Accounts and identities')
@@ -495,6 +610,9 @@ def run_database_checks(report: Report) -> None:
         report.run('file %s:%s' % (scope, name), check_file(scope, name))
     for (scope, name), (_, content) in DATASETS.items():
         report.run('dataset %s:%s' % (scope, name), check_dataset(scope, name, content))
+    for (scope, name), meta in DEMO_FILES.items():
+        report.run('metadata demo file %s:%s' % (scope, name), check_file(scope, name))
+        report.run('metadata of %s:%s' % (scope, name), check_metadata(scope, name, meta))
     for scope, name in RULE_DIDS:
         report.run('replication rule on %s:%s' % (scope, name), lambda scope=scope, name=name: check_rule(scope, name))
     report.run('transfer request for %s:%s to %s' % (REQUEST_DID + (RSE,)), check_request(models.Request))
@@ -502,10 +620,13 @@ def run_database_checks(report: Report) -> None:
 
     report.section('Roles')
     report.run('reserved roles', check_reserved_roles)
-    for role, (permissions, holders) in ROLES.items():
+    for role, setup in ROLES.items():
         report.run('role %s' % role, lambda role=role: check_role(role))
-        report.run('role %s grants %s' % (role, ', '.join('%s on %s' % permission for permission in sorted(permissions))), check_role_permissions(role, permissions))
-        for account in sorted(holders):
+        report.run('role %s grants %s' % (role, ', '.join('%s on %s' % permission for permission in sorted(setup.did))), check_role_permissions(role, setup.did))
+        if setup.metadata:
+            report.run('role %s grants %s' % (role, ', '.join(_describe_metadata_permission(*permission) for permission in sorted(setup.metadata))),
+                       check_role_metadata_permissions(role, setup.metadata))
+        for account in sorted(setup.holders):
             report.run('account %s holds %s' % (account, role), check_account_roles(account, {role}))
     for account in ACCOUNTS_WITHOUT_ROLES:
         report.run('account %s holds no role' % account, check_account_roles(account, set()))
@@ -606,13 +727,35 @@ def _provision_accounts_and_scopes() -> None:
 
 def _upload_files(files_dir: str) -> None:
     """Upload the files as root, which registers their replica and a rule on the RSE, like `rucio upload` does."""
+    _upload({did: os.path.join(files_dir, path) for did, path in FILES.items()})
+
+
+def _upload_demo_files() -> None:
+    """Generate the files of the metadata demo, upload them as root and set their metadata."""
+    import tempfile
+
+    from rucio.core.did import set_metadata_bulk
+    with tempfile.TemporaryDirectory() as directory:
+        paths = {}
+        for scope, name in DEMO_FILES:
+            paths[scope, name] = os.path.join(directory, name)
+            with open(paths[scope, name], 'w') as file:
+                file.write('RBAC metadata demo file %s:%s\n' % (scope, name))
+        _upload(paths)
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for (scope, name), meta in DEMO_FILES.items():
+            set_metadata_bulk(_scope(scope), name, meta, session=session)
+
+
+def _upload(paths: dict[tuple[str, str], str]) -> None:
+    """Upload local files as root to the DIDs given, see `_upload_files`."""
     from rucio.client import Client
     from rucio.client.uploadclient import UploadClient
     from rucio.rse import rsemanager
 
     client = Client()
     rse_settings = rsemanager.get_rse_info(RSE, vo=DEFAULT_VO)
-    for (scope, name), path in FILES.items():
+    for (scope, name), path in paths.items():
         # the files of a previous reset are still on the storage, while the database no longer knows them
         pfn = list(rsemanager.lfns2pfns(rse_settings, [{'scope': scope, 'name': name}], operation='write').values())[0]
         if pfn.startswith('file://'):
@@ -622,7 +765,7 @@ def _upload_files(files_dir: str) -> None:
                 os.remove(local)
 
         UploadClient(_client=client).upload([{
-            'path': os.path.join(files_dir, path),
+            'path': path,
             'rse': RSE,
             'did_scope': scope,
             'did_name': name,
@@ -676,10 +819,13 @@ def _provision_roles() -> None:
     with db_session(DatabaseOperationType.WRITE) as session:
         role_core.sync_roles_from_policy_package(session=session)
     with db_session(DatabaseOperationType.WRITE) as session:
-        for role, (permissions, holders) in ROLES.items():
-            for operation, did_pattern in sorted(permissions):
+        for role, setup in ROLES.items():
+            for operation, did_pattern in sorted(setup.did):
                 role_core.add_role_permission(role, RolePermissionType.DID, {'did_pattern': did_pattern, 'operation': DidOperationType(operation)}, session=session)
-            for account in sorted(holders):
+            for did_pattern, operations, keys in sorted(setup.metadata):
+                parameters = {'did_pattern': did_pattern, 'operations': list(operations), **({'keys': list(keys)} if keys else {})}
+                role_core.add_role_permission(role, RolePermissionType.METADATA, parameters, session=session)
+            for account in sorted(setup.holders):
                 role_core.add_account_role(_account(account), role, session=session)
 
 
@@ -744,6 +890,9 @@ def reset(files_dir: str) -> None:
 
     _step('Uploading the files')
     _upload_files(files_dir)
+
+    _step('Uploading the files of the metadata demo and setting their metadata')
+    _upload_demo_files()
 
     _step('Creating the datasets and the transfer requests')
     _provision_datasets()
