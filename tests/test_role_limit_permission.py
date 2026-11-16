@@ -372,10 +372,11 @@ def test_limit_is_not_checked_against_requests(random_account, rse_factory, role
 
 @pytest.mark.parametrize('parameters', [
     {'did_pattern': 'user.*'},
-    {'did_pattern': 'user.*', 'operation': 'write', 'local': 100},
-    {'operation': 'write'},
-], ids=['no operation', 'limit on a DID pattern', 'no DID pattern'])
+    {'did_pattern': 'user.*', 'operations': ['write'], 'local': 100},
+    {'operations': ['write']},
+    {'did_pattern': 'user.*', 'operation': 'write'},
+], ids=['no operations', 'limit on a DID pattern', 'no DID pattern', 'a single operation'])
 def test_did_permission_parameters(role_factory, db_session, parameters):
-    """ROLE LIMIT PERMISSION (CORE): A DID permission takes a DID pattern and an operation, and nothing else."""
+    """ROLE LIMIT PERMISSION (CORE): A DID permission takes a DID pattern and its list of operations, and nothing else."""
     with pytest.raises(InputValidationError):
         core_role.add_role_permission(role_factory(), RolePermissionType.DID, parameters, session=db_session)

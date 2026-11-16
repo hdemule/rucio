@@ -42,7 +42,7 @@
 
 import json
 import shutil
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from urllib.parse import quote_plus
 from uuid import uuid4
 
@@ -160,9 +160,14 @@ def _role_path(role_name: str, *suffix: str) -> str:
     return '/'.join(['', 'roles', quote_plus(role_name), *suffix])
 
 
-def _did_permission(operation: str, did_pattern: str) -> dict[str, str]:
-    """Build the body naming a DID permission, to be sent to `/roles/<role_name>/permissions/did`."""
-    return {'did_pattern': did_pattern, 'operation': operation}
+def _did_permission(operations: Union[str, list[str]], did_pattern: str) -> dict[str, Any]:
+    """Build the body granting a DID permission, to be posted to `/roles/<role_name>/permissions/did`: its operations, e.g. 'read' or ['read', 'write'], replace those of the pattern."""
+    return {'did_pattern': did_pattern, 'operations': [operations] if isinstance(operations, str) else list(operations)}
+
+
+def _did_pattern(did_pattern: str) -> dict[str, str]:
+    """Build the body naming a DID permission, to be sent to `/roles/<role_name>/permissions/did` to remove it."""
+    return {'did_pattern': did_pattern}
 
 
 def _account_roles_path(account: str, role_name: Optional[str] = None) -> str:
@@ -1221,7 +1226,7 @@ class TestROLE:
         for account in ('root', 'alice'):
             response = _get(_role_path('user', 'permissions'), account)
             assert response.status_code == OK
-            granted = {perm['operation'] for perm in response.json() if perm['type'] == 'did' and covers_atlas(perm['did_pattern'])}
+            granted = {operation for perm in response.json() if perm['type'] == 'did' and covers_atlas(perm['did_pattern']) for operation in perm['operations']}
             assert {'read', 'write'} <= granted
         assert _get(_role_path('user', 'permissions'), 'bob').status_code == FORBIDDEN
 
@@ -1255,7 +1260,7 @@ class TestROLE:
             ('POST', _role_path('tmp_probe'), None),
             ('DELETE', _role_path('user'), None),
             ('POST', _role_path('user', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            ('DELETE', _role_path('user', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            ('DELETE', _role_path('user', 'permissions', 'did'), _did_pattern('atlas')),
             ('POST', _account_roles_path('bob', 'user'), None),
             ('DELETE', _account_roles_path('alice', 'user'), None),
             ('PUT', _role_path('user'), {'locked': True}),
@@ -1324,7 +1329,7 @@ class TestROLE:
         finally:
             # only needed if the forced deletion failed, in which case the role is still in use
             _delete(_account_roles_path('alice', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('write', 'root'))
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_pattern('root'))
             _delete(_role_path(role_name), 'root')
 
     def test_non_admin_cannot_force_delete_role(self):
@@ -1434,7 +1439,7 @@ class TestROLE:
         finally:
             # the assignment and the permission have to go first: a role still in use cannot be deleted
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'alice'))
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_pattern('alice'))
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_invalid_account_role_expires_at_is_rejected(self):
@@ -1518,7 +1523,7 @@ class TestROLE:
         finally:
             # the assignment and the permission have to go first: a role still in use cannot be deleted
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'alice'))
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_pattern('alice'))
             assert _delete(_role_path(role_name), 'root').status_code == OK
 
     def test_account_role_expiring_before_activation_is_rejected(self):
@@ -1664,7 +1669,7 @@ class TestROLE:
             ('POST', _account_roles_path('non_existing_account', 'user'), None),
             ('DELETE', _account_roles_path('bob', 'user'), None),
             ('POST', _role_path('non_existing_role', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            ('DELETE', _role_path('user', 'permissions', 'did'), _did_permission('read', 'root')),
+            ('DELETE', _role_path('user', 'permissions', 'did'), _did_pattern('root')),
         ],
         ids=[
             'delete non-existing role',
@@ -1688,7 +1693,7 @@ class TestROLE:
         try:
             assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', scope_pattern)).status_code == CREATED
             permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
-            assert permissions == [{'type': 'did', 'did_pattern': scope_pattern + ':*', 'operation': 'read'}]
+            assert permissions == [{'type': 'did', 'did_pattern': scope_pattern + ':*', 'operations': ['read']}]
         finally:
             _delete(_role_path(role_name), 'root', json={'force': True})
 
@@ -1700,7 +1705,7 @@ class TestROLE:
         try:
             assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', did_pattern)).status_code == CREATED
             permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
-            assert permissions == [{'type': 'did', 'did_pattern': did_pattern, 'operation': 'read'}]
+            assert permissions == [{'type': 'did', 'did_pattern': did_pattern, 'operations': ['read']}]
         finally:
             _delete(_role_path(role_name), 'root', json={'force': True})
 
@@ -1710,9 +1715,49 @@ class TestROLE:
         assert _post(_role_path(role_name), 'root').status_code == CREATED
         try:
             assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'atlas:*')).status_code == CREATED
-            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission('read', 'atlas')).status_code == CONFLICT
+            # the same pattern, given without its name part: its operations are replaced
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_permission(['read', 'write'], 'atlas')).status_code == CREATED
             permissions = _get(_role_path(role_name, 'permissions'), 'root').json()
-            assert permissions == [{'type': 'did', 'did_pattern': 'atlas:*', 'operation': 'read'}]
+            assert permissions == [{'type': 'did', 'did_pattern': 'atlas:*', 'operations': ['read', 'write']}]
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    def test_did_permission_replaces_and_is_removed_whole(self):
+        """RBAC(ADMIN): granting a DID permission sets exactly its operations, none being kept as '---', and removing it takes the pattern only"""
+        role_name = 'tmp_did_pattern_%s' % uuid4().hex[:8]
+        path = _role_path(role_name, 'permissions', 'did')
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(path, 'root', json=_did_permission(['read', 'write', 'delete'], 'atlas:*')).status_code == CREATED
+            assert _post(path, 'root', json=_did_permission([], 'atlas:tmp*')).status_code == CREATED
+            assert _post(path, 'root', json=_did_permission('read', 'atlas:*')).status_code == CREATED
+            assert _get(_role_path(role_name, 'permissions'), 'root').json() == [
+                {'type': 'did', 'did_pattern': 'atlas:*', 'operations': ['read']},
+                {'type': 'did', 'did_pattern': 'atlas:tmp*', 'operations': []},
+            ]
+            # the former shape, one 'operation', is refused, and so are operations when removing
+            assert _post(path, 'root', json={'did_pattern': 'atlas:raw*', 'operation': 'read'}).status_code == BAD_REQUEST
+            assert _delete(path, 'root', json=_did_permission('read', 'atlas:*')).status_code == BAD_REQUEST
+            assert _delete(path, 'root', json=_did_pattern('atlas:tmp*')).status_code == OK
+            assert _delete(path, 'root', json=_did_pattern('atlas:tmp*')).status_code == NOT_FOUND
+            assert _get(_role_path(role_name, 'permissions'), 'root').json() == [{'type': 'did', 'did_pattern': 'atlas:*', 'operations': ['read']}]
+        finally:
+            _delete(_role_path(role_name), 'root', json={'force': True})
+
+    def test_most_specific_did_pattern_decides(self):
+        """RBAC(USER): within a role, the most specific DID pattern decides: a name pattern granting less withdraws its DIDs from the whole scope"""
+        role_name = 'tmp_did_specific_%s' % uuid4().hex[:8]
+        prefix = 'rbac_specific_%s' % uuid4().hex[:8]
+        path = _role_path(role_name, 'permissions', 'did')
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(path, 'root', json=_did_permission(['read', 'write'], 'root')).status_code == CREATED
+            assert _post(path, 'root', json=_did_permission('read', 'root:%s_ro*' % prefix)).status_code == CREATED
+            # bob owns no scope and holds no other role
+            assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
+            dataset = {'type': 'DATASET', 'lifetime': 3600}
+            assert _post(_did_path('root:%s_rw' % prefix), 'bob', json=dataset).status_code == CREATED
+            assert _post(_did_path('root:%s_ro1' % prefix), 'bob', json=dataset).status_code == FORBIDDEN
         finally:
             _delete(_role_path(role_name), 'root', json={'force': True})
 
@@ -1747,14 +1792,12 @@ class TestROLE:
         ('path', 'payload'),
         [
             (_role_path('user'), None),
-            (_role_path('user', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            (_role_path('user', 'permissions', 'did'), _did_permission('write', 'atlas')),
             (_account_roles_path('alice', 'user'), None),
         ],
-        ids=['duplicate role', 'duplicate read permission', 'duplicate write permission', 'duplicate account role assignment'],
+        ids=['duplicate role', 'duplicate account role assignment'],
     )
     def test_operations_on_already_existing_targets_return_conflict(self, path, payload):
-        """RBAC(ADMIN): re-creating an already-existing role, permission or account role assignment returns 409"""
+        """RBAC(ADMIN): re-creating an already-existing role or account role assignment returns 409 (a permission is replaced instead)"""
         # the target is expected to exist already (see the assumptions at the top of this file),
         # in which case this first call is the duplicate and answers 409. Should it not exist,
         # it is created here and removed again in the cleanup below, so that the test leaves the

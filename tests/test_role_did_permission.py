@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import pytest
 
-from rucio.common.exception import Duplicate, InputValidationError
+from rucio.common.exception import InputValidationError, RolePermissionNotFound
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import generate_uuid
 from rucio.core import role as core_role
@@ -92,27 +92,32 @@ def test_did_pattern_matches(scope, name: Optional[str], did_pattern, matches):
     assert core_role._did_pattern_matches(InternalScope(scope), name, did_pattern) is matches
 
 
-def test_did_permission_operations_share_one_row(role_factory, db_session):
-    """ROLE DID PERMISSION (CORE): The operations granted on a DID pattern are added and removed one by one, a duplicate being refused."""
+def test_did_permission_replaces_its_operations(role_factory, db_session):
+    """ROLE DID PERMISSION (CORE): Granting a DID permission sets exactly its operations on the pattern, none being kept, and removing it deletes it."""
     role = role_factory()
-    for operation in (DidOperationType.READ, DidOperationType.WRITE):
-        core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operation': operation}, session=db_session)
-    with pytest.raises(Duplicate):
-        core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operation': 'read'}, session=db_session)
+    core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operations': [DidOperationType.READ]}, session=db_session)
+    core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operations': ['write', 'read']}, session=db_session)
+    core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:tmp*', 'operations': []}, session=db_session)
     assert core_role.list_role_permissions(role, session=db_session) == [
-        {'type': 'did', 'did_pattern': 'data:raw*', 'operation': 'read'},
-        {'type': 'did', 'did_pattern': 'data:raw*', 'operation': 'write'},
+        {'type': 'did', 'did_pattern': 'data:raw*', 'operations': ['read', 'write']},
+        {'type': 'did', 'did_pattern': 'data:tmp*', 'operations': []},
     ]
 
-    core_role.delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operation': 'read'}, session=db_session)
-    assert core_role.list_role_permissions(role, session=db_session) == [{'type': 'did', 'did_pattern': 'data:raw*', 'operation': 'write'}]
+    core_role.delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*'}, session=db_session)
+    assert core_role.list_role_permissions(role, session=db_session) == [{'type': 'did', 'did_pattern': 'data:tmp*', 'operations': []}]
+    with pytest.raises(RolePermissionNotFound):
+        core_role.delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*'}, session=db_session)
+    with pytest.raises(InputValidationError):
+        core_role.delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:tmp*', 'operations': []}, session=db_session)
+    with pytest.raises(InputValidationError):
+        core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operations': 'read'}, session=db_session)
 
 
 def test_did_permission_request_on_name_pattern(random_account, role_factory, db_session):
     """ROLE DID PERMISSION (CORE): A permission on a name pattern grants the DIDs it matches, not the whole scope."""
     role = role_factory(random_account)
     scope = InternalScope('mock')
-    core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'mock:rbac_%s*' % role[-8:], 'operation': 'write'}, session=db_session)
+    core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'mock:rbac_%s*' % role[-8:], 'operations': ['write']}, session=db_session)
 
     def granted(name: Optional[str]) -> bool:
         request = core_role.DidPermissionRequest(operation=DidOperationType.WRITE, scope=scope, name=name)
@@ -155,16 +160,26 @@ def catalogue(monkeypatch):
     return data
 
 
+LETTERS = {'r': 'read', 'w': 'write', 'd': 'delete'}
+
+
 @pytest.fixture
 def grant(random_account, role_factory, db_session):
-    """Grant operations ('r', 'w', 'd') to `random_account` on DID patterns of the scope 'mock' through a role of its own, the patterns using `%(prefix)s`."""
-    role = role_factory(random_account)
-    prefix = 'rbac_%s' % role[-8:]
+    """
+    Set operations ('r', 'w', 'd', '' for none) for `random_account` on DID patterns of the scope 'mock' through a role
+    of its own, the patterns using `%(prefix)s`. `grant.other_role` grants them through a second role of the account.
+    """
+    roles: dict[str, str] = {}
+    prefix = 'rbac_%s' % generate_uuid()[:8]
 
-    def _grant(did_pattern: str, operations: str) -> None:
-        for letter in operations:
-            operation = {'r': 'read', 'w': 'write', 'd': 'delete'}[letter]
-            core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': did_pattern % {'prefix': prefix}, 'operation': operation}, session=db_session)
+    def _role(name: str) -> str:
+        if name not in roles:
+            roles[name] = role_factory(random_account)
+        return roles[name]
+
+    def _grant(did_pattern: str, operations: str, role: str = 'main') -> None:
+        parameters = {'did_pattern': did_pattern % {'prefix': prefix}, 'operations': [LETTERS[letter] for letter in operations]}
+        core_role.add_role_permission(_role(role), RolePermissionType.DID, parameters, session=db_session)
 
     _grant.prefix = prefix  # type: ignore[attr-defined]
     return _grant
@@ -409,3 +424,78 @@ def test_recursive_metadata_is_not_granted(random_account, grant, catalogue, db_
     assert generic.perm_set_metadata_bulk(random_account, kwargs, db_session)
     assert not generic.perm_set_metadata(random_account, {**kwargs, 'recursive': True}, db_session)
     assert not generic.perm_set_metadata_bulk(random_account, {**kwargs, 'recursive': True}, db_session)
+
+
+def _granted(account, name: Optional[str], db_session) -> str:
+    """The operations the roles of an account grant on a DID of the scope 'mock' (on the whole scope without `name`), e.g. 'r-d'."""
+    return ''.join(letter if core_role.has_permission(account, core_role.DidPermissionRequest(operation=DidOperationType(LETTERS[letter]), scope=MOCK, name=name), session=db_session)
+                   else '-' for letter in 'rwd')
+
+
+@pytest.mark.parametrize(('rows', 'name', 'expected'), [
+    ([('mock:%(prefix)s*', 'rw'), ('mock:%(prefix)s_raw*', 'r')], '%s_raw1', 'r--'),
+    ([('mock:%(prefix)s*', 'rw'), ('mock:%(prefix)s_raw*', 'r')], '%s_calib1', 'rw-'),
+    ([('mock:%(prefix)s*', 'r'), ('mock:%(prefix)s_raw*', 'w')], '%s_raw1', '-w-'),
+    ([('mock:%(prefix)s_raw*', 'rw'), ('mock:%(prefix)s_raw1', 'd')], '%s_raw1', '--d'),
+    ([('mock:%(prefix)s_ra*', 'd'), ('mock:%(prefix)s_raw*', 'r')], '%s_raw1', 'r--'),
+    ([('mock:*', 'rwd'), ('mock:%(prefix)s_tmp*', '')], '%s_tmp1', '---'),
+    ([('mock:*', 'rwd'), ('mock:%(prefix)s_tmp*', '')], '%s_raw1', 'rwd'),
+    ([('mo*:*', 'r'), ('mock:*', 'w')], '%s_raw1', '-w-'),
+], ids=['narrower grants less', 'wider pattern elsewhere', 'narrower withdraws READ', 'single DID beats a name pattern', 'longer prefix wins',
+        'none withdraws everything', 'none only where it matches', 'scope beats scope pattern'])
+def test_most_specific_pattern_decides(random_account, grant, db_session, rows, name, expected):
+    """ROLE DID PERMISSION (CORE): Within a role, the most specific DID pattern matching a DID decides every operation the role grants on it."""
+    for did_pattern, operations in rows:
+        grant(did_pattern, operations)
+    assert _granted(random_account, name % grant.prefix, db_session) == expected
+
+
+def test_roles_add_up_despite_none(random_account, grant, db_session):
+    """ROLE DID PERMISSION (CORE): A pattern granting nothing only withdraws DIDs within its own role: the roles of an account add up."""
+    grant('mock:%(prefix)s*', 'r')
+    grant('mock:%(prefix)s*', 'rw', role='other')
+    grant('mock:%(prefix)s_tmp*', '', role='other')
+    assert _granted(random_account, '%s_tmp1' % grant.prefix, db_session) == 'r--'
+    assert _granted(random_account, '%s_raw1' % grant.prefix, db_session) == 'rw-'
+
+
+def test_whole_scope_and_some_dids(random_account, grant, db_session):
+    """ROLE DID PERMISSION (CORE): A whole scope is only granted if no name pattern of the role withdraws the operation; some DIDs of it as soon as a deciding pattern grants it."""
+    grant('mock:*', 'r')
+    grant('mock:%(prefix)s_raw*', 'rw')
+    assert _granted(random_account, None, db_session) == 'r--'
+    grant('mock:%(prefix)s_tmp*', '')
+    assert _granted(random_account, None, db_session) == '---'
+    assert core_role.has_any_scope_prefix_access(account=random_account, scope=MOCK, operation=DidOperationType.READ, session=db_session)
+    assert not core_role.scope_access_checker(account=random_account, session=db_session)(MOCK)
+    assert core_role.scope_access_checker(account=random_account, session=db_session, any_did=True)(MOCK)
+
+
+def test_none_on_a_scope_hides_it_from_a_scope_pattern(random_account, grant, db_session):
+    """ROLE DID PERMISSION (CORE): A whole scope granting nothing withdraws it from a scope pattern of the same role, for its DIDs and for some READ in it."""
+    grant('mo*:*', 'r')
+    grant('mock:*', '')
+    assert _granted(random_account, '%s_raw1' % grant.prefix, db_session) == '---'
+    assert not core_role.has_any_scope_prefix_access(account=random_account, scope=MOCK, operation=DidOperationType.READ, session=db_session)
+    assert core_role.has_any_scope_prefix_access(account=random_account, scope=InternalScope('mock2'), operation=DidOperationType.READ, session=db_session)
+
+
+def test_read_only_area_in_a_writable_scope(random_account, grant, catalogue, db_session):
+    """ROLE DID PERMISSION (CORE): 'rwd' on a scope and 'r' on a name pattern keep the matching DIDs read-only: they are neither altered nor created."""
+    from rucio.core.permission import generic
+
+    raw, calib = '%s_raw1' % grant.prefix, '%s_calib1' % grant.prefix
+    catalogue.add(raw, owner='someone else')
+    catalogue.add(calib, owner='someone else')
+    grant('mock:%(prefix)s*', 'rwd')
+    grant('mock:%(prefix)s_raw*', 'r')
+    assert generic._rbac_can_read_did(random_account, MOCK, raw, db_session)
+    assert not generic._rbac_can_alter_did(random_account, MOCK, raw, db_session)
+    assert generic._rbac_can_alter_did(random_account, MOCK, calib, db_session)
+    assert not generic._rbac_can_create_did(random_account, {'scope': MOCK, 'name': '%s_raw2' % grant.prefix}, db_session)
+    assert generic._rbac_can_create_did(random_account, {'scope': MOCK, 'name': '%s_calib2' % grant.prefix}, db_session)
+    # the metadata keys fall back to the deciding DID permission
+    assert not core_role.can_write_metadata_keys(random_account, MOCK, raw, ['project'], session=db_session)
+    assert core_role.can_write_metadata_keys(random_account, MOCK, calib, ['project'], session=db_session)
+    items = [{'scope': MOCK, 'name': name} for name in (raw, calib)]
+    assert [item['name'] for item in core_role.filter_iterable_by_did_access(items, account=random_account, session=db_session, operation=DidOperationType.DELETE)] == [calib]
