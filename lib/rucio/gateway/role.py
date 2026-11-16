@@ -303,9 +303,11 @@ def add_role_permission(
     Grant a role a permission of a type, see :func:`rucio.core.role.add_role_permission`.
 
     :param role: The role to grant the permission to.
-    :param permission_type: The type of the permission: 'did' or 'limit'.
+    :param permission_type: The type of the permission: 'did', 'metadata' or 'limit'.
     :param parameters: The target of the permission and its parameters: a 'did_pattern', on which only a trailing '*'
-                       wildcard is accepted, and an 'operation' for a DID permission; an 'rse_expression' and the bytes
+                       wildcard is accepted, and an 'operation' for a DID permission; a 'did_pattern', its metadata
+                       'keys' ('*' for every key, none for no key) and the list of its 'operations', possibly empty,
+                       for a metadata permission, which replaces what the role was granted on these keys; an 'rse_expression' and the bytes
                        of its 'local' or 'global' limit for a limit, which overwrites the limit if it exists already. A local
                        limit is set on an expression matching a single RSE, a global one on an expression matching several.
     :param issuer: The account issuing the command.
@@ -331,9 +333,10 @@ def delete_role_permission(
     Remove permissions of a type from a role, see :func:`rucio.core.role.delete_role_permission`.
 
     :param role: The role to remove the permissions from.
-    :param permission_type: The type of the permissions: 'did' or 'limit'.
+    :param permission_type: The type of the permissions: 'did', 'metadata' or 'limit'.
     :param parameters: The target of the permissions and the parameters identifying them: a 'did_pattern' and an
-                       'operation' for a DID permission; an 'rse_expression', and optionally which of its 'local'
+                       'operation' for a DID permission; a 'did_pattern' and its metadata 'keys' for a metadata
+                       permission, all of which must exist; an 'rse_expression', and optionally which of its 'local'
                        and 'global' limits to remove (true), both being looked for otherwise, for a limit.
     :param issuer: The account issuing the command.
     :param force: Remove the permissions even if the role is locked.
