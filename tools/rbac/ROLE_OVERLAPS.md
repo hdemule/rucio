@@ -11,15 +11,18 @@ The non-obvious rows were checked against the real code of `rucio.core.role` and
 
 | | Within one role | Across the roles of an account |
 |---|---|---|
-| **DID** | the rows add up: an operation is granted if one row grants it | the roles add up |
-| **Metadata** | the narrowest subject decides: a row naming the key, then a row on every key (`*`), then the DID permissions of the role; within a level, the most specific DID pattern | the roles add up: a key is readable (writable) if one role makes it readable (writable) |
+| **DID** | the most specific matching pattern decides: its row gives every operation the role grants on the DID | the roles add up |
+| **Metadata** | the narrowest subject decides: a row naming the key, then a row on every key (`*`), then the DID permission of the role deciding the DID; within a level, the most specific DID pattern | the roles add up: a key is readable (writable) if one role makes it readable (writable) |
 | **DID vs metadata** | metadata decides on the keys it names, the DID permissions on the rest and on the DID itself | the roles add up; metadata permissions never grant the data of a DID nor count as READ for ownership |
 | **Limits** | one local limit per RSE; its global limits only restrict it | on an RSE, the role leaving the most space is taken; the account limits only apply where no role has a local limit |
 
 Common to everything:
 
-- **Roles only grant.** No permission and no role can take away what another role grants: there is no deny.
-  A `--` metadata permission only withdraws a key from the DID permissions *of its own role*.
+- **Roles only grant.** No role can take away what another role grants: there is no deny. Within a role, a
+  narrower pattern can grant less than a wider one, down to nothing (`---` for a DID permission, `--` for a
+  metadata permission), but only *for that role*.
+- **Specificity, from the most to the least specific:** an exact name (`atlas:file1`), a name prefix
+  (`atlas:file*`), a whole scope (`atlas:*`), a scope prefix (`atlas*:*`), a longer prefix being more specific.
 - **Only active assignments count.** A role whose assignment has not started yet (`activates_at` in the
   future) or has expired grants nothing at all.
 - **Some accounts are never limited by roles:** root, admins (the reserved `admin` role) and the owner of the
@@ -27,23 +30,31 @@ Common to everything:
 
 The examples use the account **alice**, holding the roles A and B, on the scope **atlas**, owned by root,
 whose DIDs `file1`, `file2`, `calib1` and the collection `ds1` are owned by root, and `mine` by alice.
-A DID permission is written `r`, `w`, `d` and a metadata permission `r`, `w`, `rw`, `--`.
+A DID permission is written `r`, `w`, `d` (`---` for none) and a metadata permission `r`, `w`, `rw`, `--`.
 
 ---
 
 ## 1. DID permissions within the same role
 
-Within a role, the rows simply add up: no row restricts another, and the order of the rows does not matter.
+Within a role, the most specific pattern matching a DID decides: its row gives **every** operation the role grants
+on that DID, and the other rows matching it are not looked at. A narrower pattern can therefore grant more or less
+than a wider one. The order the rows were added in does not matter.
 
 ### 1.1 Patterns covering the same DIDs
 
-| Role A | `atlas:file1` gets | Why |
-|---|---|---|
-| `r` on `atlas:*`, `r` on `atlas:file*` | `r` | redundant rows, nothing more |
-| `r` on `atlas*:*`, `r` on `atlas:*` | `r` | a wildcard scope part also covers `atlas` |
-| `r` on `atlas:*`, `w` on `atlas:file*` | `rw` | the operations of the matching rows add up |
-| `r` on `atlas:file1`, `d` on `atlas:*` | `r-d` | same |
-| `w` on `atlas:file*` | `-w-` on `file1`, nothing on `calib1` | a name pattern only covers the names it matches |
+| Role A | `atlas:file1` gets | `atlas:calib1` gets | Why |
+|---|---|---|---|
+| `r` on `atlas:*`, `r` on `atlas:file*` | `r--` | `r--` | redundant rows |
+| `r` on `atlas*:*`, `rw` on `atlas:*` | `rw-` | `rw-` | `atlas:*` is more specific than `atlas*:*` |
+| `rw` on `atlas:*`, `r` on `atlas:file*` | `r--` | `rw-` | the name pattern decides `file1`: a read-only area within a writable scope |
+| `r` on `atlas:*`, `w` on `atlas:file*` | `-w-` | `r--` | the rows do **not** add up: `r` is withdrawn from `file1` too. Grant `rw` on `atlas:file*` to keep it |
+| `r` on `atlas:file1`, `d` on `atlas:*` | `r--` | `--d` | an exact name beats the whole scope |
+| `d` on `atlas:fi*`, `r` on `atlas:file*` | `r--` | nothing | the longer prefix decides |
+| `rwd` on `atlas:*`, `---` on `atlas:file*` | `---` | `rwd` | a row granting nothing withdraws the DIDs it matches: not even listed, as with no row |
+| `w` on `atlas:file*` | `-w-` | nothing | a name pattern only covers the names it matches |
+
+The CLI warns when a new row withdraws operations a wider row of the same role grants, e.g. `atlas:file* (r--) is
+more specific than atlas:* (rw-) [...]: w withdrawn from them`, and tells which row decides again when one is removed.
 
 ### 1.2 The operations are independent
 
@@ -61,6 +72,9 @@ Within a role, the rows simply add up: no row restricts another, and the order o
 |---|---|---|
 | `r` on `atlas:file*` | `list_dids atlas:*` and `list_scopes` show `atlas`, then only the matching DIDs | a scope is accessible as soon as a pattern touches it; the listings are filtered per DID |
 | `r` on `atlas:file*` | items standing for the whole scope (e.g. the bad replicas summary) are refused | only a `*` name part (`atlas:*`, `atlas*:*`) grants the whole scope |
+| `r` on `atlas:*`, `---` on `atlas:secret*` | `list_dids atlas:*` lists every DID but the `secret*` ones; the whole-scope items are refused | the whole scope is only granted if no name pattern of the role withdraws the operation |
+| `r` on `atlas:*`, `rw` on `atlas:raw*` | the whole-scope items are shown | no name pattern withdraws `r` |
+| `r` on `atlas*:*`, `---` on `atlas:*` | nothing in `atlas`, not even listing it; `atlas2` readable | `atlas:*` decides the whole scope `atlas` |
 | `r` on `atlas:ds1` | the files inside `ds1` are **not** readable | no inheritance: a pattern matches the DID itself, not its content |
 | `w` on `atlas:ds1` | can attach into `ds1`; a file uploaded into it is not covered | same |
 
@@ -72,6 +86,8 @@ pattern.
 | Role A | `atlas:mine` (owned by alice) | Why |
 |---|---|---|
 | `r` on `atlas:calib*` | readable, and alterable: metadata, rules, detaching, deleting | some READ in `atlas` |
+| `r` on `atlas:calib*`, `---` on `atlas:mine` | still readable and alterable | ownership is not withdrawn by a pattern: some READ in `atlas` is enough |
+| `r` on `atlas*:*`, `---` on `atlas:*` | **nothing** | no READ in `atlas` (`atlas:*` decides it) |
 | `w` on `atlas:mine*` only | **nothing**, not even seeing it | owner without READ in the scope |
 | `w` on `atlas:mine*` only | can still finish her own upload of `mine` (C → A) | the only exception |
 | metadata `r` on `atlas:*` only | visible (section 5), but **not** owner-admin | metadata READ is not READ |
@@ -90,8 +106,8 @@ pattern.
 
 ## 2. DID permissions across different roles
 
-Across roles, everything adds up exactly as within one role: the account gets the union of the rows of all
-its active roles.
+Across roles, everything adds up: each role decides a DID on its own (section 1), and the account gets the union of
+what its active roles grant. A `---` in one role never hides what another role grants.
 
 | Role A | Role B | Result | Why |
 |---|---|---|---|
@@ -99,6 +115,8 @@ its active roles.
 | `r` on `atlas:*` | `d` on `atlas:file1` | reads everything, alters `file1` only | union |
 | `r` on `atlas:*` | `r` on `atlas:*` | `r` | redundant |
 | `rwd` on `atlas:*` | nothing on `atlas` | `rwd` | B cannot restrict A: there is no deny |
+| `rwd` on `atlas:*` | `---` on `atlas:*` | `rwd` | a `---` only withdraws within its own role |
+| `r` on `atlas:*`, `---` on `atlas:file*` | `w` on `atlas:file1` | `-w-` on `file1` | A grants nothing on `file1`, B grants `w` |
 | `r` on `atlas:calib*` | `w` on `atlas:mine*` | alice creates `atlas:mine2` and administers it afterwards | ownership needs READ in the scope from *any* role |
 | `w` on `atlas:new*` | `d` on `atlas:new*` | can create `atlas:new1` with `lifetime` in its metadata | deletion keys at creation need `d` or ownership, from any role |
 | `r` on `atlas:*` (expired) | `w` on `atlas:*` | `-w-`, and ownership counts for nothing | an expired assignment grants nothing |
@@ -112,7 +130,7 @@ For each key of each DID, a role decides on its own, in this order:
 
 1. its metadata rows **naming that key** whose DID pattern matches the DID;
 2. otherwise, its rows on **every key** (`*`) whose pattern matches;
-3. otherwise, its **DID permissions**: DID READ shows the key, DID DELETE lets it be set.
+3. otherwise, its **DID permission deciding the DID** (section 1): DID READ shows the key, DID DELETE lets it be set.
 
 Within levels 1 and 2, the **most specific DID pattern** decides: an exact name (`atlas:file1`), then a name
 prefix (`atlas:file*`), then a whole scope (`atlas:*`), then a scope prefix (`atlas*:*`), a longer prefix
@@ -142,6 +160,7 @@ being more specific. The deciding row's operations are exact: `--` grants nothin
 | DID `r` on `atlas:*`, metadata `--` on `*` of `atlas:file1` | `--` | `--` | visible, data readable | hiding every key hides no DID nor its data |
 | DID `r`, metadata `rw` on `quality` | `rw` | `r` | | the row grants more than the DID permission |
 | DID `rwd`, metadata `r` on `quality` | `r` | `rw` | | the row grants less than DID DELETE on that key |
+| DID `rwd` on `atlas:*`, `r` on `atlas:file*` | `r` | `r` | visible, not alterable | the keys fall back to the deciding DID permission, `r` on `atlas:file*` |
 | DID `r`, metadata `rw` on `quality` of `atlas:file1`, then one call setting `quality` and `campaign` | refused | | | every key of the call must be writable; `campaign` falls back to DID READ only |
 
 ### 3.4 Metadata permissions alone
@@ -150,6 +169,8 @@ being more specific. The deciding row's operations are exact: `--` grants nothin
 |---|---|---|
 | `r` on `quality` | visible, only `quality` shown (plus its scope, name and type), no data | a READ row makes the DID visible |
 | `r` on no key | visible, no key shown, no data | the no-key permission only makes DIDs visible |
+| `--` (or `w`) on no key | refused when granting it | a permission on no key only makes DIDs visible, so it is `r` |
+| `--` on `*` | nothing at all, not even listed | `--` never makes a DID visible; use DID `---` to hide DIDs within a role |
 | `rw` on `quality` | visible, `quality` readable and writable | |
 | `-w` on `quality` | **not visible**, `quality` writable blindly | like DID `-w-` |
 | `--` on `quality` | nothing at all | `--` alone grants nothing |
@@ -279,8 +300,9 @@ More cases worth knowing:
 ## 8. Where it lives
 
 - `lib/rucio/core/role.py`:
-  - DID patterns and union: `_did_pattern_matches`, `has_permission`, `has_any_scope_prefix_access`;
-  - metadata resolution: the "Metadata" section comment, `MetadataAccess`, `_did_pattern_specificity`, `MetadataKeyFilter`;
+  - DID patterns, specificity and union: `_did_pattern_matches`, `_did_pattern_specificity`, `DidAccess`, `has_permission`, `has_any_scope_prefix_access`;
+  - metadata resolution: the "Metadata" section comment, `MetadataAccess`, `MetadataKeyFilter`;
   - limits: the "RSE quotas" section comment, `list_account_rse_quota_grants`, `rse_quota_left`.
+- `lib/rucio/cli/role.py`: the warning when a narrower DID pattern withdraws operations (`_did_pattern_covers`, `_deciding_did_pattern`);
 - `lib/rucio/core/permission/generic.py`: ownership (`_rbac_did_ownership_access`), the prerequisites
   (`_rbac_can_read_did`), altering (`_rbac_can_alter_did`, `_rbac_can_alter_metadata`), data (`perm_read_data`).
