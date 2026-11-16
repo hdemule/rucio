@@ -235,11 +235,31 @@ class DidOperationType(RolePermissionOperationType):
     DELETE = 'delete'
 
 
+class MetadataOperationType(RolePermissionOperationType):
+    """
+    The operations a metadata permission grants on the metadata key it names, of the DIDs its pattern matches.
+
+    READ shows the key and its value, WRITE adds, modifies or deletes it.
+    """
+    READ = 'read'
+    WRITE = 'write'
+
+
+# The reserved values of `role_metadata_permission_map.meta_key`, which name no real metadata key: a permission on
+# METADATA_PERMISSION_ALL_KEYS covers every key, one on METADATA_PERMISSION_NO_KEY none at all (it only makes the DIDs
+# visible, so it may only grant READ). A real metadata key with one of these names cannot be granted on its own.
+METADATA_PERMISSION_ALL_KEYS = '*'
+METADATA_PERMISSION_NO_KEY = ':none:'
+
+
 class RolePermissionType(Enum):
     """
     The types of the permissions a role can be granted, each stored in its own `role_<type>_permission_map` table(s).
 
-    DID grants operations on DIDs, LIMIT the bytes an account may use on RSEs.
+    DID grants operations on DIDs (their data and, by default, their metadata), METADATA operations on
+    given metadata keys of DIDs, overriding what the DID permissions of the role grant on these keys,
+    LIMIT the bytes an account may use on RSEs.
     """
     DID = 'did'
+    METADATA = 'metadata'
     LIMIT = 'limit'
