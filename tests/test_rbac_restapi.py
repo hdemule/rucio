@@ -20,14 +20,20 @@
 #              operations (add/delete role, role permissions, account roles), since none of those
 #              actions have a dedicated permission check and thus fall back to perm_default
 #              (root or an account with the 'admin' attribute).
-#   2. alice - regular account; owns scope 'alice' and already has the 'data-scientist' role assigned.
+#   2. alice - regular account; owns scope 'alice' and already has the 'user' role assigned.
 #   3. bob   - regular account; owns no scope of its own and has no roles assigned.
+#   4. carol - regular account; owns no scope of its own and has the 'moderator' role assigned.
 # Roles:
-#   1. 'data-scientist' - already exists and grants READ+WRITE permission on scope 'atlas'.
+#   1. 'user'      - already exists and grants READ+WRITE permission on scope 'atlas', READ on scope 'archive', and
+#                    metadata permissions on scope 'physics' only.
+#   2. 'moderator' - already exists and grants READ on scope 'physics' and metadata permissions there.
+#   3. 'superuser' - already exists and grants READ on every scope.
 # Scopes:
-#   1. 'alice' - owned by account 'alice'.
-#   2. 'root'  - owned by account 'root'; also used as a throwaway permission target for role tests.
-#   3. 'atlas' - target of the 'data-scientist' role's permissions.
+#   1. 'alice'   - owned by account 'alice'.
+#   2. 'root'    - owned by account 'root'; also used as a throwaway permission target for role tests.
+#   3. 'atlas'   - target of the 'user' role's DID permissions.
+#   4. 'physics' - owned by account 'root'; holds the files of the metadata demo, untouched by these tests.
+# All of it is provisioned by `tools/rbac/db_setup/setup_test_db.py --reset`.
 # DIDs:
 #   'alice:alice_ds', 'alice:alice_ds2', 'alice:file1.png', 'alice:file2.png' and 'root:file1' exist,
 #   with replication rules registered for some of them (see `_get_rule_id`).
@@ -1139,6 +1145,8 @@ class TestSCOPE:
         assert {'root', 'alice'} <= scopes['root']
         assert 'alice' in scopes['alice'] and 'root' not in scopes['alice']
         assert not {'root', 'alice'} & scopes['bob']
+        # alice only holds metadata permissions on 'physics', which make its DIDs, hence the scope, visible
+        assert 'physics' in scopes['alice'] and 'physics' not in scopes['bob']
 
     def test_list_scopes_with_account(self):
         """RBAC(USER): GET /scopes/owner/ only lists the scopes the caller can read, along with their owner"""
@@ -1183,10 +1191,10 @@ class TestROLE:
         response = _get('/roles/', 'root')
         assert response.status_code == OK
         roles = response.json()
-        assert 'data-scientist' in [role['role'] for role in roles]
+        assert 'user' in [role['role'] for role in roles]
         # every entry carries a description, which is null for roles without one, and its assignable, locked and reserved states
         assert all({'description', 'assignable', 'locked', 'reserved'} <= set(role) for role in roles)
-        assert [role['reserved'] for role in roles if role['role'] == 'data-scientist'] == [False]
+        assert [role['reserved'] for role in roles if role['role'] == 'user'] == [False]
         for account in ('alice', 'bob'):
             assert _get('/roles/', account).status_code == FORBIDDEN
 
@@ -1198,22 +1206,22 @@ class TestROLE:
             return name_pattern == '*' and (scope_pattern == 'atlas' or (scope_pattern.endswith('*') and 'atlas'.startswith(scope_pattern[:-1])))
 
         for account in ('root', 'alice'):
-            response = _get(_role_path('data-scientist', 'permissions'), account)
+            response = _get(_role_path('user', 'permissions'), account)
             assert response.status_code == OK
             granted = {perm['operation'] for perm in response.json() if perm['type'] == 'did' and covers_atlas(perm['did_pattern'])}
             assert {'read', 'write'} <= granted
-        assert _get(_role_path('data-scientist', 'permissions'), 'bob').status_code == FORBIDDEN
+        assert _get(_role_path('user', 'permissions'), 'bob').status_code == FORBIDDEN
 
     def test_list_role_accounts(self):
         """RBAC(ADMIN): GET /roles/<role>/accounts is only visible to root/admin and lists each account holding the role with its activation and expiry dates"""
-        response = _get(_role_path('data-scientist', 'accounts'), 'root')
+        response = _get(_role_path('user', 'accounts'), 'root')
         assert response.status_code == OK
         assignments = response.json()
         assert 'alice' in [assignment['account'] for assignment in assignments]
         assert all({'account', 'activates_at', 'expires_at'} <= set(assignment) for assignment in assignments)
         assert _get(_role_path('does-not-exist', 'accounts'), 'root').status_code == NOT_FOUND
         for account in ('alice', 'bob'):
-            assert _get(_role_path('data-scientist', 'accounts'), account).status_code == FORBIDDEN
+            assert _get(_role_path('user', 'accounts'), account).status_code == FORBIDDEN
 
     def test_list_account_roles(self):
         """RBAC(ADMIN/USER): GET /roles/accounts/<account> is visible to root/admin and to accounts if they are querying their own roles"""
@@ -1221,7 +1229,7 @@ class TestROLE:
             response = _get(_account_roles_path('alice'), account)
             assert response.status_code == OK
             roles = response.json()['roles']
-            assert 'data-scientist' in [role['role'] for role in roles]
+            assert 'user' in [role['role'] for role in roles]
             # the description of each assigned role is reported alongside its activation and expiry dates
             assert all({'activates_at', 'expires_at', 'description'} <= set(role) for role in roles)
         assert _get(_account_roles_path('bob'), account).status_code == FORBIDDEN
@@ -1232,13 +1240,13 @@ class TestROLE:
         ('method', 'path', 'payload'),
         [
             ('POST', _role_path('tmp_probe'), None),
-            ('DELETE', _role_path('data-scientist'), None),
-            ('POST', _role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            ('POST', _account_roles_path('bob', 'data-scientist'), None),
-            ('DELETE', _account_roles_path('alice', 'data-scientist'), None),
-            ('PUT', _role_path('data-scientist'), {'locked': True}),
-            ('PUT', _role_path('data-scientist'), {'assignable': False}),
+            ('DELETE', _role_path('user'), None),
+            ('POST', _role_path('user', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            ('DELETE', _role_path('user', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            ('POST', _account_roles_path('bob', 'user'), None),
+            ('DELETE', _account_roles_path('alice', 'user'), None),
+            ('PUT', _role_path('user'), {'locked': True}),
+            ('PUT', _role_path('user'), {'assignable': False}),
         ],
         ids=['add role', 'delete role', 'add permission', 'remove permission', 'assign account role', 'unassign account role', 'lock role', 'make role unassignable'],
     )
@@ -1309,7 +1317,7 @@ class TestROLE:
     def test_non_admin_cannot_force_delete_role(self):
         """RBAC(USER): a forced role deletion is restricted to root/admin like any other role deletion"""
         for account in ('alice', 'bob'):
-            assert _delete(_role_path('data-scientist'), account, json={'force': True}).status_code == FORBIDDEN
+            assert _delete(_role_path('user'), account, json={'force': True}).status_code == FORBIDDEN
 
     def _role_state(self, role_name: str) -> dict[str, Any]:
         """Read the listing entry of `role_name` back from GET /roles/."""
@@ -1434,12 +1442,12 @@ class TestROLE:
 
     def test_set_expires_at_of_role_not_assigned_to_account_returns_not_found(self):
         """RBAC(ADMIN): setting the expiry date of a role that is not assigned to the account returns 404"""
-        assert _request('PUT', _account_roles_path('bob', 'data-scientist'), 'root', json={'expires_at': None}).status_code == NOT_FOUND
+        assert _request('PUT', _account_roles_path('bob', 'user'), 'root', json={'expires_at': None}).status_code == NOT_FOUND
 
     def test_non_admin_cannot_set_account_role_expires_at(self):
         """RBAC(USER): setting the expiry date of an account's role is restricted to root/admin"""
         for account in ('alice', 'bob'):
-            assert _request('PUT', _account_roles_path('alice', 'data-scientist'), account, json={'expires_at': None}).status_code == FORBIDDEN
+            assert _request('PUT', _account_roles_path('alice', 'user'), account, json={'expires_at': None}).status_code == FORBIDDEN
 
     # --- activation date of a role assigned to an account --------------------------------
 
@@ -1542,12 +1550,12 @@ class TestROLE:
 
     def test_set_activates_at_of_role_not_assigned_to_account_returns_not_found(self):
         """RBAC(ADMIN): setting the activation date of a role that is not assigned to the account returns 404"""
-        assert _request('PUT', _account_roles_path('bob', 'data-scientist'), 'root', json={'activates_at': None}).status_code == NOT_FOUND
+        assert _request('PUT', _account_roles_path('bob', 'user'), 'root', json={'activates_at': None}).status_code == NOT_FOUND
 
     def test_non_admin_cannot_set_account_role_activates_at(self):
         """RBAC(USER): setting the activation date of an account's role is restricted to root/admin"""
         for account in ('alice', 'bob'):
-            assert _request('PUT', _account_roles_path('alice', 'data-scientist'), account, json={'activates_at': None}).status_code == FORBIDDEN
+            assert _request('PUT', _account_roles_path('alice', 'user'), account, json={'activates_at': None}).status_code == FORBIDDEN
 
     # --- role descriptions -------------------------------------------------------------
 
@@ -1633,17 +1641,17 @@ class TestROLE:
     def test_non_admin_cannot_set_role_description(self):
         """RBAC(USER): setting a role description is restricted to root/admin"""
         for account in ('alice', 'bob'):
-            assert _request('PUT', _role_path('data-scientist'), account, json={'description': 'nope'}).status_code == FORBIDDEN
+            assert _request('PUT', _role_path('user'), account, json={'description': 'nope'}).status_code == FORBIDDEN
 
     @pytest.mark.parametrize(
         ('method', 'path', 'payload'),
         [
             ('DELETE', _role_path('non_existing_role'), None),
             ('POST', _account_roles_path('alice', 'non_existing_role'), None),
-            ('POST', _account_roles_path('non_existing_account', 'data-scientist'), None),
-            ('DELETE', _account_roles_path('bob', 'data-scientist'), None),
+            ('POST', _account_roles_path('non_existing_account', 'user'), None),
+            ('DELETE', _account_roles_path('bob', 'user'), None),
             ('POST', _role_path('non_existing_role', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            ('DELETE', _role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'root')),
+            ('DELETE', _role_path('user', 'permissions', 'did'), _did_permission('read', 'root')),
         ],
         ids=[
             'delete non-existing role',
@@ -1720,15 +1728,15 @@ class TestROLE:
     )
     def test_invalid_did_pattern_is_rejected(self, did_pattern):
         """RBAC(ADMIN): a '*' is only accepted closing a part of a DID pattern, and a wildcard scope part only takes the '*' name part"""
-        assert _post(_role_path('data-scientist', 'permissions', 'did'), 'root', json=_did_permission('read', did_pattern)).status_code == BAD_REQUEST
+        assert _post(_role_path('user', 'permissions', 'did'), 'root', json=_did_permission('read', did_pattern)).status_code == BAD_REQUEST
 
     @pytest.mark.parametrize(
         ('path', 'payload'),
         [
-            (_role_path('data-scientist'), None),
-            (_role_path('data-scientist', 'permissions', 'did'), _did_permission('read', 'atlas')),
-            (_role_path('data-scientist', 'permissions', 'did'), _did_permission('write', 'atlas')),
-            (_account_roles_path('alice', 'data-scientist'), None),
+            (_role_path('user'), None),
+            (_role_path('user', 'permissions', 'did'), _did_permission('read', 'atlas')),
+            (_role_path('user', 'permissions', 'did'), _did_permission('write', 'atlas')),
+            (_account_roles_path('alice', 'user'), None),
         ],
         ids=['duplicate role', 'duplicate read permission', 'duplicate write permission', 'duplicate account role assignment'],
     )

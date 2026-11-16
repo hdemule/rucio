@@ -176,15 +176,15 @@ def test_add_reserved_role_rest(rest_client, auth_token):
 ])
 def test_parse_roles_disable_filters(definition, expected):
     """ROLE (CORE): A policy package role disables no filter, unless it names them in its 'disable-filters'."""
-    roles = permission._parse_roles([dict(definition, name='data-scientist')], 'policy.role')
-    assert roles['data-scientist']['disable_filters'] == expected
+    roles = permission._parse_roles([dict(definition, name='user')], 'policy.role')
+    assert roles['user']['disable_filters'] == expected
 
 
 @pytest.mark.parametrize('disable_filters', ['list_scopes', [''], ['list_scopes', 42], {'list_scopes': True}])
 def test_parse_roles_invalid_disable_filters(disable_filters):
     """ROLE (CORE): A policy package role whose 'disable-filters' is not a list of filter names is refused."""
     with pytest.raises(ErrorLoadingPolicyPackage):
-        permission._parse_roles([{'name': 'data-scientist', 'disable-filters': disable_filters}], 'policy.role')
+        permission._parse_roles([{'name': 'user', 'disable-filters': disable_filters}], 'policy.role')
 
 
 @pytest.fixture
@@ -207,7 +207,7 @@ def policy_role_module(monkeypatch):
     ({}, frozenset()),
     ({'disable_filters': []}, frozenset()),
     ({'disable_filters': ['list_scopes', ' get_scopes ']}, frozenset({'list_scopes', 'get_scopes'})),
-    ({'roles': [{'name': 'data-scientist'}], 'disable_filters': ['list_scopes']}, frozenset({'list_scopes'})),
+    ({'roles': [{'name': 'user'}], 'disable_filters': ['list_scopes']}, frozenset({'list_scopes'})),
 ])
 def test_load_disabled_filters_for_all(policy_role_module, attribute, getter, attributes, expected):
     """ROLE (CORE): A policy package disables no filter for all roles or all accounts, unless its role module names them in the matching attribute, with or without roles."""

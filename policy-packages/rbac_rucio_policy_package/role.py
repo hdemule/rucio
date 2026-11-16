@@ -47,20 +47,27 @@
 #
 # Example:
 #     {
-#         "name": "data-scientist",
+#         "name": "user",
 #         "description": "...",
 #         "disable-filters": ["list_scopes", "list_content"],
 #     },
 
+# The permissions of the roles are not defined here but in the database, see `rucio role permission list ROLE`
+# (tools/rbac/db_setup/setup_test_db.py provisions those of the dev environment).
 roles = [
     {
-        "name": "data-scientist",
-        "description": "Data scientist role with read/write access to scope atlas and read-only access to archived content. This role also includes predefined limits to a set of RSEs.",
+        "name": "user",
+        "description": "Reads and writes the DIDs of scope atlas, reads those of scope archive, and some metadata keys of scope physics without their data. Limited on the dev RSEs.",
+        "disable-filters": [],
+    },
+    {
+        "name": "moderator",
+        "description": "Reads the DIDs of scope physics and curates their metadata, except their project and the provenance of the raw files.",
         "disable-filters": [],
     },
     {
         "name": "superuser",
-        "description": "Full read access to all scopes.",
+        "description": "Reads every DID of every scope, with all its metadata.",
         "disable-filters": [],
     },
 ]
