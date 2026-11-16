@@ -18,8 +18,8 @@
 The roles an identity provider supplies are given on the command line, so that the
 synchronisation can be tried out without an IdP at hand:
 
-    python tools/rbac/sync_account_roles_from_idp.py alice data-scientist admin=2028-01-31 --dry-run
-    python tools/rbac/sync_account_roles_from_idp.py alice data-scientist admin=2028-01-31
+    python tools/rbac/sync_account_roles_from_idp.py alice user admin=2028-01-31 --dry-run
+    python tools/rbac/sync_account_roles_from_idp.py alice user admin=2028-01-31
 
 With --dry-run the core function only reads the roles of the account and of the database, and
 prints the changes it would apply. Without it, the changes are applied in a single transaction.
@@ -62,9 +62,9 @@ def main() -> None:
     parser.add_argument('account', help='the account whose roles would be synchronised')
     parser.add_argument('roles', nargs='*', metavar='ROLE[=EXPIRES_AT]',
                         help="a role the IdP supplies, optionally with the date at which the assignment expires. "
-                        "Examples: one role without expiration => alice data-scientist; "
-                        "multiple roles without expiration => alice data-scientist admin; "
-                        "mixed expirations => alice data-scientist admin=2028-01-31 analyst")
+                        "Examples: one role without expiration => alice user; "
+                        "multiple roles without expiration => alice user admin; "
+                        "mixed expirations => alice user admin=2028-01-31 analyst")
     parser.add_argument('--vo', default=DEFAULT_VO, help='the VO the account belongs to (default: %(default)s)')
     parser.add_argument('--dry-run', action='store_true', help='do not write anything to the database, only report what would be done (default: %(default)s)')
     args = parser.parse_args()

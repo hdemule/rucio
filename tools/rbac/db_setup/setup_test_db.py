@@ -57,36 +57,53 @@ The roles, see `ROLES` (their names and descriptions come from the policy packag
     moderator  carol        r-- on physics:*, and curates the metadata of physics:*
     superuser  jdoe, panda  r-- on *:*
 
-The metadata demo is in the scope physics, owned by root: the files raw_001, raw_002, calib_001 and sim_001,
-generated and uploaded by the script, each with the same metadata keys set (see `DEMO_FILES`). Neither alice
-nor carol owns them, so what they see and may change only comes from their roles:
+The data of the dev environment, generated and uploaded to MOCK-POSIX by the script, owned by root, each dataset
+protected by a rule of root on the RSE, and every DID carrying metadata (see `DEMO_FILES` and `DEMO_COLLECTIONS`):
 
-                         project  datatype  campaign  version  stream_name  provenance  data
-    alice  raw_001/002   r        r         rw        rw       -            -           no
-           calib_001     r        -         -         -        -            -           no
-           sim_001       r        r         -         -        -            -           no
-    carol  raw_001/002   r        rw        rw        rw       rw           -           yes
-           calib_001     r        rw        rw        rw       rw           rw          yes
-           sim_001       r        rw        rw        rw       rw           rw          yes
-    bob    any           the files are not visible
+    physics:data26_13TeV                                  container: one run of real data
+      physics:data26_13TeV.00456789.physics_Main.RAW      dataset: raw.00456789._0001.data ... _0004.data
+      physics:data26_13TeV.00456789.calibration.NTUP      dataset: calib.00456789._0001.data, _0002.data
+    physics:mc26_13TeV                                    container: a simulation
+      physics:mc26_13TeV.601229.ttbar.simul.HITS          dataset: sim.601229._000001.HITS.root ... _000003
+    atlas:mc23_13TeV.ttbar.AOD                            dataset: AOD.ttbar._000001.pool.root ... _000003
+    archive:data18_13TeV.00350000.physics_Main.RAW        dataset: raw.00350000._0001.data, _0002.data
 
-alice only holds metadata permissions on physics: they make the files visible, with the keys she may read,
-but not their data, so listing their replicas or downloading them is refused. carol reads the files through
-her DID permission, which shows every key, the metadata permissions of her role overriding it on the keys they
-name: '*' lets her write every key Rucio does not hold itself (not bytes, checksums, ...), project is only
-read, and provenance is withdrawn on the raw files. carol has no client configuration of her own, give her
-credentials on the command line, e.g.:
+alice reads and writes atlas (attaching, creating DIDs, adding rules) and reads archive, but does not own
+them. In physics, she only holds metadata permissions, carol a DID permission and metadata permissions, so
+what they see of the files and may change only comes from their roles:
 
-    alias carol='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio --account carol -S userpass -u carol --password secret'
+                                       project  datatype  campaign  version  stream_name  provenance  data
+    alice  raw.00456789.*              r        r         rw        rw       -            -           no
+           calib.00456789._0001.data   r        -         -         -        -            -           no
+           calib.00456789._0002.data   r        r         -         -        -            -           no
+           sim.*, the collections      r        r         -         -        -            -           no
+    carol  raw.00456789.*              r        rw        rw        rw       rw           -           yes
+           everything else             r        rw        rw        rw       rw           rw          yes
+    bob    physics                     nothing is visible
+
+alice only holds metadata permissions on physics: they make its DIDs visible, with the keys she may read, but
+not their data, so listing their replicas or downloading them is refused. carol reads the DIDs through her DID
+permission, which shows every key, the metadata permissions of her role overriding it on the keys they name:
+'*' lets her write every key Rucio does not hold itself (not bytes, checksums, ...), project is only read, and
+provenance is withdrawn on the raw files. carol has no client configuration of her own, give her credentials on
+the command line, e.g.:
+
     alias alice='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio'
+    alias carol='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio --account carol -S userpass -u carol --password secret'
     rucio role permission list user
-    alice did metadata list physics:raw_001 physics:calib_001 physics:sim_001
-    alice did metadata set physics:raw_001 --key campaign --value 2026C     # allowed
-    alice did metadata set physics:sim_001 --key campaign --value 2026C     # refused: read only there
-    alice did list 'physics:*' --filter 'campaign==2026A'                   # only raw_001: campaign of calib_001 is hidden
-    alice replica list file physics:raw_001                                 # refused: no access to the data
-    carol did metadata list physics:raw_001                                 # every key but provenance
-    carol did metadata set physics:raw_001 --key project --value other      # refused: project is read only
+    alice did list 'physics:*'                                              # the containers and datasets
+    alice did content list physics:data26_13TeV.00456789.physics_Main.RAW
+    alice did metadata list physics:raw.00456789._0001.data physics:calib.00456789._0001.data
+    alice did metadata set physics:raw.00456789._0001.data --key campaign --value 2026C    # allowed
+    alice did metadata set physics:sim.601229._000001.HITS.root --key campaign --value x  # refused: read only there
+    alice did list 'physics:*' --filter 'type=file,campaign=2026A'          # calib.*._0001 never: campaign hidden there
+    alice replica list file physics:raw.00456789._0001.data                 # refused: no access to the data
+    alice download physics:raw.00456789._0001.data                          # refused as well
+    carol did metadata list physics:raw.00456789._0001.data                 # every key but provenance
+    carol did metadata set physics:raw.00456789._0001.data --key project --value other     # refused: read only
+    carol download physics:raw.00456789._0001.data                          # allowed: she reads the data
+    alice did content add --to-did archive:data18_13TeV.00350000.physics_Main.RAW atlas:AOD.ttbar._000001.pool.root  # refused: only reads archive
+    alice rule add atlas:mc23_13TeV.ttbar.AOD --copies 1 --rses RSE1        # allowed, counts against her limits
 """
 
 import argparse
@@ -99,7 +116,8 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+from uuid import uuid4
 
 # the root of the repository, this script being in tools/rbac/db_setup
 BASE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -117,6 +135,9 @@ from rucio.db.sqla import models  # noqa: E402
 from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DidOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RolePermissionType  # noqa: E402
 from rucio.db.sqla.session import DEFAULT_SCHEMA_NAME, db_session, get_engine  # noqa: E402
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 POLICY_PACKAGE = 'rbac_rucio_policy_package'
 POLICY_PACKAGE_SOURCE = os.path.join(BASE_PATH, 'policy-packages', POLICY_PACKAGE)
 
@@ -131,7 +152,7 @@ ACCOUNTS = {
     'carol': (AccountType.USER, 'carol@email.com', 'carol'),
 }
 # scope -> owner; bob and carol own no scope of their own
-SCOPES = {'alice': 'alice', 'root': 'root', 'atlas': 'root', 'physics': 'root'}
+SCOPES = {'alice': 'alice', 'root': 'root', 'atlas': 'root', 'physics': 'root', 'archive': 'root'}
 # (scope, name) -> local file uploaded to the RSE by root, which also creates a rule on the RSE
 FILES = {
     ('alice', 'file1.png'): 'file1.png',
@@ -148,14 +169,39 @@ DATASETS = {
 RULE_DIDS = [('alice', 'file1.png'), ('root', 'file1.png')]
 # the DID with a transfer request, and a past one in the history, towards the RSE
 REQUEST_DID = ('alice', 'file1.png')
-# (scope, name) -> metadata: the files of the metadata demo, owned by root, generated and uploaded to the RSE by the
-# script, with the same keys set on each of them so that what each role shows of them can be compared
-_DEMO_META = {'project': 'data13_hip', 'stream_name': 'physics_Main'}
+# The data of the dev environment, see the module docstring: files generated with some content and uploaded to the RSE
+# by root, then gathered into datasets and containers, every DID carrying metadata so that what each role shows of it
+# can be compared. (scope, name) -> metadata of each file, its size in kB under 'kB'.
+_RUN = {'project': 'data26_13TeV', 'run_number': 456789, 'version': 'v1'}
+_SIM = {'project': 'mc26_13TeV', 'run_number': 601229, 'datatype': 'HITS', 'stream_name': 'simulation', 'campaign': 'MC26a',
+        'version': 'v3', 'provenance': 'MC', 'prod_step': 'simul'}
 DEMO_FILES = {
-    ('physics', 'raw_001'): dict(_DEMO_META, datatype='AOD', campaign='2026A', version='v1', provenance='T0'),
-    ('physics', 'raw_002'): dict(_DEMO_META, datatype='AOD', campaign='2026B', version='v2', provenance='T0'),
-    ('physics', 'calib_001'): dict(_DEMO_META, datatype='NTUP_TRIG', campaign='2026A', version='v1', provenance='CA', stream_name='calibration'),
-    ('physics', 'sim_001'): dict(_DEMO_META, datatype='HITS', campaign='MC26', version='v3', provenance='MC', prod_step='simul'),
+    **{('physics', 'raw.00456789._%04d.data' % index): dict(_RUN, datatype='RAW', stream_name='physics_Main', campaign='2026A' if index <= 2 else '2026B',
+                                                            provenance='T0', kB=40 + 7 * index) for index in range(1, 5)},
+    **{('physics', 'calib.00456789._%04d.data' % index): dict(_RUN, datatype='NTUP_TRIG', stream_name='calibration_LArCells', campaign='2026A',
+                                                              provenance='CA', kB=12 + 3 * index) for index in range(1, 3)},
+    **{('physics', 'sim.601229._%06d.HITS.root' % index): dict(_SIM, kB=25 + 5 * index) for index in range(1, 4)},
+    **{('atlas', 'AOD.ttbar._%06d.pool.root' % index): {'project': 'mc23_13TeV', 'datatype': 'AOD', 'campaign': 'MC23a', 'version': 'v2',
+                                                        'prod_step': 'recon', 'kB': 18 + 4 * index} for index in range(1, 4)},
+    **{('archive', 'raw.00350000._%04d.data' % index): {'project': 'data18_13TeV', 'datatype': 'RAW', 'run_number': 350000, 'stream_name': 'physics_Main',
+                                                       'campaign': '2018', 'version': 'v1', 'provenance': 'T0', 'kB': 30 + index} for index in range(1, 3)},
+}
+
+
+def _content(scope: str, prefix: str) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted(did for did in DEMO_FILES if did[0] == scope and did[1].startswith(prefix)))
+
+
+# (scope, name) -> (type, content, metadata), the datasets before the containers holding them
+DEMO_COLLECTIONS = {
+    ('physics', 'data26_13TeV.00456789.physics_Main.RAW'): (DIDType.DATASET, _content('physics', 'raw.'), dict(_RUN, datatype='RAW', stream_name='physics_Main')),
+    ('physics', 'data26_13TeV.00456789.calibration.NTUP'): (DIDType.DATASET, _content('physics', 'calib.'), dict(_RUN, datatype='NTUP_TRIG', stream_name='calibration_LArCells')),
+    ('physics', 'mc26_13TeV.601229.ttbar.simul.HITS'): (DIDType.DATASET, _content('physics', 'sim.'), {key: _SIM[key] for key in ('project', 'run_number', 'datatype', 'campaign')}),
+    ('atlas', 'mc23_13TeV.ttbar.AOD'): (DIDType.DATASET, _content('atlas', 'AOD.'), {'project': 'mc23_13TeV', 'datatype': 'AOD', 'campaign': 'MC23a'}),
+    ('archive', 'data18_13TeV.00350000.physics_Main.RAW'): (DIDType.DATASET, _content('archive', 'raw.'), {'project': 'data18_13TeV', 'datatype': 'RAW'}),
+    ('physics', 'data26_13TeV'): (DIDType.CONTAINER, (('physics', 'data26_13TeV.00456789.calibration.NTUP'), ('physics', 'data26_13TeV.00456789.physics_Main.RAW')),
+                                  {'project': 'data26_13TeV'}),
+    ('physics', 'mc26_13TeV'): (DIDType.CONTAINER, (('physics', 'mc26_13TeV.601229.ttbar.simul.HITS'),), {'project': 'mc26_13TeV'}),
 }
 
 
@@ -175,7 +221,7 @@ ROLES = {
         metadata=frozenset({
             ('physics:*', ('read',), ('datatype', 'project')),                  # visible everywhere ...
             ('physics:raw*', ('read', 'write'), ('campaign', 'version')),       # ... writable on the raw files only
-            ('physics:calib_001', (), ('datatype',)),                           # ... but hidden on that file
+            ('physics:calib.00456789._0001.data', (), ('datatype',)),           # ... but hidden on that file
         }),
         holders=frozenset({'alice'}),
     ),
@@ -302,9 +348,17 @@ def check_policy_package_installed() -> Optional[str]:
 
 def check_policy_package_roles() -> Optional[str]:
     from rucio.core import permission
-    missing = set(ROLES) - set(permission.get_roles())
+    defined = permission.get_roles()
+    missing = set(ROLES) - set(defined)
     if missing:
-        return 'the policy package does not define the role(s) %s' % ', '.join(sorted(missing))
+        # tell what Rucio itself loaded, which may differ from what the checks above read: another rucio.cfg
+        # (RUCIO_CONFIG), RUCIO_POLICY_PACKAGE, or another copy of the package earlier on sys.path
+        package = permission._get_policy_package_name()
+        spec = importlib.util.find_spec('%s.role' % package) if package else None
+        return ('the policy package does not define the role(s) %s: Rucio loads the package %r (RUCIO_POLICY_PACKAGE=%r, RUCIO_CONFIG=%r), '
+                'its role module %s, defining %s'
+                % (', '.join(sorted(missing)), package, os.environ.get('RUCIO_POLICY_PACKAGE'), os.environ.get('RUCIO_CONFIG'),
+                   spec.origin if spec else 'not found', ', '.join(sorted(defined)) or 'no role'))
 
 
 def check_roles_endpoint() -> Optional[str]:
@@ -476,14 +530,14 @@ def check_file(scope: str, name: str) -> Callable[[], Optional[str]]:
     return check
 
 
-def check_dataset(scope: str, name: str, content: list[tuple[str, str]]) -> Callable[[], Optional[str]]:
+def check_dataset(scope: str, name: str, content: "Sequence[tuple[str, str]]", did_type: DIDType = DIDType.DATASET) -> Callable[[], Optional[str]]:
     def check() -> Optional[str]:
         rows = _read(select(models.DataIdentifier.did_type).where(
             models.DataIdentifier.scope == _scope(scope), models.DataIdentifier.name == name))
         if not rows:
             return 'does not exist'
-        if rows[0][0] != DIDType.DATASET:
-            return 'is a %s, not a dataset' % rows[0][0].name
+        if rows[0][0] != did_type:
+            return 'is a %s, not a %s' % (rows[0][0].name, did_type.name.lower())
         children = _read(select(models.DataIdentifierAssociation.child_scope, models.DataIdentifierAssociation.child_name).where(
             models.DataIdentifierAssociation.scope == _scope(scope), models.DataIdentifierAssociation.name == name))
         missing = set(content) - {(row[0].external, row[1]) for row in children}
@@ -520,6 +574,18 @@ def check_reserved_roles() -> Optional[str]:
 def check_role(role: str) -> Optional[str]:
     if not _read(select(models.Roles.role).where(models.Roles.role == role)):
         return 'does not exist'
+
+
+def _all(*checks: Callable[[], Optional[str]]) -> Callable[[], Optional[str]]:
+    """A check satisfied when all the given ones are, reporting the first reason one is not."""
+    def check() -> Optional[str]:
+        return next((reason for reason in (check() for check in checks) if reason is not None), None)
+    return check
+
+
+def _file_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """The metadata of a file of `DEMO_FILES`, without its size."""
+    return {key: value for key, value in meta.items() if key != 'kB'}
 
 
 def check_metadata(scope: str, name: str, expected: dict[str, Any]) -> Callable[[], Optional[str]]:
@@ -610,9 +676,15 @@ def run_database_checks(report: Report) -> None:
         report.run('file %s:%s' % (scope, name), check_file(scope, name))
     for (scope, name), (_, content) in DATASETS.items():
         report.run('dataset %s:%s' % (scope, name), check_dataset(scope, name, content))
+
+    report.section('Data of the dev environment')
     for (scope, name), meta in DEMO_FILES.items():
-        report.run('metadata demo file %s:%s' % (scope, name), check_file(scope, name))
-        report.run('metadata of %s:%s' % (scope, name), check_metadata(scope, name, meta))
+        report.run('file %s:%s with its metadata' % (scope, name), _all(check_file(scope, name), check_metadata(scope, name, _file_meta(meta))))
+    for (scope, name), (did_type, content, meta) in DEMO_COLLECTIONS.items():
+        report.run('%s %s:%s with its content and metadata' % (did_type.name.lower(), scope, name),
+                   _all(check_dataset(scope, name, content, did_type), check_metadata(scope, name, meta)))
+        if did_type == DIDType.DATASET:
+            report.run('rule on %s:%s' % (scope, name), lambda scope=scope, name=name: check_rule(scope, name))
     for scope, name in RULE_DIDS:
         report.run('replication rule on %s:%s' % (scope, name), lambda scope=scope, name=name: check_rule(scope, name))
     report.run('transfer request for %s:%s to %s' % (REQUEST_DID + (RSE,)), check_request(models.Request))
@@ -731,20 +803,32 @@ def _upload_files(files_dir: str) -> None:
 
 
 def _upload_demo_files() -> None:
-    """Generate the files of the metadata demo, upload them as root and set their metadata."""
+    """
+    Generate the files of the dev environment, upload them as root, gather them into their datasets and containers,
+    set the metadata of all of them, and protect each dataset by a rule of root on the RSE.
+    """
     import tempfile
 
-    from rucio.core.did import set_metadata_bulk
+    from rucio.core.did import add_did, attach_dids, set_metadata_bulk
+    from rucio.core.rule import add_rule
     with tempfile.TemporaryDirectory() as directory:
         paths = {}
-        for scope, name in DEMO_FILES:
+        for (scope, name), meta in DEMO_FILES.items():
             paths[scope, name] = os.path.join(directory, name)
-            with open(paths[scope, name], 'w') as file:
-                file.write('RBAC metadata demo file %s:%s\n' % (scope, name))
+            with open(paths[scope, name], 'wb') as file:
+                file.write(os.urandom(meta['kB'] * 1000))
         _upload(paths)
     with db_session(DatabaseOperationType.WRITE) as session:
         for (scope, name), meta in DEMO_FILES.items():
-            set_metadata_bulk(_scope(scope), name, meta, session=session)
+            set_metadata_bulk(_scope(scope), name, _file_meta(meta), session=session)
+        for (scope, name), (did_type, content, meta) in DEMO_COLLECTIONS.items():
+            add_did(_scope(scope), name, did_type, _account('root'), meta=meta, session=session)
+            attach_dids(_scope(scope), name, [{'scope': _scope(child_scope), 'name': child_name} for child_scope, child_name in content],
+                        _account('root'), session=session)
+        for (scope, name), (did_type, _, _) in DEMO_COLLECTIONS.items():
+            if did_type == DIDType.DATASET:
+                add_rule(dids=[{'scope': _scope(scope), 'name': name}], account=_account('root'), copies=1, rse_expression=RSE, grouping='DATASET',
+                         weight=None, lifetime=None, locked=False, subscription_id=None, session=session)
 
 
 def _upload(paths: dict[tuple[str, str], str]) -> None:
@@ -769,6 +853,9 @@ def _upload(paths: dict[tuple[str, str], str]) -> None:
             'rse': RSE,
             'did_scope': scope,
             'did_name': name,
+            # given, so that the client does not extract it from a ROOT file ('*.pool.root') with
+            # `pool_extractFileIdentifier`, a tool of the ATLAS software the dev environment does not have
+            'guid': uuid4().hex,
         }])
 
 
@@ -820,8 +907,10 @@ def _provision_roles() -> None:
         role_core.sync_roles_from_policy_package(session=session)
     with db_session(DatabaseOperationType.WRITE) as session:
         for role, setup in ROLES.items():
-            for operation, did_pattern in sorted(setup.did):
-                role_core.add_role_permission(role, RolePermissionType.DID, {'did_pattern': did_pattern, 'operation': DidOperationType(operation)}, session=session)
+            # a DID permission sets every operation of its pattern at once
+            for did_pattern in sorted({did_pattern for _, did_pattern in setup.did}):
+                operations = [operation for operation, pattern in sorted(setup.did) if pattern == did_pattern]
+                role_core.add_role_permission(role, RolePermissionType.DID, {'did_pattern': did_pattern, 'operations': operations}, session=session)
             for did_pattern, operations, keys in sorted(setup.metadata):
                 parameters = {'did_pattern': did_pattern, 'operations': list(operations), **({'keys': list(keys)} if keys else {})}
                 role_core.add_role_permission(role, RolePermissionType.METADATA, parameters, session=session)
@@ -891,7 +980,7 @@ def reset(files_dir: str) -> None:
     _step('Uploading the files')
     _upload_files(files_dir)
 
-    _step('Uploading the files of the metadata demo and setting their metadata')
+    _step('Uploading the data of the dev environment: files, datasets, containers, their metadata and rules')
     _upload_demo_files()
 
     _step('Creating the datasets and the transfer requests')
