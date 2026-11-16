@@ -236,8 +236,10 @@ def _rbac_permission_access(issuer: "InternalAccount", scope: "InternalScope", n
     Checks if a role grants an account an operation on a DID, or on a whole scope without `name`, see :func:`rucio.core.role.has_permission`.
     Like every `_rbac_*` helper, it does not check whether RBAC is enabled: the caller does, see :func:`_use_roles`.
 
-    Giving the name only extends what is granted: a DID pattern covering the whole scope ('data:*') grants
-    the DIDs of the scope as well as the scope, while a name pattern ('data:raw*') only grants the DIDs it matches.
+    A DID is decided, within each role, by the most specific DID pattern matching it: e.g. 'rw' on 'data:*' and 'r' on
+    'data:raw*' grant 'rw' on 'data:calib1' but only 'r' on 'data:raw1'. A whole scope is only granted by a pattern
+    covering it ('data:*'), and only if no name pattern ('data:raw*') of the same role withdraws the operation from
+    some of its DIDs, see :class:`rucio.core.role.DidAccess`.
 
     The owner of the scope is granted every operation on it and on its DIDs, as if a role granted it 'read', 'write'
     and 'delete' on '<scope>:*'. This is decided here, not by the roles (see :func:`rucio.core.role.has_permission`),
