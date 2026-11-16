@@ -179,7 +179,7 @@ class RoleClient(BaseClient):
         Returns
         -------
             A list of dictionaries, one per permission, with its `type` and, in the shape it is granted with
-            (see `add_role_permission`): a `did_pattern` and an `operation` for a 'did' permission; a
+            (see `add_role_permission`): a `did_pattern` and its list of `operations`, possibly empty, for a 'did' permission; a
             `did_pattern`, a `meta_key` ('*' for every key, None for no key) and its list of `operations`,
             possibly empty, for a 'metadata' permission, one per key; an `rse_expression` and its `local` or
             `global` bytes for a 'limit', a local limit being listed under the name of its RSE.
@@ -401,11 +401,13 @@ class RoleClient(BaseClient):
         parameters :
             The target of the permission and its parameters, e.g.:
 
-            - {'did_pattern': 'data:raw*', 'operation': 'read'} for a 'did' permission, the pattern being made of a
-              scope part and a name part: every DID of the scopes matching a scope pattern ('data*:*', '*:*'), of a
+            - {'did_pattern': 'data:raw*', 'operations': ['read', 'write']} for a 'did' permission, the pattern being made
+              of a scope part and a name part: every DID of the scopes matching a scope pattern ('data*:*', '*:*'), of a
               scope ('data:*'), of a scope matching a name pattern ('data:raw*'), or a single DID ('data:raw1'). Only a
               trailing '*' wildcard is accepted, a pattern without name part ('data', 'data*') standing for the whole
-              scope(s). The operation is 'read', 'write' or 'delete';
+              scope(s). The operations are 'read', 'write' and 'delete', and replace what the role has on the pattern.
+              Within a role, the most specific pattern matching a DID decides, so an empty list withdraws the DIDs
+              the pattern matches from a less specific pattern of the role;
             - {'did_pattern': 'data:raw*', 'keys': ['quality', 'datatype'], 'operations': ['read', 'write']} for a
               'metadata' permission on the keys of the DIDs the pattern matches, overriding what the 'did' permissions
               of the role grant on them. The keys are a list or a comma-separated string, '*' standing for every key;
@@ -438,7 +440,7 @@ class RoleClient(BaseClient):
         parameters :
             The target of the permissions and the parameters identifying them, e.g.:
 
-            - {'did_pattern': 'data*:*', 'operation': 'read'} for a 'did' permission, given as it is listed;
+            - {'did_pattern': 'data*:*'} for a 'did' permission, given as it is listed: every operation on it is removed;
             - {'did_pattern': 'data:*', 'keys': 'quality,comment'} for a 'metadata' permission, '*' standing for the
               permission on every key and no keys for the one on no key. Nothing is removed if one of the keys has
               no permission (RolePermissionNotFound);

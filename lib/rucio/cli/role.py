@@ -15,6 +15,7 @@ from rucio.cli.utils import (
     SizeFormat,
     describe_metadata_keys,
     format_metadata_operations,
+    format_operations,
     format_permission_trees,
     format_quota,
     format_sections,
@@ -22,7 +23,7 @@ from rucio.cli.utils import (
     permission_lines,
     wrap_table_column,
 )
-from rucio.common.exception import AccessDenied, AccountNotFound, Duplicate, InvalidRSEExpression, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound, RSENotFound
+from rucio.common.exception import AccessDenied, AccountNotFound, InvalidRSEExpression, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound, RSENotFound
 from rucio.common.utils import str_to_date
 
 if TYPE_CHECKING:
@@ -143,14 +144,16 @@ class RoleGroup(_RBACStatusHelp, click.Group):
 
 @click.group(cls=RoleGroup)
 def role():
-    """Manage role-based access control."""
+    """Manage roles, their permissions and the accounts holding them (RBAC).
+
+    An account gets what all its roles grant: the roles always add up, none restricts another."""
 
 
 @role.command("list")
-@click.option("--detail", is_flag=True, help="Show the permissions associated with each role. Use `role permission list --detail` to also expand their wildcard scope patterns and RSE expressions.")
+@click.option("--detail", is_flag=True, help="Also show the permissions of each role.")
 @click.pass_context
 def list_(ctx: click.Context, detail: bool) -> None:
-    """List all roles. A role managed by Rucio itself is tagged with (built-in)."""
+    """List the roles. Roles managed by Rucio are tagged (built-in)."""
     roles = ctx.obj.client.list_roles()
     headers = ["ROLE", "ASSIGNABLE", "LOCKED", "DESCRIPTION"]
     if not detail:
@@ -170,13 +173,13 @@ def list_(ctx: click.Context, detail: bool) -> None:
 @role.command("add")
 @click.pass_context
 @click.argument("role_name")
-@click.option("-d", "--description", help="Set the description of the role.")
+@click.option("-d", "--description", help="Description of the role.")
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
-              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `role account add`/`remove`.")
+              help="true/false: whether the role can be assigned to and removed from accounts.")
 @click.option("-l", "--locked", type=bool, is_flag=False, flag_value="true", default=True, show_default=True,
-              help="Lock (true) or not (false) the role. A locked role cannot be altered or deleted, by a policy package or through Rucio, unless internally forced.")
+              help="true/false: whether the role is locked, i.e. can't be changed nor deleted.")
 def add(ctx: click.Context, role_name: str, description: Optional[str], assignable: bool, locked: bool) -> None:
-    """Create a new role."""
+    """Create the role ROLE_NAME."""
     ctx.obj.client.add_role(role_name, description=description, assignable=assignable, locked=locked)
     click.echo(f"Role '{role_name}' added.")
 
@@ -184,14 +187,14 @@ def add(ctx: click.Context, role_name: str, description: Optional[str], assignab
 @role.command("update")
 @click.pass_context
 @click.argument("role_name")
-@click.option("-d", "--description", help='Set the description of the role, overwriting the existing one. Pass an empty string ("") to remove it (--description="").')
+@click.option("-d", "--description", help='New description, "" to remove it.')
 @click.option("-a", "--assignable", type=bool, is_flag=False, flag_value="true", default=None,
-              help="Allow (true) or prevent (false) assigning the role to, or removing it from, an account. Bypassable with '--force' on `role account add`/`remove`.")
+              help="true/false: whether the role can be assigned to and removed from accounts.")
 @click.option("-l", "--locked", type=bool, is_flag=False, flag_value="true", default=None,
-              help="Lock (true) or not (false) the role. A locked role cannot be altered or deleted, by a policy package or through Rucio, unless internally forced.")
-@click.option("--force", is_flag=True, default=False, help="Change the description or the assignable state even if the role is locked.")
+              help="true/false: whether the role is locked, i.e. can't be changed nor deleted.")
+@click.option("--force", is_flag=True, default=False, help="Change the description or --assignable even if the role is locked.")
 def update(ctx: click.Context, role_name: str, description: Optional[str], assignable: Optional[bool], locked: Optional[bool], force: bool) -> None:
-    """Update properties of a role. Only the given options are changed."""
+    """Change the given properties of ROLE_NAME."""
     if description is None and assignable is None and locked is None:
         raise click.UsageError("At least one of --description, --assignable or --locked must be given.")
 
@@ -207,9 +210,9 @@ def update(ctx: click.Context, role_name: str, description: Optional[str], assig
 @role.command("remove")
 @click.pass_context
 @click.argument("role_name")
-@click.option("--force", is_flag=True, default=False, help="Delete the role even if it is locked. This automatically revokes the role from every account it is assigned to and removes its permissions.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked or held: revokes it from its accounts and drops its permissions.")
 def delete(ctx: click.Context, role_name: str, force: bool) -> None:
-    """Remove a role."""
+    """Delete the role ROLE_NAME."""
     if force and not _confirm_forced_delete(ctx, role_name):
         click.echo("Aborted, the role was not deleted.")
         return
@@ -256,21 +259,17 @@ def _confirm_forced_delete(ctx: click.Context, role_name: str) -> bool:
 
 @role.group()
 def account() -> None:
-    """Manage account role assignments."""
+    """Manage which accounts hold which roles."""
 
 
 @account.command("list")
-@click.option("-a", "--account", "account_name", metavar="ACCOUNT", help="List the roles assigned to ACCOUNT.")
-@click.option("-r", "--role", "role_name", metavar="ROLE", help="List the accounts ROLE is assigned to.")
-@click.option("--me", is_flag=True, help="List the roles assigned to your own account.")
-@click.option("--detail", is_flag=True, help="Also list the permissions granted by each role, each limit of a role the account holds with its usage measured against it. To be used with -a/--account or --me.")
+@click.option("-a", "--account", "account_name", metavar="ACCOUNT", help="The roles of ACCOUNT.")
+@click.option("-r", "--role", "role_name", metavar="ROLE", help="The accounts holding ROLE.")
+@click.option("--me", is_flag=True, help="Your own roles.")
+@click.option("--detail", is_flag=True, help="With -a or --me: also show the permissions of each role, and the usage of each limit.")
 @click.pass_context
 def account_list(ctx: click.Context, account_name: Optional[str], role_name: Optional[str], me: bool, detail: bool) -> None:
-    """
-    List role assignments.
-
-    Exactly one of -a/--account, -r/--role or --me must be given.
-    """
+    """List role assignments: give exactly one of -a, -r or --me."""
     if sum([account_name is not None, role_name is not None, me]) != 1:
         raise click.UsageError("Exactly one of -a/--account, -r/--role or --me must be given.")
     if detail and role_name is not None:
@@ -316,12 +315,12 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
 @account.command("add")
 @click.argument("role_name")
 @click.argument("account_name")
-@click.option("--activates-at", type=DATE, help=f"Date from which the assignment grants the role, e.g. {DATE_EXAMPLE}. If not given, the assignment is active right away.")
-@click.option("--expires-at", type=OPTIONAL_DATE, help=f"Date at which the assignment expires, e.g. {DATE_EXAMPLE}. If not given, or {OptionalDateTime.NEVER}, the assignment does not expire.")
-@click.option("--force", is_flag=True, default=False, help="Assign the role even if it is not assignable.")
+@click.option("--activates-at", type=DATE, metavar="DATE", help=f"Start date, e.g. {DATE_EXAMPLE}. Default: now.")
+@click.option("--expires-at", type=OPTIONAL_DATE, help=f"End date, e.g. {DATE_EXAMPLE}, or {OptionalDateTime.NEVER}. Default: {OptionalDateTime.NEVER}.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is not assignable.")
 @click.pass_context
 def account_add(ctx: click.Context, role_name: str, account_name: str, activates_at: Optional["datetime"], expires_at: Optional["datetime"], force: bool) -> None:
-    """Assign ROLE_NAME to ACCOUNT_NAME, optionally from an activation date and/or until an expiry date."""
+    """Assign ROLE_NAME to ACCOUNT_NAME."""
     with _assignable_hint(role_name, account_name, action="assigned to"):
         ctx.obj.client.add_account_role(account_name, role_name, expires_at=expires_at, force=force, activates_at=activates_at)
     period = (f", active from {activates_at}" if activates_at else "") + (f", expiring at {expires_at}" if expires_at else "")
@@ -331,16 +330,11 @@ def account_add(ctx: click.Context, role_name: str, account_name: str, activates
 @account.command("update")
 @click.argument("role_name")
 @click.argument("account_name")
-@click.option("--activates-at", type=DATE, help=f"New date from which the assignment grants the role, e.g. {DATE_EXAMPLE}, overwriting the existing one.")
-@click.option("--expires-at", type=OPTIONAL_DATE, help=f"New date at which the assignment expires, e.g. {DATE_EXAMPLE}, overwriting the existing one. Pass {OptionalDateTime.NEVER} so that the assignment does not expire.")
+@click.option("--activates-at", type=DATE, metavar="DATE", help=f"New start date, e.g. {DATE_EXAMPLE}.")
+@click.option("--expires-at", type=OPTIONAL_DATE, help=f"New end date, e.g. {DATE_EXAMPLE}, or {OptionalDateTime.NEVER}.")
 @click.pass_context
 def account_update(ctx: click.Context, role_name: str, account_name: str, activates_at: Optional["datetime"], expires_at: Optional["datetime"]) -> None:
-    """
-    Update the activation and/or expiry date of ROLE_NAME for ACCOUNT_NAME.
-
-    The given dates overwrite the existing ones; an --expires-at of NEVER removes the expiry date.
-    Both dates given together are applied at once, so that the whole period of the assignment can be moved.
-    """
+    """Change the dates of the assignment of ROLE_NAME to ACCOUNT_NAME: give at least one of them."""
     # not `required=True` for --expires-at: click would then reject NEVER, which converts to None like a missing option
     expires_given = ctx.get_parameter_source("expires_at") is not click.core.ParameterSource.DEFAULT
     if activates_at is None and not expires_given:
@@ -365,10 +359,10 @@ def account_update(ctx: click.Context, role_name: str, account_name: str, activa
 @account.command("remove")
 @click.argument("role_name")
 @click.argument("account_name")
-@click.option("--force", is_flag=True, default=False, help="Remove the role even if it is not assignable.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is not assignable.")
 @click.pass_context
 def account_remove(ctx: click.Context, role_name: str, account_name: str, force: bool) -> None:
-    """Remove ROLE_NAME from ACCOUNT_NAME."""
+    """Revoke ROLE_NAME from ACCOUNT_NAME."""
     with _assignable_hint(role_name, account_name, action="removed from"):
         ctx.obj.client.delete_account_role(account_name, role_name, force=force)
     click.echo(f"Removed role '{role_name}' from account '{account_name}'.")
@@ -376,23 +370,15 @@ def account_remove(ctx: click.Context, role_name: str, account_name: str, force:
 
 @role.group()
 def permission() -> None:
-    """Manage permissions of a role, of every type.
-
-    \b
-    Every permission type is managed the same way:
-      rucio role permission TYPE add|remove ROLE_NAME IDENTIFIER... [PARAMETERS]"""
+    """Manage the permissions of a role."""
 
 
 @permission.command("list")
 @click.argument("role_name")
-@click.option("--detail", is_flag=True, help="Expand each wildcard scope pattern into the scopes it currently matches, and give the limits and their usage to the byte.")
+@click.option("--detail", is_flag=True, help="Expand wildcard scope patterns into their scopes, and show sizes to the byte.")
 @click.pass_context
 def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
-    """List permissions assigned to ROLE_NAME, one section per permission type.
-
-    A local limit is listed under the name of its RSE, a global limit under the RSEs its expression currently matches, one per line.
-    If you hold ROLE_NAME, each limit is listed with the usage of your account measured against it: like the account limits, each
-    account holding the role gets the whole limit for itself. Use `role account list -a ACCOUNT --detail` for that of another account."""
+    """List the permissions of ROLE_NAME. If you hold it, its limits show your usage."""
     rbac = ctx.obj.client.list_account_roles(use_issuer_account=True)
     account_name = rbac['account']
     rse_names = _rse_names_resolver(ctx)
@@ -473,85 +459,121 @@ def _confirm_did_pattern(ctx: click.Context, did_pattern: str, verb: str) -> boo
     return click.confirm(f"Do you still want to {verb} this permission?")
 
 
+def _did_pattern_specificity(did_pattern: str) -> tuple[int, int]:
+    """Rank a DID pattern as the server does, the higher the more specific: a single DID, a name pattern, a whole scope, a scope pattern, a longer prefix being more specific."""
+    scope_part, _, name_part = did_pattern.partition(':')
+    if name_part != '*':
+        return (2, len(name_part) - 1) if name_part.endswith('*') else (3, len(name_part))
+    return (0, len(scope_part) - 1) if scope_part.endswith('*') else (1, len(scope_part))
+
+
+def _did_pattern_covers(wider: str, narrower: str) -> bool:
+    """Tell whether a DID pattern matches every DID another, more specific, one matches, e.g. 'data:*' covers 'data:raw*'."""
+    if wider == narrower or _did_pattern_specificity(wider) >= _did_pattern_specificity(narrower):
+        return False
+    wider_scope, _, wider_name = wider.partition(':')
+    narrower_scope, _, narrower_name = narrower.partition(':')
+    if wider_name == '*':
+        # a whole scope, or the scopes starting with a prefix
+        if wider_scope.endswith('*'):
+            return narrower_scope.rstrip('*').startswith(wider_scope[:-1])
+        return narrower_scope == wider_scope
+    # a single DID covers no other pattern; a name pattern covers the longer name patterns and the single DIDs of its scope
+    return wider_name.endswith('*') and narrower_scope == wider_scope and narrower_name.rstrip('*').startswith(wider_name[:-1])
+
+
+def _deciding_did_pattern(did_pattern: str, operations_by_pattern: "Mapping[str, str]") -> Optional[str]:
+    """Among the DID patterns of a role, the most specific one covering `did_pattern`: it decides the DIDs `did_pattern` matches without it."""
+    covering = [pattern for pattern in operations_by_pattern if _did_pattern_covers(pattern, did_pattern)]
+    return max(covering, key=_did_pattern_specificity) if covering else None
+
+
+def _assigned_did_operations(ctx: click.Context, role_name: str) -> dict[str, str]:
+    """The operations of the DID permissions of a role, e.g. 'r--', by DID pattern."""
+    return {
+        permission['did_pattern']: format_operations(permission['operations'])
+        for permission in ctx.obj.client.list_role_permissions(role_name)
+        if permission.get('type') == 'did'
+    }
+
+
 @permission.group("did")
 def permission_did() -> None:
     """Manage the operations a role grants on DIDs.
 
-    What a role grants on the metadata keys of the DIDs can be set apart, see `rucio role permission metadata`."""
+    \b
+    r  see and read the DIDs, their data and metadata
+    w  create DIDs, add content
+    d  alter and delete existing DIDs
+    Within a role, the most specific pattern matching a DID decides it: e.g. 'rwd' on
+    'data:*' and 'r' on 'data:raw*' keep the raw DIDs read-only."""
 
 
 @permission_did.command("add")
 @click.argument("role_name")
-@click.argument("did_patterns", metavar="DID_PATTERN...", nargs=-1, required=True)
+@click.argument("did_pattern")
 @click.argument("operations", type=OPERATIONS)
-@click.option("--force", is_flag=True, default=False, help="Add the permissions even if the role is locked.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
 @click.pass_context
-def did_add(ctx: click.Context, role_name: str, did_patterns: tuple[str, ...], operations: list[DidOperationType], force: bool) -> None:
-    """Add OPERATIONS on each DID_PATTERN to ROLE_NAME.
+def did_add(ctx: click.Context, role_name: str, did_pattern: str, operations: list[DidOperationType], force: bool) -> None:
+    """Set OPERATIONS on DID_PATTERN for ROLE_NAME, replacing them.
 
-    DID_PATTERN is made of a scope part and a name part: 'data*:*' for every scope starting with 'data' ('*:*' for every scope),
-    'data:*' for the scope 'data', 'data:raw*' for the DIDs of 'data' whose name starts with 'raw', 'data:raw1' for a single DID.
-    Only a trailing '*' is accepted; a pattern without name part ('data', 'data*') stands for the whole scope(s). Quote it so
-    the shell does not expand it as a glob.
+    \b
+    DID_PATTERN  SCOPE:NAME, a '*' only at the end of a part (quote it):
+                   '*' or '*:*'           every DID
+                   'data*' or 'data*:*'   the DIDs of the scopes starting with data
+                   'data' or 'data:*'     the DIDs of the scope data
+                   'data:raw*'            the DIDs of data whose name starts with raw
+                   'data:raw1'            the DID data:raw1
+    OPERATIONS   r, w, d in any order, e.g. 'rw', or 'none' (listed '---') to grant
+                 nothing on these DIDs, i.e. hide them from a wider pattern."""
+    did_pattern = _normalize_did_pattern(did_pattern)
+    new = format_operations(op.value for op in operations)
+    assigned = _assigned_did_operations(ctx, role_name)
+    if not _confirm_did_pattern(ctx, did_pattern, "add"):
+        click.echo(f"Skipped DID pattern '{did_pattern}', no permission was set on it.")
+        return
 
-    OPERATIONS is any combination of the letters r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd' or 'rwd'."""
-    for did_pattern in map(_normalize_did_pattern, did_patterns):
-        if not _confirm_did_pattern(ctx, did_pattern, "add"):
-            click.echo(f"Skipped DID pattern '{did_pattern}', no permission was added on it.")
-            continue
+    with _lock_hint(role_name):
+        ctx.obj.client.add_role_permission(role_name, 'did', {'did_pattern': did_pattern, 'operations': [op.value for op in operations]}, force=force)
 
-        added, already_assigned = [], []
-        for op in operations:
-            try:
-                with _lock_hint(role_name):
-                    ctx.obj.client.add_role_permission(role_name, 'did', {'did_pattern': did_pattern, 'operation': op.value}, force=force)
-                added.append(op.value)
-            except Duplicate:
-                already_assigned.append(op.value)
-
-        if already_assigned:
-            click.echo(f"Warning: {'/'.join(already_assigned)} permission(s) on {did_pattern} already assigned to role '{role_name}'.")
-        if added:
-            click.echo(f"Added {'/'.join(added)} permission(s) on {did_pattern} to role '{role_name}'.")
+    if did_pattern in assigned and assigned[did_pattern] != new:
+        click.echo(f"Replaced {assigned[did_pattern]} by {new} on {did_pattern}.")
+    click.echo(f"Set {new} on {did_pattern} for role '{role_name}'.")
+    wider = _deciding_did_pattern(did_pattern, assigned)
+    withdrawn = [letter for letter in assigned.get(wider, '') if letter != '-' and letter not in new]
+    if wider is not None and withdrawn:
+        click.echo(f"Warning: {did_pattern} ({new}) is more specific than {wider} ({assigned[wider]}), so it decides the DIDs it matches"
+                   f" instead: {'/'.join(withdrawn)} withdrawn from them within role '{role_name}'.")
 
 
 @permission_did.command("remove")
 @click.argument("role_name")
-@click.argument("did_patterns", metavar="DID_PATTERN...", nargs=-1, required=True)
-@click.argument("operations", type=OPERATIONS)
-@click.option("--force", is_flag=True, default=False, help="Remove the permissions even if the role is locked.")
+@click.argument("did_pattern")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
 @click.pass_context
-def did_remove(ctx: click.Context, role_name: str, did_patterns: tuple[str, ...], operations: list[DidOperationType], force: bool) -> None:
-    """Remove OPERATIONS on each DID_PATTERN from ROLE_NAME.
+def did_remove(ctx: click.Context, role_name: str, did_pattern: str, force: bool) -> None:
+    """Remove the DID permission of ROLE_NAME on DID_PATTERN.
 
-    DID_PATTERN must be given as it is listed, see `rucio role permission list`; a pattern without name part ('data', 'data*')
-    stands for the whole scope(s), as when it is added.
+    \b
+    DID_PATTERN  as listed by `rucio role permission list`. Its DIDs fall back to
+                 the next wider pattern of the role, if any."""
+    did_pattern = _normalize_did_pattern(did_pattern)
+    assigned = _assigned_did_operations(ctx, role_name)
+    if did_pattern not in assigned:
+        raise RolePermissionNotFound(
+            f"Role '{role_name}' has no DID permission on {did_pattern}."
+            + (f" Its DID permissions are on: {', '.join(sorted(assigned))}." if assigned else ""))
+    if not _confirm_did_pattern(ctx, did_pattern, "remove"):
+        click.echo(f"Skipped DID pattern '{did_pattern}', no permission was removed from it.")
+        return
 
-    OPERATIONS is any combination of the letters r(ead), w(rite) and d(elete), in any order, e.g. 'r', 'rw', 'wd' or 'rwd'."""
-    did_patterns = tuple(map(_normalize_did_pattern, did_patterns))
-    permissions = ctx.obj.client.list_role_permissions(role_name)
-    for did_pattern in did_patterns:
-        assigned = {permission['operation'] for permission in permissions if permission.get('type') == 'did' and permission['did_pattern'] == did_pattern}
-        if not any(op.value in assigned for op in operations):
-            raise RolePermissionNotFound(
-                f"None of the requested permissions ({'/'.join(op.value for op in operations)}) are assigned to role '{role_name}' on DID pattern '{did_pattern}'.")
-
-    for did_pattern in did_patterns:
-        if not _confirm_did_pattern(ctx, did_pattern, "remove"):
-            click.echo(f"Skipped DID pattern '{did_pattern}', no permission was removed from it.")
-            continue
-
-        removed, not_assigned = [], []
-        for op in operations:
-            try:
-                with _lock_hint(role_name):
-                    ctx.obj.client.delete_role_permission(role_name, 'did', {'did_pattern': did_pattern, 'operation': op.value}, force=force)
-                removed.append(op.value)
-            except RolePermissionNotFound:
-                not_assigned.append(op.value)
-        if not_assigned:
-            click.echo(f"Warning: {'/'.join(not_assigned)} permission(s) on {did_pattern} were already not assigned to role '{role_name}'.")
-        click.echo(f"Removed {'/'.join(removed)} permission(s) on {did_pattern} from role '{role_name}'.")
+    with _lock_hint(role_name):
+        ctx.obj.client.delete_role_permission(role_name, 'did', {'did_pattern': did_pattern}, force=force)
+    removed = assigned.pop(did_pattern)
+    wider = _deciding_did_pattern(did_pattern, assigned)
+    decided = f"decided by {wider} ({assigned[wider]}) again" if wider is not None else "no longer granted anything by this role through a DID permission"
+    click.echo(f"Removed {removed} on {did_pattern} from role '{role_name}': the DIDs it matched are {decided}.")
 
 
 # --- Metadata ---------------------------------------------------------------------------------
@@ -576,20 +598,13 @@ def _assigned_metadata_operations(ctx: click.Context, role_name: str, did_patter
 
 @permission.group("metadata")
 def permission_metadata() -> None:
-    """Manage the operations a role grants on the metadata keys of DIDs, overriding its DID permissions on them.
+    """Manage the operations a role grants on metadata keys of DIDs.
 
     \b
-    r(ead) shows a key and its value, w(rite) adds, modifies or deletes it, and none ('--') grants nothing on the key,
-    withdrawing what the DID permissions of the role would grant on it. A key without a metadata permission is
-    granted what the DID permissions give: READ shows it, DELETE lets it be set. Within a role, a permission on a
-    key wins over one on every key ('*'), which wins over the DID permissions of the role; between two permissions of
-    the same kind, the one with the most specific DID pattern wins. The roles of an account add up.
-
-    \b
-    r on some keys, or on no key at all, makes the matching DIDs visible, their scope listed, their content and
-    their rules listed, without giving access to their data: no file replica, nor download. w alone allows writing the
-    keys without seeing the DIDs. The keys held by Rucio (e.g. bytes, checksums, the state of a DID) and the keys
-    leading to its deletion (e.g. lifetime) can only be read through a metadata permission."""
+    r  see the key and its value, and list the DIDs (without their data)
+    w  add, modify or delete the key
+    On the keys it names, it overrides the DID permissions of the role: e.g. DID 'r' on
+    'data:*' and metadata 'none' on 'provenance' of 'data:*' hide that key."""
 
 
 @permission_metadata.command("add")
@@ -597,18 +612,22 @@ def permission_metadata() -> None:
 @click.argument("did_pattern")
 @click.argument("operations", type=METADATA_OPERATIONS)
 @click.argument("keys", metavar="[KEY...]", nargs=-1)
-@click.option("--force", is_flag=True, default=False, help="Set the permissions even if the role is locked.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
 @click.pass_context
 def metadata_add(ctx: click.Context, role_name: str, did_pattern: str, operations: list[DidOperationType], keys: tuple[str, ...], force: bool) -> None:
-    """Set OPERATIONS on each KEY of the DIDs matching DID_PATTERN for ROLE_NAME, replacing the operations it had on them.
+    """Set OPERATIONS on each KEY of DID_PATTERN for ROLE_NAME, replacing them.
 
-    DID_PATTERN is given as for `rucio role permission did add`, e.g. 'data:*' or 'data:raw*'. Each KEY is a metadata
-    key, several of them being given as separate arguments or comma-separated, e.g. 'quality,datatype'. '*' stands for
-    every key; quote it so the shell does not expand it. Without KEY, the permission is on no key: it only makes the
-    matching DIDs visible, so OPERATIONS must be 'r'.
-
-    OPERATIONS is any combination of the letters r(ead) and w(rite), in any order, e.g. 'r', 'w' or 'rw', or 'none' to
-    grant nothing on the keys, listed as '--', which withdraws what the DID permissions of the role grant on them."""
+    \b
+    DID_PATTERN  SCOPE:NAME, a '*' only at the end of a part (quote it):
+                   '*' or '*:*'           every DID
+                   'data*' or 'data*:*'   the DIDs of the scopes starting with data
+                   'data' or 'data:*'     the DIDs of the scope data
+                   'data:raw*'            the DIDs of data whose name starts with raw
+                   'data:raw1'            the DID data:raw1
+    OPERATIONS   r, w in any order, e.g. 'rw', or 'none' (listed '--') to hide the keys.
+    KEY          keys, spaced or comma-separated, e.g. 'quality,datatype'; '*' for every
+                 key (quote it); no KEY to only list the DIDs (OPERATIONS 'r').
+    The keys held by Rucio (bytes, checksums, lifetime, ...) can only get 'r'."""
     did_pattern = _normalize_did_pattern(did_pattern)
     meta_keys = _metadata_keys(keys)
     if not _confirm_did_pattern(ctx, did_pattern, "add"):
@@ -641,14 +660,14 @@ def metadata_add(ctx: click.Context, role_name: str, did_pattern: str, operation
 @click.argument("role_name")
 @click.argument("did_pattern")
 @click.argument("keys", metavar="[KEY...]", nargs=-1)
-@click.option("--force", is_flag=True, default=False, help="Remove the permissions even if the role is locked.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
 @click.pass_context
 def metadata_remove(ctx: click.Context, role_name: str, did_pattern: str, keys: tuple[str, ...], force: bool) -> None:
-    """Remove the metadata permissions of ROLE_NAME on each KEY of the DIDs matching DID_PATTERN.
+    """Remove the metadata permissions of ROLE_NAME on each KEY of DID_PATTERN.
 
-    DID_PATTERN and KEY are given as they are listed, see `rucio role permission list`: '*' for the permission on every
-    key, and no KEY for the one on no key. The keys then fall back to what the DID permissions of the role grant.
-    Nothing is removed if one of the keys has no metadata permission on DID_PATTERN."""
+    \b
+    DID_PATTERN, KEY  as listed by `rucio role permission list`: '*' for every key,
+                      no KEY for the one on no key. The keys fall back to the DID permissions."""
     did_pattern = _normalize_did_pattern(did_pattern)
     meta_keys = _metadata_keys(keys)
     assigned = _assigned_metadata_operations(ctx, role_name, did_pattern)
@@ -736,31 +755,30 @@ def _confirm_limit_add(ctx: click.Context, role_name: str, rse_expression: str, 
 
 @permission.group("limit")
 def permission_limit() -> None:
-    """Manage the limits a role grants on RSEs, like `rucio account limit` does for an account.
+    """Manage the storage limits a role grants on RSEs, per account holding it.
 
-    A local limit caps the usage of an account on a single RSE, a global limit its usage summed over the several RSEs
-    an RSE expression matches. Within a role, an RSE may be written to if a local limit covers it, and every global
-    limit covering it must still have room: a global limit only restricts. On an RSE a local limit of one of its
-    roles covers, an account is bound by its roles instead of its account limits, the role leaving the most space
-    being taken. Each account holding the role gets the whole limit for itself."""
+    \b
+    local   cap on one RSE: the role lets its accounts write there
+    global  cap on the total over several RSEs: it only restricts the local limits
+    Where a role has a local limit, the roles replace the account limits, the most
+    generous role applying."""
 
 
 @permission_limit.command("add")
 @click.argument("role_name")
 @click.argument("rse_expressions", metavar="RSE_EXPRESSION...", nargs=-1, required=True)
-@click.option("--local", "local_bytes", type=QUOTA_SIZE, help="Set a local limit of this size on the single RSE the expression matches, e.g. its name.")
-@click.option("--global", "global_bytes", type=QUOTA_SIZE,
-              help="Set a global limit of this size on the expression, which must match several RSEs, capping the usage summed over the RSEs it matches whenever it is applied.")
-@click.option("--force", is_flag=True, default=False, help="Set the limits even if the role is locked.")
+@click.option("--local", "local_bytes", type=QUOTA_SIZE, metavar="SIZE", help="Local limit, on an expression matching one RSE.")
+@click.option("--global", "global_bytes", type=QUOTA_SIZE, metavar="SIZE", help="Global limit, on an expression matching several RSEs.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
 @click.pass_context
 def limit_add(ctx: click.Context, role_name: str, rse_expressions: tuple[str, ...], local_bytes: Optional[int], global_bytes: Optional[int], force: bool) -> None:
-    """Set a limit of ROLE_NAME on each RSE_EXPRESSION, overwriting the existing one after confirmation.
+    """Set a limit of ROLE_NAME on each RSE_EXPRESSION, replacing it.
 
-    Exactly one of --local or --global must be given: a local limit is set on an RSE_EXPRESSION matching a single RSE,
-    e.g. 'CERN-EOS-DISK', a global limit on one matching several, e.g. 'CERN-EOS-DISK|ICSC-STORM' or 'tier=1'. Quote
-    the expressions so the shell does not interpret their operators.
-
-    The size is given in bytes ("10000"), with a storage unit ("10GB"), or as NOCAP (or "infinity") for no cap."""
+    \b
+    Give exactly one of --local or --global.
+    RSE_EXPRESSION  one RSE for --local, e.g. 'CERN-EOS-DISK'; several for --global,
+                    e.g. 'tier=1' (quote it).
+    SIZE            bytes ('10000'), with a unit ('10GB'), or NOCAP for no cap."""
     if (local_bytes is None) == (global_bytes is None):
         raise click.UsageError("Exactly one of --local or --global must be given: a local limit is set on one RSE, a global one on an expression matching several.")
     locality, bytes_ = ('local', local_bytes) if local_bytes is not None else ('global', global_bytes)
@@ -782,16 +800,16 @@ def limit_add(ctx: click.Context, role_name: str, rse_expressions: tuple[str, ..
 @permission_limit.command("remove")
 @click.argument("role_name")
 @click.argument("rse_expressions", metavar="RSE_EXPRESSION...", nargs=-1, required=True)
-@click.option("--local", "local", is_flag=True, default=False, help="Only remove the local limit on the single RSE the expression matches.")
-@click.option("--global", "global_", is_flag=True, default=False, help="Only remove the global limit on the expression.")
-@click.option("--force", is_flag=True, default=False, help="Remove the limits even if the role is locked.")
+@click.option("--local", "local", is_flag=True, default=False, help="Only the local limit.")
+@click.option("--global", "global_", is_flag=True, default=False, help="Only the global limit.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
 @click.pass_context
 def limit_remove(ctx: click.Context, role_name: str, rse_expressions: tuple[str, ...], local: bool, global_: bool, force: bool) -> None:
-    """Remove limits of ROLE_NAME on each RSE_EXPRESSION.
+    """Remove the limits of ROLE_NAME on each RSE_EXPRESSION.
 
-    The local limit on the RSE the expression matches is removed, and the global limit on the expression itself, which
-    must be given exactly as it was set, see `rucio role permission list`. --local or --global only removes that one;
-    both are looked for if neither is given."""
+    \b
+    Both the local and the global one, unless --local or --global is given.
+    RSE_EXPRESSION  as it was set, see `rucio role permission list`."""
     parameters = {locality: True for locality, given in (('local', local), ('global', global_)) if given}
     # e.g. 'local limit(s)', or just 'limit(s)' if both are looked for
     described = ''.join(f"{locality} " for locality in parameters) + 'limit'

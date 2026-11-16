@@ -349,12 +349,12 @@ def permission_lines(
               :func:`format_limits`), '' where they do not apply. A permission of a type this client does not know is
               left out.
     """
-    ops_by_did_pattern: dict[str, set[str]] = {}
+    ops_by_did_pattern: dict[str, list[str]] = {}
     metadata_by_did_pattern: dict[str, list["Mapping[str, Any]"]] = {}
     limits: list["Mapping[str, Any]"] = []
     for permission in permissions:
         if permission.get('type') == 'did':
-            ops_by_did_pattern.setdefault(permission['did_pattern'], set()).add(permission['operation'])
+            ops_by_did_pattern[permission['did_pattern']] = permission['operations']
         elif permission.get('type') == 'metadata':
             metadata_by_did_pattern.setdefault(permission['did_pattern'], []).append(permission)
         elif permission.get('type') == 'limit':
@@ -841,7 +841,8 @@ class QuotaSize(click.ParamType):
 
 class _LetterOperations(click.ParamType):
     """
-    Operations given as letters, in any order and combination, e.g. 'rw' or 'wr' for read and write.
+    Operations given as letters, in any order and combination, e.g. 'rw' or 'wr' for read and write, or 'none' (case
+    insensitive) for no operation, shown as dashes only by `role permission list`.
 
     The dashes of `role permission list` (e.g. 'rw-') only show the operations which are not granted, they are not
     accepted, nor are the names of the operations.
@@ -849,12 +850,15 @@ class _LetterOperations(click.ParamType):
 
     name = "operations"
     LETTERS: "Mapping[DidOperationType, str]" = OPERATION_LETTERS
+    NONE = 'none'
     HELP = ""
 
     def convert(self, value, param, ctx) -> list[DidOperationType]:
-        """Turn a command line value into the requested operations, deduplicated and in canonical order."""
+        """Turn a command line value into the requested operations, deduplicated and in canonical order, possibly none."""
         if isinstance(value, list):
             return value
+        if isinstance(value, str) and value.lower() == self.NONE:
+            return []
         by_letter = {letter: operation for operation, letter in self.LETTERS.items()}
         if not value:
             self.fail(f"no operation given, expected {self.HELP}", param, ctx)
@@ -871,9 +875,12 @@ class _LetterOperations(click.ParamType):
 
 
 class RoleOperations(_LetterOperations):
-    """The operations of a DID permission: letters among r, w and d, in any order and combination, e.g. 'r', 'rw', 'dw', 'rwd'."""
+    """
+    The operations of a DID permission: letters among r, w and d, in any order and combination, e.g. 'r', 'rw', 'dw',
+    'rwd', or 'none' for no operation, shown as '---' by `role permission list`.
+    """
 
-    HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd' or 'rwd'"
+    HELP = "any combination of r(ead), w(rite) and d(elete), e.g. 'r', 'rw', 'wd' or 'rwd', or 'none' for no operation"
 
 
 class MetadataOperations(_LetterOperations):
@@ -883,14 +890,7 @@ class MetadataOperations(_LetterOperations):
     """
 
     LETTERS = METADATA_OPERATION_LETTERS
-    NONE = 'none'
     HELP = "any combination of r(ead) and w(rite), e.g. 'r', 'w' or 'rw', or 'none' for no operation"
-
-    def convert(self, value, param, ctx) -> list[DidOperationType]:
-        """Turn a command line value into the requested operations, deduplicated and in canonical order, possibly none."""
-        if isinstance(value, str) and value.lower() == self.NONE:
-            return []
-        return super().convert(value, param, ctx)
 
     def _unknown_message(self, value: str, unknown: "Sequence[str]") -> str:
         if set(unknown) == {OPERATION_LETTERS[DidOperationType.DELETE]}:
