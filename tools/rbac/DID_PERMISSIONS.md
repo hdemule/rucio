@@ -1,7 +1,10 @@
 # RBAC DID permissions
 
-What a DID permission grants, as implemented on `rbac/main` (up to `07178bcf1`).
+What a DID permission grants, as implemented on `rbac/main`.
 Everything here applies only when RBAC is enabled: with RBAC off, the generic policy behaves exactly as standard Rucio.
+
+- **Metadata permissions** refine what a role grants on the metadata keys of DIDs: see section 7.
+- **Overlaps:** how permissions and roles combine when they cover the same DID, key or RSE is in `ROLE_OVERLAPS.md`.
 
 ```bash
 rucio role permission did add|remove ROLE DID_PATTERN... OPERATIONS   # OPERATIONS: any of r, w, d
@@ -20,7 +23,7 @@ A pattern is always stored and listed with a scope part and a name part.
 | `atlas:file1` | the DID `atlas:file1` | |
 
 - `*` is accepted only at the end of a part. A wildcard scope part only takes the `*` name part: `atlas*:file*`, `*:file1` and `*atlas:*` are invalid.
-- A pattern is matched against the DID itself only. **There is no inheritance yet:** `atlas:ds1` does not cover the files inside `ds1`.
+- A pattern is matched against the DID itself only. **There is no inheritance, by design:** a DID lives in its scope, whatever the collections it is attached to, so `atlas:ds1` does not cover the files inside `ds1`, and each DID is checked on its own.
 - **Reading:** an account reads the DIDs its `r` patterns match, plus the DIDs it owns in a scope where it has some `r`. Example: `r` on `atlas:calib*` reads `atlas:calib1`, and `atlas:x` if it owns it, but not `atlas:file1`.
 - **Whole-scope items:** only the patterns with the `*` name part grant a whole scope. `atlas:file*` never grants the whole scope `atlas`. This only matters where an item stands for the whole scope rather than for DIDs (section 3).
 - **Multiple roles:** grants add up across rows and roles, and nothing restricts.
@@ -31,8 +34,8 @@ A pattern is always stored and listed with a scope part and a name part.
 | Account | Access |
 |---|---|
 | root, admins (the `admin` role) | everything, as in standard Rucio |
-| owner of the scope | everything in the scope (standard Rucio), except that with RBAC on, attached DIDs and rule targets must be readable (section 6) |
-| owner of a DID or a rule | see section 5 |
+| owner of the scope | everything in the scope (standard Rucio), except that with RBAC on, attached DIDs and rule targets must be readable (section 5) |
+| owner of a DID or a rule | see section 4 |
 
 ## 3. What each operation grants on the DIDs a pattern matches
 
@@ -40,19 +43,21 @@ A pattern is always stored and listed with a scope part and a name part.
 
 | Action | Granted by |
 |---|---|
-| Read checks naming a DID: `get_did`, `get_metadata`, `list_content`, `list_files`, `list_parent_dids`, the locks, replicas and rules of a DID or of a rule (its DID), ... | `r` on the DID, or owning it |
+| Read checks naming a DID: `get_did`, `get_metadata`, `list_content`, `list_files`, `list_parent_dids`, the locks, the dataset replicas (per RSE) and the rules of a DID or of a rule (its DID), ... | `r` on the DID, or owning it; or a metadata permission making it visible (section 7) |
+| Reading the data of a DID: `list_replicas` (the PFNs, hence downloading), its transfer requests, current and past | `r` on the DID, or owning it; a metadata permission is **not** enough |
 | Listings of a scope, naming no DID: `list_dids`, `scope_list` | some `r` in the scope; the results are then filtered per DID |
 | Listings (results filtered by RBAC): DIDs, content, parents, replicas, locks, rules, ... | each item needs `r` on its DID, or owning it (some `r` in its scope) |
 | Listings of scopes: `list_scopes`, `get_scopes`, ... | some `r` in the scope |
 | Items standing for a whole scope: the counts of the bad replicas summary | `r` on the whole scope (`*` name part) |
-| Prerequisite for: adding a rule, being attached, registering a replica of an existing file (section 6) | `r` on the DID, or owning it |
+| The metadata keys of a DID | every key, unless a metadata permission of the role decides otherwise for some keys (section 7) |
+| Prerequisite for: adding a rule, being attached, registering a replica of an existing file (section 5) | `r` on the DID, or owning it |
 
 ### `w`: write (creating, and adding content)
 
 | Action | Requires |
 |---|---|
 | Create a DID: `add_did`, `add_dids`, the new files of an upload or of `add_replicas` | `w` on the new DID; the new DID must belong to the issuer itself (creating for another account: root/admin/scope owner only) |
-| Metadata given at creation | ordinary keys: nothing more. Deletion keys (`lifetime`, `expired_at`, `eol_at`, `purge_replicas`): `d`, or owning the new DID (some `r` in the scope). Protected keys (section 7): refused |
+| Metadata given at creation | ordinary keys: nothing more. Deletion keys (`lifetime`, `expired_at`, `eol_at`, `purge_replicas`): `d`, or owning the new DID (some `r` in the scope). Protected keys (section 6): refused |
 | Create a sample | `w` on the output DID, plus `r` on the input collection (or owning it) |
 | Attach content into a collection | `w` on the collection, or owning it |
 | Detach content from a collection | `w` on the collection, if every detached DID is owned by the issuer (detaching the DIDs of others: `d`, see below) |
@@ -67,8 +72,8 @@ Each of these requires `d` on the DID, or owning it:
 
 | Action | Applies to |
 |---|---|
-| `set_metadata`, `set_metadata_bulk` (any non-protected key, not recursive) | the DID |
-| `delete_metadata` | the DID |
+| `set_metadata`, `set_metadata_bulk` (any non-protected key, not recursive) | the DID, unless a metadata permission of the role decides otherwise for some keys (section 7) |
+| `delete_metadata` | the DID, same |
 | `detach_dids` | the collection: then any content, whoever owns it (`w` only detaches your own DIDs, see above) |
 | Update (only `lifetime`, `comment`, `notify`, `purge_replicas`), reduce, move or delete a rule | the rule's DID, or owning the rule |
 | Change the state (any state) or the path of a replica, other than finishing an upload | the file; replica RSEs only, see below |
@@ -84,7 +89,7 @@ Moving a rule also requires that the new rule is not locked and belongs to the a
 - **When ownership counts:** the owner acts as **admin of that DID or rule** only if a role grants the owner some `r` in its scope. `r` on any pattern of the scope is enough (e.g. `atlas:calib*` for an owned `atlas:file1`).
 - **Without `r` in the scope, ownership grants nothing,** not even seeing the DID. Example: an account with only `-w-` on `atlas` can create `atlas:x`, but cannot see or administer it afterwards.
 - **What ownership never gives:**
-  - the protected keys (section 7);
+  - the protected keys (section 6);
   - recursive metadata;
   - deleting a replica, or changing its state, while another account's rule holds it;
   - closing a collection.
@@ -103,7 +108,7 @@ Moving a rule also requires that the new rule is not locked and belongs to the a
 
 | What | Who can still do it |
 |---|---|
-| Protected metadata keys: `name`, `scope`, `account`, `did_type`, `bytes`, `length`, `events`, `adler32`, `md5`, `guid`, `availability`, `complete`, `is_open`, `monotonic`, `obsolete`, `suppressed`, `hidden`, `transient`, `is_archive`, `constituent`, `is_new`, `closed_at`, `deleted_at`, `accessed_at`, `access_cnt`, `created_at`, `updated_at` | root, admins, scope owner |
+| Writing the protected metadata keys (a metadata permission may grant reading them): `name`, `scope`, `account`, `did_type`, `bytes`, `length`, `events`, `adler32`, `md5`, `guid`, `availability`, `complete`, `is_open`, `monotonic`, `obsolete`, `suppressed`, `hidden`, `transient`, `is_archive`, `constituent`, `is_new`, `closed_at`, `deleted_at`, `accessed_at`, `access_cnt`, `created_at`, `updated_at` | root, admins, scope owner |
 | Recursive metadata updates (propagated to the whole content) | root, admins, scope owner |
 | Creating a DID owned by another account | root, admins, scope owner |
 | Closing or reopening a collection (`set_status`) | root, admins, scope owner (reopening: root/admin only) |
@@ -113,7 +118,47 @@ Moving a rule also requires that the new rule is not locked and belongs to the a
 | Anything on RSEs not ending with `SCRATCHDISK`, `USERDISK`, `MOCK`, `LOCALGROUPDISK` (replica registration, state, deletion) | root, admins |
 | Open data add/update/delete | not RBAC: no check at all upstream (left as is) |
 
-## 7. Examples
+## 7. Metadata permissions
+
+```bash
+rucio role permission metadata add ROLE DID_PATTERN OPERATIONS [KEY...]   # OPERATIONS: r, w, rw, or none
+rucio role permission metadata remove ROLE DID_PATTERN [KEY...]
+```
+
+A metadata permission grants `r` (see the key and its value) and `w` (add, modify or delete it) on metadata keys
+of the DIDs its pattern matches. Its patterns are those of the DID permissions (section 1), matched the same way,
+without inheritance.
+
+- **Keys:** one row per key. `*` covers every key; no key at all gives a row that only makes the DIDs visible
+  (`r` only). Adding replaces the operations a role had on a key; `none` (listed `--`) is stored too.
+- **Within a role, the narrowest subject decides** for each key of each DID: a row naming the key, otherwise a
+  row on `*`, otherwise the DID permissions of the role (`r` shows every key, `d` lets every non-protected key be
+  set). Within a level, the most specific pattern decides: exact name, name prefix, whole scope, scope prefix.
+- **Across roles, everything adds up:** a key is readable or writable if one role makes it so. A `--` only
+  withdraws a key from the DID permissions of its own role: it never hides what another role shows.
+- **Visibility:** a row with `r`, whatever its key, makes the DIDs its pattern matches visible: they are listed,
+  their scope too, and read as with `r` (section 3), but only with the keys the rows grant. A row with only `w`
+  writes blindly, like `-w-`.
+- **What a metadata permission never grants:**
+  - the data of a DID: its replicas with their PFNs, downloading it, its transfer requests;
+  - `r` as a prerequisite: adding a rule, being attached, registering a replica, ownership (section 4);
+  - writing the protected keys (section 6), nor the keys leading to a deletion (`lifetime`, `expired_at`,
+    `eol_at`, `purge_replicas`), which stay with `d` or ownership. Reading them can be granted.
+- **Who bypasses them:** root, admins, the owner of the scope, and the owner of the DID (with some `r` in its
+  scope) see and write every key, as without metadata permissions.
+- **Listings:** the keys an account may not read are left out of what the DID and metadata endpoints return.
+  A `list_dids` filter on a key it may not read on a DID leaves that DID out, as if it did not match.
+
+Example, the role `user` of the dev environment (`tools/rbac/db_setup/setup_test_db.py`), held by alice, who has no
+DID permission on `physics`:
+
+| Metadata permission | Effect for alice |
+|---|---|
+| `r` on `datatype`, `project` of `physics:*` | every DID of `physics` is visible, with these two keys only, without its data |
+| `rw` on `campaign`, `version` of `physics:raw*` | she also reads and writes these keys on the raw files |
+| `--` on `datatype` of `physics:calib.00456789._0001.data` | `datatype` is hidden on that file only |
+
+## 8. Examples
 
 Results from running the real checks of `generic.py` over the world below. Each row gives the result and its reason.
 
@@ -239,12 +284,10 @@ Results from running the real checks of `generic.py` over the world below. Each 
 | bob | delete his `bob.f1` replica | ❌ | owner without `r` in `atlas` |
 | alice | delete on `X_DATADISK` | ❌ | not a user RSE |
 
-## 8. Known gaps and accepted edge cases
+## 9. Accepted edge cases
 
-**Gaps (pending work):**
-- **Inheritance not implemented:** `w` on `atlas:ds1` does not cover new files uploaded into it (`rucio upload --dataset`), and `d` on it does not cover its files. Agreed design: a matched DID covers all its descendants in the same scope, for all operations, with the whole path staying in the scope.
-
-**Accepted edge cases (by design, change here if needed):**
+By design, change here if needed:
+- **No inheritance:** `w` on `atlas:ds1` does not cover new files uploaded into it (`rucio upload --dataset`), and `d` on it does not cover its files: grant the files a pattern of their own, e.g. a name prefix.
 - **Uploads need `r`:** `rucio upload` adds a rule, so bob (`-w-` only) cannot upload: the DID creation passes, the rule is refused.
 - **Copies can't be cleaned by their uploader:** carol cannot delete her own copy of `calib1`, since she neither owns `calib1` nor has `d` on it. Once her rule is removed, the reaper cleans the copy.
 - **Listings may look up owners:** for an account reading through name patterns, each listed DID that no pattern matches costs one lookup of its owner. Accounts with `r` on the whole scope cost nothing more.
@@ -253,17 +296,19 @@ Results from running the real checks of `generic.py` over the world below. Each 
 - **Scope owners keep standard Rucio's power,** e.g. recursive metadata propagated into content of other scopes.
 - **Replicas are not checked against their file:** the server does not compare a new replica's size and checksums with the file's, as in standard Rucio.
 
-## 9. Where it lives
+## 10. Where it lives
 
 - `lib/rucio/core/role.py`:
   - patterns: `_validate_did_pattern`, `_did_pattern_matches`;
+  - metadata permissions: `MetadataPermissionHandler`, `MetadataAccess` (resolution), `MetadataKeyFilter` (hidden keys), `has_metadata_visibility`;
   - requests: `DidPermissionRequest`, `has_permission`;
   - "some grant in the scope": `has_any_scope_prefix_access`;
   - listings: `did_access_checker`, `filter_iterable_by_did_access` (per DID), `scope_access_checker`, `filter_iterable_by_scope_access` (per scope, `any_did` for the scope listings).
 - `lib/rucio/core/permission/generic.py`:
   - constants: `RBAC_*` (protected and deletion keys, rule options, replica RSE suffixes);
   - helpers: `_rbac_permission_access`, `_rbac_did_ownership_access`, `_rbac_new_did_ownership_access`, `_rbac_rule_ownership_access`, `_rbac_can_read_did`, `_rbac_can_alter_did`, `_rbac_can_alter_rule`, `_rbac_can_alter_metadata`, `_rbac_can_create_did`, `_rbac_can_create_did_with`, `_rbac_can_attach_dids`, `_rbac_can_attach_into`, `_rbac_can_detach_from`, `_rbac_can_register_replicas`, `_rbac_can_delete_replicas`, `_rbac_can_update_replica_state(s)`;
-  - read check: `perm_read_scope`.
+  - read checks: `perm_read_scope` (DIDs, with metadata visibility), `perm_read_data` (replicas and transfer requests);
+  - metadata: `_rbac_can_alter_metadata`, `_rbac_can_delete_metadata`.
 - Tests:
   - `tests/test_role_did_permission.py` (patterns, helpers);
-  - `tests/test_rbac_restapi.py` (end to end).
+  - `tests/test_rbac_restapi.py` (end to end), which leaves the database as it found it.
