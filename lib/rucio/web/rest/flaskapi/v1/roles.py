@@ -139,11 +139,16 @@ class RolePermission(ErrorHandlingMethodView):
     The permissions of one type of a role, e.g. `/roles/<role>/permissions/did`.
 
     The request body names the permission: its target and its parameters, in the shape the permissions
-    are listed with, together with `force`, e.g. {"did_pattern": "data:raw*", "operation": "read"} for a
+    are listed with, together with `force`, e.g. {"did_pattern": "data:raw*", "operations": ["read", "write"]} for a
     DID permission, {"did_pattern": "data:raw*", "keys": "quality,datatype", "operations": ["read", "write"]}
     for a metadata permission, or {"rse_expression": "tier=1", "global": 5000} for a limit, -1
     meaning no cap. Granting a limit which exists already overwrites it. Removing limits takes which
     of the 'local' and 'global' ones to remove, as booleans, both being removed if none is given.
+
+    Granting a DID permission sets exactly its `operations` on the `did_pattern`, replacing what the role had on it.
+    They may be empty (`---`): within the role, the most specific pattern matching a DID decides, so such a
+    permission withdraws the DIDs it matches from a less specific pattern of the role. Removing a DID permission
+    takes only the `did_pattern`, and removes nothing (404) if the role has no permission on it.
 
     The `keys` of a metadata permission are a list or a comma-separated string, '*' standing for every key and
     no keys for none: such a permission only makes the matching DIDs visible, and only takes `["read"]`. Its
