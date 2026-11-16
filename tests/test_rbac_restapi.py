@@ -1073,18 +1073,24 @@ def bob_reads_file_a(vo, rbac_data):
     role_name = 'tmp_read_%s' % uuid4().hex[:12]
     permission = _did_permission('read', rbac_data.file_a)
     owned = 'alice:%s_owned_ds' % uuid4().hex[:12]
+    owned_did = {'scope': InternalScope('alice', vo=vo), 'name': _name(owned), 'did_type': DIDType.DATASET, 'purge_replicas': True}
     with db_session(DatabaseOperationType.WRITE) as session:
-        did_core.add_did(scope=InternalScope('alice', vo=vo), name=_name(owned), did_type=DIDType.DATASET, account=InternalAccount('bob', vo=vo), session=session)
+        did_core.add_did(scope=owned_did['scope'], name=owned_did['name'], did_type=DIDType.DATASET, account=InternalAccount('bob', vo=vo), session=session)
 
-    assert _post(_role_path(role_name), 'root').status_code == CREATED
     try:
-        assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=permission).status_code == CREATED
-        assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
-        yield owned
+        assert _post(_role_path(role_name), 'root').status_code == CREATED
+        try:
+            assert _post(_role_path(role_name, 'permissions', 'did'), 'root', json=permission).status_code == CREATED
+            assert _post(_account_roles_path('bob', role_name), 'root').status_code == CREATED
+            yield owned
+        finally:
+            _delete(_account_roles_path('bob', role_name), 'root')
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=permission)
+            assert _delete(_role_path(role_name), 'root').status_code == OK
     finally:
-        _delete(_account_roles_path('bob', role_name), 'root')
-        _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=permission)
-        assert _delete(_role_path(role_name), 'root').status_code == OK
+        # bob reads the DIDs he owns in the scope: a dataset left behind would be listed by the next test using the fixture
+        with db_session(DatabaseOperationType.WRITE) as session:
+            did_core.delete_dids([owned_did], account=InternalAccount('root', vo=vo), session=session)
 
 
 class TestNAMEPATTERN:
