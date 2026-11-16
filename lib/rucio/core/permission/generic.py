@@ -276,6 +276,25 @@ def _rbac_did_ownership_access(issuer: "InternalAccount", scope: "InternalScope"
         return False
 
 
+def _rbac_new_did_owner(issuer: "InternalAccount", new_did: "Mapping[str, Any]") -> "InternalAccount":
+    """
+    The account which will own a DID being created: its 'account', the issuer if none is given.
+
+    The gateway turns the 'account' of the permission arguments into an `InternalAccount` even when none is given,
+    see :func:`rucio.gateway.permission.has_permission`, e.g. for `add_did` called through the REST API, so an
+    account without external name stands for no account. The 'account' of a DID created in bulk is left as given,
+    an external name or nothing.
+
+    :param issuer: Account identifier which issues the command.
+    :param new_did: The DID being created, with optionally its 'account' (internal or external).
+    :returns: The owner of the new DID
+    """
+    owner = new_did.get('account')
+    if isinstance(owner, InternalAccount):
+        return issuer if owner.external is None else owner
+    return InternalAccount(owner, vo=issuer.vo) if owner else issuer
+
+
 def _rbac_new_did_ownership_access(issuer: "InternalAccount", new_did: "Mapping[str, Any]", session: "Session") -> bool:
     """
     Determines RBAC ownership of a DID being created, which does not exist yet: it will be owned by its 'account', the issuer by default.
@@ -286,10 +305,7 @@ def _rbac_new_did_ownership_access(issuer: "InternalAccount", new_did: "Mapping[
     :param session: The DB session to use.
     :returns: True if the account will own the DID, otherwise False
     """
-    owner = new_did.get('account') or issuer
-    if not isinstance(owner, InternalAccount):
-        owner = InternalAccount(owner, vo=issuer.vo)
-    return owner == issuer\
+    return _rbac_new_did_owner(issuer, new_did) == issuer\
         and role_core.has_any_scope_prefix_access(account=issuer, scope=new_did['scope'], operation=DidOperationType.READ, session=session)
 
 
@@ -498,8 +514,7 @@ def _rbac_can_create_did(issuer: "InternalAccount", did: "Mapping[str, Any]", se
     """
     scope, name = did['scope'], did['name']
     # creating a DID owned by another account is left to root, admins and the owner of the scope, as in standard Rucio
-    owner = did.get('account') or issuer
-    if (owner if isinstance(owner, InternalAccount) else InternalAccount(owner, vo=issuer.vo)) != issuer:
+    if _rbac_new_did_owner(issuer, did) != issuer:
         return False
     if not _rbac_permission_access(issuer, scope, name, DidOperationType.WRITE, session):
         return False
@@ -1323,24 +1338,32 @@ def perm_get_request_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], s
     """
     Checks if an account can get a request by DID.
 
+    Every account can, unless RBAC is enabled: a transfer request tells where the replica of the DID comes from and
+    goes to, its source and destination URLs included, so it then requires to read the data of the DID like its
+    replicas do, see :func:`perm_read_data`. A metadata permission making the DID visible does not grant it.
+
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return True
+    return perm_read_data(issuer, kwargs, session)
 
 
 def perm_get_request_history_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can get a historical request by DID.
 
+    Only root and admins can, unless RBAC is enabled: a past transfer request is as sensitive as the current one, so
+    whoever reads the data of the DID may then get it as well, see :func:`perm_get_request_by_did`.
+
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or _is_admin(issuer, session)
+    return _is_root(issuer) or _is_admin(issuer, session)\
+        or (_use_roles() and perm_read_data(issuer, kwargs, session))
 
 
 def perm_cancel_request(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:

@@ -355,6 +355,8 @@ class BulkDIDS(ErrorHandlingMethodView):
                   enum: ["Created"]
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           406:
             description: "Not acceptable"
           409:
@@ -368,7 +370,7 @@ class BulkDIDS(ErrorHandlingMethodView):
         except (DuplicateContent, DataIdentifierAlreadyExists, UnsupportedOperation) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         return 'Created', 201
 
 
@@ -469,6 +471,8 @@ class Attachments(ErrorHandlingMethodView):
                   enum: ["Created"]
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "Not found"
           406:
@@ -494,7 +498,7 @@ class Attachments(ErrorHandlingMethodView):
         except (DuplicateContent, DataIdentifierAlreadyExists, UnsupportedOperation, FileAlreadyExists) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except FileConsistencyMismatch as error:
             return generate_http_error_flask(412, error)
 
@@ -692,6 +696,8 @@ class DIDs(ErrorHandlingMethodView):
                   enum: ['Created']
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "DID or scope not found"
           409:
@@ -726,7 +732,7 @@ class DIDs(ErrorHandlingMethodView):
         except (DuplicateContent, DataIdentifierAlreadyExists, UnsupportedOperation) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         except DatabaseException as error:
             if 'DELETED_DIDS_PK violated' in str(error):
                 return generate_http_error_flask(
@@ -767,6 +773,8 @@ class DIDs(ErrorHandlingMethodView):
             description: "OK"
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "DID not found"
           409:
@@ -786,7 +794,7 @@ class DIDs(ErrorHandlingMethodView):
         except (UnsupportedStatus, UnsupportedOperation) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
         return '', 200
 
@@ -919,6 +927,8 @@ class Attachment(ErrorHandlingMethodView):
                   enum: ["Created"]
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "DID not found"
           406:
@@ -946,7 +956,7 @@ class Attachment(ErrorHandlingMethodView):
         except (DuplicateContent, UnsupportedOperation, FileAlreadyExists) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
         return 'Created', 201
 
@@ -989,6 +999,8 @@ class Attachment(ErrorHandlingMethodView):
             description: "OK"
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "DID not found"
         """
@@ -1007,7 +1019,7 @@ class Attachment(ErrorHandlingMethodView):
         except DataIdentifierNotFound as error:
             return generate_http_error_flask(404, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
 
         return '', 200
 
@@ -2384,6 +2396,8 @@ class Resurrect(ErrorHandlingMethodView):
                   enum: ["Created"]
           401:
             description: "Invalid Auth Token"
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to perform this action."
           404:
             description: "Not found"
           409:
@@ -2400,7 +2414,7 @@ class Resurrect(ErrorHandlingMethodView):
         except (DuplicateContent, DataIdentifierAlreadyExists, UnsupportedOperation) as error:
             return generate_http_error_flask(409, error)
         except AccessDenied as error:
-            return generate_http_error_flask(401, error)
+            return generate_http_error_flask(403, error)
         return 'Created', 201
 
 
