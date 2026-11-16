@@ -171,7 +171,10 @@ class Search(ErrorHandlingMethodView):
         """
         ---
         summary: List Data identifier
-        description: "List all data identifiers in a scope which match a given metadata."
+        description: |
+          List all data identifiers in a scope which match a given metadata.
+          With RBAC, a DID is only listed if the account may read every metadata key the filters use on it, and
+          the long format leaves out the keys it may not read.
         tags:
           - Data Identifiers
         parameters:
@@ -1330,7 +1333,9 @@ class Meta(ErrorHandlingMethodView):
         """
         ---
         summary: Get metadata
-        description: "Retrieve the metadata of a data identifier (DID)."
+        description: |
+          Retrieve the metadata of a data identifier (DID).
+          With RBAC, the keys the account may not read are left out.
         tags:
           - Data Identifiers
         parameters:
@@ -1512,6 +1517,8 @@ class Meta(ErrorHandlingMethodView):
             description: "Bad Request – invalid scope_name, or invalid key/value parameters."
           401:
             description: "Unauthorized – invalid Auth Token."
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to set at least one of the keys."
           404:
             description: "Not found – the specified DID does not exist."
         """
@@ -1535,6 +1542,8 @@ class Meta(ErrorHandlingMethodView):
                     recursive=param_get_bool(parameters, 'recursive', default=False),
                     vo=vo
                 )
+            except AccessDenied as error:
+                return generate_http_error_flask(403, error)
             except DataIdentifierNotFound as error:
                 return generate_http_error_flask(404, error)
             except (KeyNotFound, InvalidMetadata, InvalidValueForKey) as error:
@@ -1552,6 +1561,8 @@ class Meta(ErrorHandlingMethodView):
                     recursive=param_get_bool(parameters, 'recursive', default=False),
                     vo=vo,
                 )
+            except AccessDenied as error:
+                return generate_http_error_flask(403, error)
             except DataIdentifierNotFound as error:
                 return generate_http_error_flask(404, error)
             except (KeyNotFound, InvalidMetadata, InvalidValueForKey) as error:
@@ -1594,6 +1605,8 @@ class Meta(ErrorHandlingMethodView):
             description: "Bad Request – invalid scope_name."
           401:
             description: "Unauthorized – invalid Auth Token."
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to delete the key."
           404:
             description: >
               Not found – the specified DID or `key` does not exist, or no `key` query
@@ -1718,9 +1731,9 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
               (Raised by the generic JSON‑parameter parser before reaching the
               business logic.)
           401:
-            description: |
-              Unauthorized – invalid Auth Token or insufficient privileges to
-              modify at least one DID.
+            description: "Unauthorized – invalid Auth Token."
+          403:
+            description: "Forbidden – the current authenticated user does not have permission to set at least one of the keys of a DID."
           404:
             description: "Not found – at least one DID in the request does not exist."
           409:
@@ -1744,6 +1757,7 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
             (plug‑in permitting).
           * `plugin` chooses the metadata plug‑in; `"ALL"` returns the union of every
             available plug‑in.
+          * With RBAC, the keys the account may not read on a DID are left out.
 
         tags:
           - Data Identifiers
@@ -1915,7 +1929,7 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
         except UnsupportedOperation as err:
             return generate_http_error_flask(409, err)
         except AccessDenied as err:
-            return generate_http_error_flask(401, err)
+            return generate_http_error_flask(403, err)
 
         return "Created", 201
 

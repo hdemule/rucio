@@ -140,9 +140,16 @@ class RolePermission(ErrorHandlingMethodView):
 
     The request body names the permission: its target and its parameters, in the shape the permissions
     are listed with, together with `force`, e.g. {"did_pattern": "data:raw*", "operation": "read"} for a
-    DID permission, or {"rse_expression": "tier=1", "global": 5000} for a limit, -1
+    DID permission, {"did_pattern": "data:raw*", "keys": "quality,datatype", "operations": ["read", "write"]}
+    for a metadata permission, or {"rse_expression": "tier=1", "global": 5000} for a limit, -1
     meaning no cap. Granting a limit which exists already overwrites it. Removing limits takes which
     of the 'local' and 'global' ones to remove, as booleans, both being removed if none is given.
+
+    The `keys` of a metadata permission are a list or a comma-separated string, '*' standing for every key and
+    no keys for none: such a permission only makes the matching DIDs visible, and only takes `["read"]`. Its
+    `operations` may be empty (`---`), which withdraws what the role would otherwise be granted on these keys.
+    Granting a metadata permission which exists already replaces its operations. Removing metadata permissions
+    takes the `did_pattern` and the `keys`, and removes nothing (404) if one of the keys has no permission.
     """
 
     def post(self, role_name: str, permission_type: str):
