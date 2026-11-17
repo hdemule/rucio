@@ -36,6 +36,7 @@ from rucio.core import role as core_role
 from rucio.core.permission import generic
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import DidOperationType, RolePermissionType
+from rucio.tests.common import auth, headers
 
 pytestmark = pytest.mark.noparallel(reason='alters the roles shared by the whole instance')
 
@@ -387,6 +388,12 @@ def test_has_account_active_role(reserved_role, db_session, root_account, activa
         core_role.delete_account_role(root_account, reserved_role, force=True, session=db_session)
 
 
+def test_add_reserved_role_rest(rest_client, auth_token):
+    """ROLE (REST): Adding a reserved role is refused with 403."""
+    response = rest_client.post('/roles/admin', headers=headers(auth(auth_token)), json={})
+    assert response.status_code == 403
+
+
 @pytest.fixture
 def policy_role(db_session):
     """Add a new role for the test, and remove it again afterwards together with its account assignments."""
@@ -445,3 +452,11 @@ def test_clean_expired_account_roles(policy_role, reserved_role, random_account_
         db_session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role.in_([valid_role, reserved_role])))
         db_session.execute(delete(models.Roles).where(models.Roles.role == valid_role))
         db_session.commit()
+
+
+def test_clean_expired_account_roles_route():
+    """ROLE (REST): DELETE /roles/accounts/expired cleans, while a GET there still reaches an account named 'expired'."""
+    from rucio.web.rest.flaskapi.v1.roles import make_doc
+    adapter = make_doc().url_map.bind('localhost')
+    assert adapter.match('/roles/accounts/expired', method='DELETE')[0] == 'roles.expired_account_roles'
+    assert adapter.match('/roles/accounts/expired', method='GET') == ('roles.account_roles', {'account': 'expired'})
