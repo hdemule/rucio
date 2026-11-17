@@ -36,6 +36,16 @@ DEFAULT_VO = 'def'
 ADMIN_ROLE = 'admin'
 RESERVED_ROLES = [ADMIN_ROLE]
 
+# Logged by the server and sent to the client, under `RBAC_WARNING_HEADER`, whenever a role endpoint is called while RBAC is disabled,
+# see `rucio.core.role.is_rbac_enabled`.
+RBAC_DISABLED_WARNING = ("Role-based access control is currently disabled in the current rucio instance. "
+"You can still manage roles but everything will work as in standard Rucio as long as you do not explicitly enable RBAC in the current instance configuration.")
+RBAC_WARNING_HEADER = 'X-Rucio-Warning'
+
+# Stands for the issuer's account in REST paths. It cannot collide with an account name,
+# since '@' is not allowed in those.
+ISSUER_ACCOUNT_ALIAS = '@me'
+
 DEFAULT_ACTIVITY = 'User Subscriptions'
 
 KEY_TYPES = ['ALL', 'COLLECTION', 'FILE', 'DERIVED']
