@@ -51,7 +51,8 @@ RBAC_DELETE_METADATA_KEYS = frozenset({'lifetime', 'expired_at', 'eol_at', 'purg
 
 # RBAC: metadata keys held by Rucio itself: the identity, size, checksums and state of a DID, and its bookkeeping.
 # Setting them would rename a DID, falsify its size (and the account usage computed from it) or its checksums, or
-# change how Rucio handles it, so no role grants it: only root, admins and the owner of the scope may.
+# change how Rucio handles it, so no role grants it: only root, admins and the owner of the scope may. A metadata
+# permission may grant READ on them, never WRITE, see `rucio.core.role`.
 RBAC_PROTECTED_METADATA_KEYS = frozenset({
     'name', 'scope', 'account', 'did_type', 'bytes', 'length', 'events', 'adler32', 'md5', 'guid',
     'availability', 'complete', 'is_open', 'monotonic', 'obsolete', 'suppressed', 'hidden', 'transient',
