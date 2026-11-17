@@ -71,10 +71,14 @@ def add_exception(
     """
 
     internal_account = InternalAccount(account, vo=vo)
-    for did in dids:
-        did['scope'] = InternalScope(did['scope'], vo=vo)
 
     with db_session(DatabaseOperationType.WRITE) as session:
+        # the result tells whether each DID exists, and its type, so the requester must read them
+        for did in dids:
+            auth_result = permission.has_permission(issuer=account, vo=vo, action='get_did', kwargs={'scope': did['scope'], 'name': did['name']}, session=session)
+            if not auth_result.allowed:
+                raise exception.AccessDenied('Account %s cannot request a lifetime exception for data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (account, did['scope'], did['name']))
+            did['scope'] = InternalScope(did['scope'], vo=vo)
         exceptions = lifetime_exception.add_exception(dids=dids, account=internal_account, pattern=pattern, comments=comments, expires_at=expires_at, session=session)
 
     for key in exceptions:
