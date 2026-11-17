@@ -12,23 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import rucio.core.scope
-from rucio.common.constants import RseAttr
+from rucio.common.constants import RESERVED_KEYS, RseAttr
+from rucio.common.exception import DataIdentifierNotFound
+from rucio.common.types import InternalAccount, InternalScope
 from rucio.core import role as role_core
 from rucio.core.account import has_account_attribute, list_account_attributes
+from rucio.core.did import get_did, list_content
 from rucio.core.identity import exist_identity_account
 from rucio.core.lifetime_exception import list_exceptions
+from rucio.core.replica import get_did_from_pfns, get_pfn_to_rse
 from rucio.core.rse import list_rse_attributes
 from rucio.core.rse_expression_parser import parse_expression
-from rucio.db.sqla.constants import IdentityType
+from rucio.db.sqla.constants import DidOperationType, DIDType, IdentityType
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
 
     from sqlalchemy.orm import Session
-
-    from rucio.common.types import InternalAccount
 
 
 def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any], session: "Session") -> bool:
@@ -126,8 +129,33 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
             'add_opendata_did': perm_default,
             'update_opendata_did': perm_default,
             'delete_opendata_did': perm_default,
+            'delete_metadata': perm_delete_metadata,
             'list_account_roles': perm_list_account_roles,
-            'list_role_permissions': perm_list_role_permissions}
+            'list_role_permissions': perm_list_role_permissions,
+            'list_dids': perm_read_data,
+            'list_parent_dids': perm_read_data,
+            'get_did': perm_read_data,
+            'get_metadata': perm_read_data,
+            'get_metadata_bulk': perm_read_data,
+            'list_content': perm_read_data,
+            'list_content_history': perm_read_data,
+            'list_files': perm_read_data,
+            'scope_list': perm_read_data,
+            'list_archive_content': perm_read_data,
+            'get_users_following_did': perm_read_data,
+            'add_did_to_followed': perm_read_data,
+            'list_replication_rule_history': perm_read_data,
+            'list_replication_rule_full_history': perm_read_data,
+            'get_replication_rule': perm_read_data,
+            'examine_replication_rule': perm_read_data,
+            'get_dataset_locks': perm_read_data,
+            'get_dataset_locks_bulk': perm_read_data,
+            'list_associated_replication_rules_for_file': perm_read_data,
+            'list_replicas': perm_read_data,
+            'list_dataset_replicas': perm_read_data,
+            'list_dataset_replicas_bulk': perm_read_data,
+            'list_dataset_replicas_vp': perm_read_data,
+            'get_replica_locks_for_rule_id': perm_read_data}
 
     return perm.get(action, perm_default)(issuer=issuer, kwargs=kwargs, session=session)
 
@@ -157,6 +185,200 @@ def _is_admin(issuer: "InternalAccount", session: "Session") -> bool:
     """
     return has_account_attribute(account=issuer, key='admin', session=session)\
         or (_use_roles() and role_core.has_account_admin_role(account=issuer, session=session))
+
+
+def _did_exists(scope: "InternalScope", name: str, session: "Session") -> bool:
+    """
+    Checks if a DID exists.
+
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param session: The DB session to use
+    :returns: True if the DID exists, otherwise False
+    """
+    try:
+        get_did(scope=scope, name=name, session=session)
+        return True
+    except DataIdentifierNotFound:
+        return False
+
+
+def _internal_dids(issuer: "InternalAccount", dids: "Iterable[Mapping[str, Any]]") -> "list[tuple[InternalScope, str]]":
+    """
+    The distinct DIDs given as dictionaries with a 'scope' and a 'name', as (scope, name), external scopes being resolved in the VO of the issuer.
+
+    :param issuer: Account identifier which issues the command.
+    :param dids: The DIDs.
+    :returns: The DIDs, in the order they are first given.
+    """
+    internal = {}
+    for did in dids:
+        scope = did['scope'] if isinstance(did['scope'], InternalScope) else InternalScope(did['scope'], vo=issuer.vo)
+        internal.setdefault((scope, did['name']), None)
+    return list(internal)
+
+
+# ----- Ownership -----
+
+
+def _is_did_owner(issuer: "InternalAccount", scope: "InternalScope", name: str, session: "Session") -> bool:
+    """
+    Tells whether an account owns an existing DID: it is the account of the DID. Owning a DID grants nothing by itself,
+    see :func:`_can_delete_as_owner`.
+
+    :param issuer: Account identifier which issues the command.
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param session: The DB session to use.
+    :returns: True if the account owns the DID, otherwise False (also if it does not exist)
+    """
+    try:
+        return get_did(scope=scope, name=name, session=session)['account'] == issuer
+    except DataIdentifierNotFound:
+        return False
+
+
+def _can_delete_as_owner(issuer: "InternalAccount", scope: "InternalScope", name: str, session: "Session",
+                         did_access: "Optional[role_core.DidAccess]" = None) -> bool:
+    """
+    Tells whether RBAC grants an account DELETE on an existing DID as its owner (see :func:`_is_did_owner`): ownership
+    and WRITE on the DID make DELETE on it, see :func:`rucio.core.role.has_did_permission`. WRITE alone only adds DIDs
+    and content, so that an account may still alter and remove the DIDs it created. Withdrawing WRITE on a DID from its
+    owner also withdraws DELETE. WRITE includes READ, so ownership adds nothing to reading a DID.
+
+    The owner of the scope is not checked here: like in standard Rucio, the permission functions check it on their own,
+    see :func:`rucio.core.scope.is_scope_owner`.
+
+    :param issuer: Account identifier which issues the command.
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param session: The DB session to use.
+    :param did_access: The DID permissions of the roles of the account, if read already, e.g. to filter a listing.
+    :returns: True if the account owns the DID with WRITE on it, otherwise False (also if it does not exist)
+    """
+    writes = did_access.grants(scope, name, DidOperationType.WRITE) if did_access is not None\
+        else role_core.has_did_permission(issuer, scope, name, DidOperationType.WRITE, session=session)
+    return writes and _is_did_owner(issuer, scope, name, session)
+
+
+def _new_did_owner(issuer: "InternalAccount", kwargs: dict[str, Any]) -> "InternalAccount":
+    """
+    The account a DID created with the permission arguments of `add_did` or of a DID of `add_dids` will belong to: its
+    'account', the issuer if none is given.
+
+    The gateway turns the 'account' of `add_did` into an InternalAccount even when none is given (see
+    :func:`rucio.gateway.permission.has_permission`): an account without external name then stands for no account. The
+    'account' of a DID of `add_dids` is left as given, an external name or nothing.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: The permission arguments of the new DID.
+    :returns: The future owner of the DID.
+    """
+    owner = kwargs.get('account')
+    if isinstance(owner, InternalAccount):
+        return issuer if owner.external is None else owner
+    return InternalAccount(owner, vo=issuer.vo) if owner else issuer
+
+
+# ----- RBAC helpers -----
+
+# The roles alone are checked with `rucio.core.role.has_did_permission`: the callers check whether RBAC is enabled
+# (see `_use_roles`), and owning the scope or the DID, on their own.
+
+
+def _rbac_can_alter_metadata(issuer: "InternalAccount", scope: "InternalScope", name: str, keys: "Iterable[str]", session: "Session") -> bool:
+    """
+    Checks if RBAC grants an account to set metadata keys on an existing DID, the owner of its scope being checked
+    before by the permission functions: it alters the DID, which requires DELETE on it, or to delete it as its owner
+    (see :func:`_can_delete_as_owner`).
+    A recursive update, which rewrites the metadata of the whole content, is granted by no role: the permission
+    functions refuse it before calling this check.
+
+    :param issuer: Account identifier which issues the command.
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param keys: The metadata keys to set.
+    :param session: The DB session to use
+    :returns: True if RBAC grants it, otherwise False
+    """
+    return role_core.has_did_permission(issuer, scope, name, DidOperationType.DELETE, session=session)\
+        or _can_delete_as_owner(issuer, scope, name, session)
+
+
+def _rbac_can_attach_dids(issuer: "InternalAccount", dids: "Iterable[Mapping[str, Any]]", registered: bool, session: "Session") -> bool:
+    """
+    Checks if RBAC grants an account to attach DIDs to a collection, whoever may write on the collection itself:
+    reading each of them, owning its scope or READ on it. When they are registered
+    on an RSE along with the attachment (`registered`), a file which does not exist yet is created, which requires
+    owning its scope or WRITE on it instead.
+
+    :param issuer: Account identifier which issues the command.
+    :param dids: The attached DIDs, each with its 'scope' and 'name'.
+    :param registered: Whether the attached files are registered on an RSE.
+    :param session: The DB session to use
+    :returns: True if RBAC grants every DID, otherwise False
+    """
+    for scope, name in _internal_dids(issuer, dids):
+        if rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session):
+            continue
+        if registered and not _did_exists(scope, name, session):
+            if not role_core.has_did_permission(issuer, scope, name, DidOperationType.WRITE, session=session):
+                return False
+        elif not role_core.has_did_permission(issuer, scope, name, DidOperationType.READ, session=session):
+            return False
+    return True
+
+
+def _rbac_can_replicate_dids(issuer: "InternalAccount", dids: "Iterable[Mapping[str, Any]]", session: "Session") -> bool:
+    """
+    Checks if RBAC grants an account to replicate DIDs with a rule: a rule copies the whole content of a collection,
+    recursively, so the account must read every DID it copies: each DID given and, if it exists, all its content,
+    containers, datasets and files. A DID is read by owning its scope or with READ on it: owning the DID adds nothing,
+    see :func:`_can_delete_as_owner`.
+
+    The content is the one the DIDs have when this is checked: what is attached later to a collection the rule is on
+    is replicated by the rule without being checked.
+
+    :param issuer: Account identifier which issues the command.
+    :param dids: The DIDs, each with its 'scope' and 'name'.
+    :param session: The DB session to use
+    :returns: True if RBAC grants every DID and all their content, otherwise False
+    """
+    # The DID permissions of the roles are read once, not once per DID of the content.
+    did_access = role_core.DidAccess(issuer, session=session)
+    owned_scopes: dict["InternalScope", bool] = {}
+
+    def reads(scope: "InternalScope", name: str) -> bool:
+        if scope not in owned_scopes:
+            owned_scopes[scope] = rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+        return owned_scopes[scope] or did_access.grants(scope, name, DidOperationType.READ)
+
+    # The type of the DIDs given is not known: each is listed, a file having no content.
+    to_list = _internal_dids(issuer, dids)
+    if not all(reads(scope, name) for scope, name in to_list):
+        return False
+    seen = set(to_list)
+    while to_list:
+        scope, name = to_list.pop()
+        try:
+            children = list(list_content(scope=scope, name=name, session=session))
+        except DataIdentifierNotFound:
+            # A DID which does not exist yet has no content; the rule itself fails on it later.
+            continue
+        for child in children:
+            did = (child['scope'], child['name'])
+            if did in seen:
+                continue
+            seen.add(did)
+            if not reads(*did):
+                return False
+            # Only the collections have content: listing a file would only query the database for nothing.
+            if child['type'] in (DIDType.CONTAINER, DIDType.DATASET):
+                to_list.append(did)
+    return True
+
+
+# ----- Permission functions -----
 
 
 def perm_default(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -205,7 +427,9 @@ def perm_add_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "S
     :returns: True if account is allowed, otherwise False
     """
     if kwargs['account'] == issuer and not kwargs['locked']:
-        return True
+        # With RBAC, a rule copies data, so it requires to read every DID it is on and all their content, see :func:`_rbac_can_replicate_dids`.
+        return not _use_roles() or _is_root(issuer) or _is_admin(issuer, session)\
+            or _rbac_can_replicate_dids(issuer, kwargs['dids'], session)
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
     return False
@@ -417,16 +641,40 @@ def perm_add_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
+    if _is_root(issuer) or _is_admin(issuer, session):
+        return True
     # Check the accounts of the issued rules
-    if not _is_root(issuer) and not _is_admin(issuer, session):
-        for rule in kwargs.get('rules', []):
-            if rule['account'] != issuer:
-                return False
+    for rule in kwargs.get('rules', []):
+        if rule['account'] != issuer:
+            return False
 
-    return _is_root(issuer)\
-        or _is_admin(issuer, session)\
-        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
-        or kwargs['scope'].external == 'mock'
+    scope = kwargs['scope']
+    owns_scope = rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+    if not _use_roles():
+        return owns_scope or scope.external == 'mock'
+
+    name = kwargs.get('name')
+    if not owns_scope:
+        if scope.external != 'mock':
+            # Outside the scope 'mock', which every account may create DIDs in, WRITE on a DID grants to create it for
+            # the account itself, which will then delete it as its owner (see :func:`_can_delete_as_owner`). Creating
+            # DIDs for other accounts is left to root, admins and the owner of the scope, as in standard Rucio.
+            if _new_did_owner(issuer, kwargs) != issuer or not role_core.has_did_permission(issuer, scope, name, DidOperationType.WRITE, session=session):
+                return False
+            # Its metadata is set by its future owner, which may set the keys it could set on it once created: not those
+            # Rucio reserves, which the gateway refuses on an existing DID but not on creation. A role grants WRITE on DID
+            # patterns, which e.g. 'name' would let the new DID leave.
+            if set(kwargs.get('meta') or {}) & set(RESERVED_KEYS):
+                return False
+        # Its rules require to read it, like any rule, see :func:`perm_add_rule`: WRITE on it includes READ.
+        if kwargs.get('rules') and not role_core.has_did_permission(issuer, scope, name, DidOperationType.READ, session=session):
+            return False
+
+    # Its content must be attachable, whatever lets the account create it, see :func:`_rbac_can_attach_dids`. Its rules
+    # copy that content, recursively, which must then be readable too, see :func:`_rbac_can_replicate_dids`.
+    content = kwargs.get('dids') or []
+    return _rbac_can_attach_dids(issuer, content, bool(kwargs.get('rse_id')), session)\
+        and (not kwargs.get('rules') or _rbac_can_replicate_dids(issuer, content, session))
 
 
 def perm_add_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -451,10 +699,14 @@ def perm_attach_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer)\
-        or _is_admin(issuer, session)\
-        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
-        or kwargs['scope'].external == 'mock'
+    if _is_root(issuer) or _is_admin(issuer, session):
+        return True
+    allowed = rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+        or kwargs['scope'].external == 'mock'\
+        or (_use_roles() and role_core.has_did_permission(issuer, kwargs['scope'], kwargs['name'], DidOperationType.WRITE, session=session))
+    # With RBAC, the attached DIDs are checked whatever lets the account write into the collection.
+    attachment = kwargs['attachment']
+    return allowed and (not _use_roles() or _rbac_can_attach_dids(issuer, attachment.get('dids', []), bool(attachment.get('rse_id')), session))
 
 
 def perm_attach_dids_to_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -468,14 +720,13 @@ def perm_attach_dids_to_dids(issuer: "InternalAccount", kwargs: dict[str, Any], 
     """
     if _is_root(issuer) or _is_admin(issuer, session):
         return True
-    else:
-        attachments = kwargs['attachments']
-        scopes = [did['scope'] for did in attachments]
-        scopes = list(set(scopes))
-        for scope in scopes:
-            if not rucio.core.scope.is_scope_owner(scope, issuer, session=session):
-                return False
-        return True
+    for attachment in kwargs['attachments']:
+        allowed = rucio.core.scope.is_scope_owner(attachment['scope'], issuer, session=session)\
+            or (_use_roles() and role_core.has_did_permission(issuer, attachment['scope'], attachment['name'], DidOperationType.WRITE, session=session))
+        # With RBAC, the attached DIDs are checked whatever lets the account write into the collection.
+        if not allowed or (_use_roles() and not _rbac_can_attach_dids(issuer, attachment.get('dids', []), bool(attachment.get('rse_id')), session)):
+            return False
+    return True
 
 
 def perm_create_did_sample(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -490,7 +741,8 @@ def perm_create_did_sample(issuer: "InternalAccount", kwargs: dict[str, Any], se
     return _is_root(issuer)\
         or _is_admin(issuer, session)\
         or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
-        or kwargs['scope'].external == 'mock'
+        or kwargs['scope'].external == 'mock'\
+        or (_use_roles() and role_core.has_did_permission(issuer, kwargs['scope'], kwargs.get('name'), DidOperationType.WRITE, session=session))
 
 
 def perm_del_rule(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -587,7 +839,16 @@ def perm_detach_dids(issuer: "InternalAccount", kwargs: dict[str, Any], session:
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return perm_attach_dids(issuer, kwargs, session=session)
+    # With RBAC, unlike attaching, detaching removes content: DELETE on the collection, or deleting it as its owner (see
+    # :func:`_can_delete_as_owner`), removes any content, WRITE on it only the DIDs the account may delete as their owner.
+    return _is_root(issuer)\
+        or _is_admin(issuer, session)\
+        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+        or kwargs['scope'].external == 'mock'\
+        or (_use_roles() and (_can_delete_as_owner(issuer, kwargs['scope'], kwargs['name'], session)
+                              or role_core.has_did_permission(issuer, kwargs['scope'], kwargs['name'], DidOperationType.DELETE, session=session)
+                              or (role_core.has_did_permission(issuer, kwargs['scope'], kwargs['name'], DidOperationType.WRITE, session=session)
+                                  and all(_can_delete_as_owner(issuer, scope, name, session) for scope, name in _internal_dids(issuer, kwargs['dids'])))))
 
 
 def perm_set_metadata_bulk(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -599,7 +860,8 @@ def perm_set_metadata_bulk(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+        or (_use_roles() and not kwargs.get('recursive') and _rbac_can_alter_metadata(issuer, kwargs['scope'], kwargs['name'], kwargs['meta'], session))
 
 
 def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -611,7 +873,8 @@ def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
+    return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+        or (_use_roles() and not kwargs.get('recursive') and _rbac_can_alter_metadata(issuer, kwargs['scope'], kwargs['name'], [kwargs['key']], session))
 
 
 def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -627,6 +890,8 @@ def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: 
         if not _is_root(issuer) and not _is_admin(issuer, session):
             return False
 
+    # Closing a collection cannot be undone but by root/admin, freezes its content for every account and makes it
+    # removable once empty, so no role grants it: it is left to root/admin and to the owner of the scope.
     return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)
 
 
@@ -682,12 +947,54 @@ def perm_declare_suspicious_file_replicas(issuer: "InternalAccount", kwargs: dic
     """
     Checks if an account can declare suspicious file replicas.
 
+    Every account can, unless RBAC is enabled: the declaration acts on the replicas, and its result tells whether each
+    of them exists, so it then requires to read the data of the DID of each replica ('pfns'): owning its scope, or READ
+    on it. A PFN which does not resolve to a DID is refused the same way, so that a
+    hidden DID cannot be told from a missing one. A PFN which matches no RSE tells nothing about a DID, and is left to
+    the declaration to report.
+
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
+    if not _use_roles() or _is_root(issuer) or _is_admin(issuer, session):
+        return True
+    did_access = role_core.DidAccess(issuer, session=session)
+    owned_scopes: dict[InternalScope, bool] = {}
+    for did in _suspicious_replica_dids(issuer, kwargs.get('pfns') or [], session):
+        if did is None:
+            return False
+        scope, name = did
+        if scope not in owned_scopes:
+            owned_scopes[scope] = rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+        if not (owned_scopes[scope] or did_access.grants(scope, name, DidOperationType.READ)):
+            return False
     return True
+
+
+def _suspicious_replica_dids(issuer: "InternalAccount", pfns: "list[Any]", session: "Session") -> "list[Optional[tuple[InternalScope, str]]]":
+    """
+    The DIDs of the replicas declared suspicious, see :func:`perm_declare_suspicious_file_replicas`.
+
+    :param issuer: Account identifier which issues the command.
+    :param pfns: The PFNs, or the replicas as dictionaries with a 'scope', a 'name' and an 'rse_id'.
+    :param session: The DB session to use
+    :returns: The DID of each replica, None for a PFN which matches an RSE but resolves to no DID. A PFN which matches
+              no RSE is left out.
+    """
+    if not pfns:
+        return []
+    if not isinstance(pfns[0], str):
+        return [(r['scope'] if isinstance(r['scope'], InternalScope) else InternalScope(r['scope'], vo=issuer.vo), r['name']) for r in pfns]
+
+    _, pfns_by_rse, _ = get_pfn_to_rse(pfns, vo=issuer.vo, session=session)
+    located = [pfn for rse_pfns in pfns_by_rse.values() for pfn in rse_pfns]
+    resolved: dict[str, dict[str, Any]] = {}
+    if located:
+        for item in get_did_from_pfns(pfns=located, vo=issuer.vo, session=session):
+            resolved.update(item)
+    return [(resolved[pfn]['scope'], resolved[pfn]['name']) if pfn in resolved else None for pfn in located]
 
 
 def perm_add_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -699,12 +1006,26 @@ def perm_add_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return str(kwargs.get('rse', '')).endswith('SCRATCHDISK')\
+    if _is_root(issuer) or _is_admin(issuer, session):
+        return True
+    user_rse = str(kwargs.get('rse', '')).endswith('SCRATCHDISK')\
         or str(kwargs.get('rse', '')).endswith('USERDISK')\
         or str(kwargs.get('rse', '')).endswith('MOCK')\
-        or str(kwargs.get('rse', '')).endswith('LOCALGROUPDISK')\
-        or _is_root(issuer)\
-        or _is_admin(issuer, session)
+        or str(kwargs.get('rse', '')).endswith('LOCALGROUPDISK')
+    if not user_rse or not _use_roles():
+        return user_rse
+    # With RBAC, a replica of an existing file, given in 'dids', only copies data, which requires to read the file: owning
+    # its scope, or READ on it. A file which does not exist yet is created along with its replica, which the
+    # gateway checks as the creation of a DID ('add_dids'). Without the DIDs, READ is required on the 'scopes' of the files.
+    if not kwargs.get('dids'):
+        scopes = {scope if isinstance(scope, InternalScope) else InternalScope(scope, vo=issuer.vo) for scope in kwargs.get('scopes') or []}
+        return all(rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+                   or role_core.has_did_permission(issuer, scope, None, DidOperationType.READ, session=session)
+                   for scope in scopes)
+    return all(not _did_exists(scope, name, session)
+               or rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+               or role_core.has_did_permission(issuer, scope, name, DidOperationType.READ, session=session)
+               for scope, name in _internal_dids(issuer, kwargs['dids']))
 
 
 def perm_skip_availability_check(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -783,12 +1104,16 @@ def perm_get_request_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], s
     """
     Checks if an account can get a request by DID.
 
+    Every account can, unless RBAC is enabled: a transfer request tells where the replica of the DID comes from and
+    goes to, its source and destination URLs included, so it then requires to read the data of the DID like its
+    replicas do, see :func:`perm_read_data`.
+
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return True
+    return perm_read_data(issuer, kwargs, session)
 
 
 def perm_get_request_history_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1165,6 +1490,28 @@ def perm_delete_transfer_limit(issuer: "InternalAccount", kwargs: dict[str, Any]
     return _is_root(issuer) or _is_admin(issuer, session)
 
 
+def perm_delete_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can delete a metadata key of a data identifier.
+
+    Every account can, unless RBAC is enabled.
+
+    With RBAC, it alters the DID: owning its scope, DELETE on it, or deleting it as its owner (see
+    :func:`_can_delete_as_owner`).
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    if not _use_roles() or _is_root(issuer) or _is_admin(issuer, session):
+        return True
+    scope, name = kwargs['scope'], kwargs['name']
+    return rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)\
+        or role_core.has_did_permission(issuer, scope, name, DidOperationType.DELETE, session=session)\
+        or _can_delete_as_owner(issuer, scope, name, session)
+
+
 def perm_list_account_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
     Checks if an account can list the roles assigned to an account. An account can list its own roles.
@@ -1188,3 +1535,131 @@ def perm_list_role_permissions(issuer: "InternalAccount", kwargs: dict[str, Any]
     """
     return _is_root(issuer) or _is_admin(issuer, session)\
         or role_core.has_account_active_role(account=issuer, role=kwargs['role'], session=session)
+
+
+def perm_read_data(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can read the data of a scope: the replicas of its DIDs, with their PFNs, which allow
+    to download them. Every account can read every scope, unless RBAC is enabled: it then requires to read the DID
+    the action names ('name'): owning its scope, or READ on it. An action naming no
+    DID (a listing of the scope) only requires to own the scope or READ on some DIDs of the scope, see
+    :func:`rucio.core.role.has_any_scope_prefix_access`: the gateway then filters what it returns per DID, see
+    :func:`did_filter`.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    if not _use_roles() or _is_root(issuer) or _is_admin(issuer, session):
+        return True
+    scope, name = kwargs['scope'], kwargs.get('name')
+    if rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session):
+        return True
+    if name:
+        return role_core.has_did_permission(issuer, scope, name, DidOperationType.READ, session=session)
+    return role_core.has_any_scope_prefix_access(account=issuer, scope=scope, operation=DidOperationType.READ, session=session)
+
+
+# ----- Listing filters -----
+#
+# The gateway filters a listing item by item, with a callable built once for the listing, see
+# `rucio.core.permission.did_filter`: deciding every item through `has_permission` would query the database for each
+# of them. A callable decides an item as the permission functions decide it for a single DID or scope (root, admins,
+# the owner of the scope, the roles, see :func:`perm_read_data`), from the roles of the account
+# read once, see :class:`rucio.core.role.DidAccess`.
+
+
+def is_listing_filtered(issuer: "InternalAccount", action: str, session: "Session") -> bool:
+    """
+    Checks if a listing is filtered for an account: only with RBAC. A policy package overriding the listing filters
+    may decide it per listing, from its filter.
+
+    :param issuer: Account identifier which issues the command.
+    :param action: The filter of the listing, e.g. 'list_dids'.
+    :param session: The DB session to use
+    :returns: True if the listing is filtered, otherwise False
+    """
+    return _use_roles()
+
+
+def scope_filter(issuer: "InternalAccount", action: str, session: "Session", operation: DidOperationType = DidOperationType.READ,
+                 any_did: bool = False) -> "Callable[[Optional[InternalScope]], bool]":
+    """
+    Builds a callable telling whether an account may perform an operation on a scope, to filter a listing.
+
+    Root, admins and the owner of the scope may. Otherwise a role must grant the operation on the whole scope, by a
+    pattern with the '*' name part which no name pattern of the role withdraws from some of its DIDs, see
+    :meth:`rucio.core.role.DidAccess.role_grants`: this is meant for the items standing for the whole content of a
+    scope, e.g. counts. With `any_did`, meant for listing the scopes themselves, a grant on some DIDs of the scope is
+    enough, as :func:`perm_read_data` decides it for a scope.
+
+    :param issuer: Account identifier which issues the command.
+    :param action: The filter of the listing, see :func:`is_listing_filtered`.
+    :param session: The DB session to use
+    :param operation: The operation to check.
+    :param any_did: Grant a scope if the operation is granted on some of its DIDs.
+    :returns: A callable taking a scope and returning True if the account may access it: every scope if the listing is
+              not filtered, otherwise never a scope that is None or not an InternalScope.
+    """
+    if not is_listing_filtered(issuer, action, session):
+        return lambda scope: True
+
+    privileged = _is_root(issuer) or _is_admin(issuer, session)
+    did_access = role_core.DidAccess(issuer, session=session)
+    owned_scopes: dict[InternalScope, bool] = {}
+
+    def _can_access(scope: "Optional[InternalScope]") -> bool:
+        if not isinstance(scope, InternalScope):
+            return False
+        if privileged or did_access.grants(scope, None, operation):
+            return True
+        if scope not in owned_scopes:
+            owned_scopes[scope] = rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+        if owned_scopes[scope]:
+            return True
+        return any_did and did_access.grants_some_did(scope, operation)
+
+    return _can_access
+
+
+def did_filter(issuer: "InternalAccount", action: str, session: "Session",
+               operation: DidOperationType = DidOperationType.READ) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
+    """
+    Builds a callable telling whether an account may perform an operation on a DID, to filter a listing.
+
+    Root, admins and the owner of the scope may, and so may an account a role grants the operation on the whole scope
+    (see :func:`scope_filter`), or on the DID itself (see :func:`rucio.core.role.has_did_permission`), and, for DELETE, an
+    account deleting the DID as its owner (see :func:`_can_delete_as_owner`). The DIDs are decided one by one, so that a
+    long listing is not kept in memory.
+
+    :param issuer: Account identifier which issues the command.
+    :param action: The filter of the listing, see :func:`is_listing_filtered`.
+    :param session: The DB session to use
+    :param operation: The operation to check.
+    :returns: A callable taking a scope and a name, returning True if the account may access the DID: every DID if the
+              listing is not filtered, otherwise never one whose scope is None or not an InternalScope, nor whose name
+              is None unless the whole scope is granted.
+    """
+    if not is_listing_filtered(issuer, action, session):
+        return lambda scope, name: True
+
+    privileged = _is_root(issuer) or _is_admin(issuer, session)
+    did_access = role_core.DidAccess(issuer, session=session)
+    owned_scopes: dict[InternalScope, bool] = {}
+
+    def _can_access(scope: "Optional[InternalScope]", name: Optional[str]) -> bool:
+        if not isinstance(scope, InternalScope):
+            return False
+        if privileged or did_access.grants(scope, None, operation):
+            return True
+        if scope not in owned_scopes:
+            owned_scopes[scope] = rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
+        if owned_scopes[scope]:
+            return True
+        if name is None:
+            return False
+        return did_access.grants(scope, name, operation)\
+            or (operation == DidOperationType.DELETE and _can_delete_as_owner(issuer, scope, name, session, did_access=did_access))
+
+    return _can_access
