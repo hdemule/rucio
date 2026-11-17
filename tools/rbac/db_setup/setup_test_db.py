@@ -1,0 +1,1060 @@
+#!/usr/bin/env python3
+# Copyright European Organization for Nuclear Research (CERN) since 2012
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Check, and optionally rebuild from scratch, everything the RBAC tests rely on.
+
+`tests/test_rbac_restapi.py` assumes a dev environment provisioned with a set of accounts, scopes,
+files, rules, transfer requests and roles (see the assumptions at the top of that file). This
+script runs inside the dev `rucio` container:
+
+    python tools/rbac/db_setup/setup_test_db.py             # dry run: report what is present and what is missing
+    python tools/rbac/db_setup/setup_test_db.py --reset     # DROP THE WHOLE DATABASE, then recreate everything
+    python tools/rbac/db_setup/setup_test_db.py --dev-rses  # only add what is missing of the dev RSEs, see below
+
+--reset first runs a preflight check of everything it needs (policy package, source files,
+alembic head, ...) and stops before touching the database if any of it is missing. It then asks
+for confirmation (skip it with --yes), purges the database schema, rebuilds it like
+`tools/run_tests.sh -ir` does (reset_database.py -b, bootstrap_tests.py, sync_rses.py,
+sync_meta.py) and provisions the RBAC test data on top. It ends by running the dry-run check
+again, and exits with a non-zero status if anything is still missing.
+
+On top of what the tests need, the dev environment gets the RSEs RSE1 to RSE3 and RSE_USERDISK, to
+try out uploads and the limits of roles by hand. They are POSIX RSEs within the `rucio` container.
+RSE1 to RSE3 are tagged with `dev_rse=True` and covered by the limits of 'user' (held by alice),
+RSE_USERDISK by an account limit of alice (see `DEV_RSE_ROLE_LIMITS` and `DEV_RSE_ACCOUNT_LIMITS`).
+
+The policy package only lets a non-admin account register replicas on an RSE whose name ends with
+one of its user suffixes (e.g. USERDISK), which RSE1 to RSE3 do not. RSE_USERDISK does: alice
+uploads there herself, as a temporary deposit, then adds rules to get the data onto RSE1 to RSE3,
+which count against her limits there. The upload registers the replica and marks it available once
+written, both being writes that WRITE on the DID grants, e.g.:
+
+    export ALICE=/opt/rucio/etc/rucio-alice.cfg
+    RUCIO_CONFIG=$ALICE rucio upload --rse RSE_USERDISK --scope atlas --lifetime 86400 /tmp/myfile
+    RUCIO_CONFIG=$ALICE rucio rule add atlas:myfile --copies 1 --rses RSE1
+    rucio-abacus-account --run-once    # no daemon runs in the dev environment, this applies the new usage
+    RUCIO_CONFIG=$ALICE rucio role account list --me --detail
+
+No transfer daemon runs in the dev environment either, so the rule on RSE1 stays REPLICATING, the
+file never being copied there: its locks count against the limits of alice all the same.
+
+The roles, see `ROLES` (their names and descriptions come from the policy package):
+
+    user       alice        rw- on atlas:*, r-- on archive:*, limits on the dev RSEs, and metadata keys of physics:*
+    moderator  carol        r-- on physics:*, and curates the metadata of physics:*
+    superuser  jdoe, panda  r-- on *:*
+
+The data of the dev environment, generated and uploaded to MOCK-POSIX by the script, owned by root, each dataset
+protected by a rule of root on the RSE, and every DID carrying metadata (see `DEMO_FILES` and `DEMO_COLLECTIONS`):
+
+    physics:data26_13TeV                                  container: one run of real data
+      physics:data26_13TeV.00456789.physics_Main.RAW      dataset: raw.00456789._0001.data ... _0004.data
+      physics:data26_13TeV.00456789.calibration.NTUP      dataset: calib.00456789._0001.data, _0002.data
+    physics:mc26_13TeV                                    container: a simulation
+      physics:mc26_13TeV.601229.ttbar.simul.HITS          dataset: sim.601229._000001.HITS.root ... _000003
+    atlas:mc23_13TeV.ttbar.AOD                            dataset: AOD.ttbar._000001.pool.root ... _000003
+    archive:data18_13TeV.00350000.physics_Main.RAW        dataset: raw.00350000._0001.data, _0002.data
+
+alice reads and writes atlas (attaching, creating DIDs, adding rules) and reads archive, but does not own
+them. In physics, she only holds metadata permissions, carol a DID permission and metadata permissions, so
+what they see of the files and may change only comes from their roles:
+
+                                       project  datatype  campaign  version  stream_name  provenance  data
+    alice  raw.00456789.*              r        r         rw        rw       -            -           no
+           calib.00456789._0001.data   r        -         -         -        -            -           no
+           calib.00456789._0002.data   r        r         -         -        -            -           no
+           sim.*, the collections      r        r         -         -        -            -           no
+    carol  raw.00456789.*              r        rw        rw        rw       rw           -           yes
+           everything else             r        rw        rw        rw       rw           rw          yes
+    bob    physics                     nothing is visible
+
+alice only holds metadata permissions on physics: they make its DIDs visible, with the keys she may read, but
+not their data, so listing their replicas or downloading them is refused. carol reads the DIDs through her DID
+permission, which shows every key, the metadata permissions of her role overriding it on the keys they name:
+'*' lets her write every key Rucio does not hold itself (not bytes, checksums, ...), project is only read, and
+provenance is withdrawn on the raw files. carol has no client configuration of her own, give her credentials on
+the command line, e.g.:
+
+    alias alice='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio'
+    alias carol='RUCIO_CONFIG=/opt/rucio/etc/rucio-alice.cfg rucio --account carol -S userpass -u carol --password secret'
+    rucio role permission list user
+    alice did list 'physics:*'                                              # the containers and datasets
+    alice did content list physics:data26_13TeV.00456789.physics_Main.RAW
+    alice did metadata list physics:raw.00456789._0001.data physics:calib.00456789._0001.data
+    alice did metadata set physics:raw.00456789._0001.data --key campaign --value 2026C    # allowed
+    alice did metadata set physics:sim.601229._000001.HITS.root --key campaign --value x  # refused: read only there
+    alice did list 'physics:*' --filter 'type=file,campaign=2026A'          # calib.*._0001 never: campaign hidden there
+    alice replica list file physics:raw.00456789._0001.data                 # refused: no access to the data
+    alice download physics:raw.00456789._0001.data                          # refused as well
+    carol did metadata list physics:raw.00456789._0001.data                 # every key but provenance
+    carol did metadata set physics:raw.00456789._0001.data --key project --value other     # refused: read only
+    carol download physics:raw.00456789._0001.data                          # allowed: she reads the data
+    alice did content add --to-did archive:data18_13TeV.00350000.physics_Main.RAW atlas:AOD.ttbar._000001.pool.root  # refused: only reads archive
+    alice rule add atlas:mc23_13TeV.ttbar.AOD --copies 1 --rses RSE1        # allowed, counts against her limits
+"""
+
+import argparse
+import configparser
+import filecmp
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Optional
+from uuid import uuid4
+
+# the root of the repository, this script being in tools/rbac/db_setup
+BASE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.append(BASE_PATH)
+os.chdir(BASE_PATH)
+
+from sqlalchemy import Enum, inspect, select, text  # noqa: E402
+
+from rucio.alembicrevision import ALEMBIC_REVISION  # noqa: E402
+from rucio.common.config import config_get  # noqa: E402
+from rucio.common.constants import DEFAULT_VO, ROLE_QUOTA_NOCAP  # noqa: E402
+from rucio.common.exception import RucioException  # noqa: E402
+from rucio.common.types import InternalAccount, InternalScope  # noqa: E402
+from rucio.db.sqla import models  # noqa: E402
+from rucio.db.sqla.constants import AccountType, DatabaseOperationType, DidOperationType, DIDType, IdentityType, ReplicaState, RequestState, RequestType, RolePermissionType  # noqa: E402
+from rucio.db.sqla.session import DEFAULT_SCHEMA_NAME, db_session, get_engine  # noqa: E402
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+POLICY_PACKAGE = 'rbac_rucio_policy_package'
+POLICY_PACKAGE_SOURCE = os.path.join(BASE_PATH, 'policy-packages', POLICY_PACKAGE)
+
+RSE = 'MOCK-POSIX'
+PASSWORD = 'secret'
+
+# account -> (type, email, userpass identity); the root account and its identity come from the bootstrap
+ACCOUNTS = {
+    'root': (AccountType.SERVICE, None, config_get('bootstrap', 'userpass_identity', raise_exception=False, default='ddmlab')),
+    'alice': (AccountType.USER, 'alice@email.com', 'alice'),
+    'bob': (AccountType.USER, 'bob@email.com', 'bob'),
+    'carol': (AccountType.USER, 'carol@email.com', 'carol'),
+}
+# scope -> owner; bob and carol own no scope of their own
+SCOPES = {'alice': 'alice', 'root': 'root', 'atlas': 'root', 'physics': 'root', 'archive': 'root'}
+# (scope, name) -> local file uploaded to the RSE by root, which also creates a rule on the RSE
+FILES = {
+    ('alice', 'file1.png'): 'file1.png',
+    ('alice', 'file2.png'): 'file2.png',
+    ('alice', 'file3.png'): 'file3.png',
+    ('root', 'file1.png'): 'file1.png',
+}
+# (scope, name) -> (owner, content)
+DATASETS = {
+    ('alice', 'alice_ds'): ('alice', [('alice', 'file1.png'), ('alice', 'file2.png'), ('alice', 'file3.png')]),
+    ('alice', 'alice_ds2'): ('alice', [('alice', 'file2.png')]),
+}
+# the DIDs whose rule `_get_rule_id` looks up, the account name being used as the scope
+RULE_DIDS = [('alice', 'file1.png'), ('root', 'file1.png')]
+# the DID with a transfer request, and a past one in the history, towards the RSE
+REQUEST_DID = ('alice', 'file1.png')
+# The data of the dev environment, see the module docstring: files generated with some content and uploaded to the RSE
+# by root, then gathered into datasets and containers, every DID carrying metadata so that what each role shows of it
+# can be compared. (scope, name) -> metadata of each file, its size in kB under 'kB'.
+_RUN = {'project': 'data26_13TeV', 'run_number': 456789, 'version': 'v1'}
+_SIM = {'project': 'mc26_13TeV', 'run_number': 601229, 'datatype': 'HITS', 'stream_name': 'simulation', 'campaign': 'MC26a',
+        'version': 'v3', 'provenance': 'MC', 'prod_step': 'simul'}
+DEMO_FILES = {
+    **{('physics', 'raw.00456789._%04d.data' % index): dict(_RUN, datatype='RAW', stream_name='physics_Main', campaign='2026A' if index <= 2 else '2026B',
+                                                            provenance='T0', kB=40 + 7 * index) for index in range(1, 5)},
+    **{('physics', 'calib.00456789._%04d.data' % index): dict(_RUN, datatype='NTUP_TRIG', stream_name='calibration_LArCells', campaign='2026A',
+                                                              provenance='CA', kB=12 + 3 * index) for index in range(1, 3)},
+    **{('physics', 'sim.601229._%06d.HITS.root' % index): dict(_SIM, kB=25 + 5 * index) for index in range(1, 4)},
+    **{('atlas', 'AOD.ttbar._%06d.pool.root' % index): {'project': 'mc23_13TeV', 'datatype': 'AOD', 'campaign': 'MC23a', 'version': 'v2',
+                                                        'prod_step': 'recon', 'kB': 18 + 4 * index} for index in range(1, 4)},
+    **{('archive', 'raw.00350000._%04d.data' % index): {'project': 'data18_13TeV', 'datatype': 'RAW', 'run_number': 350000, 'stream_name': 'physics_Main',
+                                                       'campaign': '2018', 'version': 'v1', 'provenance': 'T0', 'kB': 30 + index} for index in range(1, 3)},
+}
+
+
+def _content(scope: str, prefix: str) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted(did for did in DEMO_FILES if did[0] == scope and did[1].startswith(prefix)))
+
+
+# (scope, name) -> (type, content, metadata), the datasets before the containers holding them
+DEMO_COLLECTIONS = {
+    ('physics', 'data26_13TeV.00456789.physics_Main.RAW'): (DIDType.DATASET, _content('physics', 'raw.'), dict(_RUN, datatype='RAW', stream_name='physics_Main')),
+    ('physics', 'data26_13TeV.00456789.calibration.NTUP'): (DIDType.DATASET, _content('physics', 'calib.'), dict(_RUN, datatype='NTUP_TRIG', stream_name='calibration_LArCells')),
+    ('physics', 'mc26_13TeV.601229.ttbar.simul.HITS'): (DIDType.DATASET, _content('physics', 'sim.'), {key: _SIM[key] for key in ('project', 'run_number', 'datatype', 'campaign')}),
+    ('atlas', 'mc23_13TeV.ttbar.AOD'): (DIDType.DATASET, _content('atlas', 'AOD.'), {'project': 'mc23_13TeV', 'datatype': 'AOD', 'campaign': 'MC23a'}),
+    ('archive', 'data18_13TeV.00350000.physics_Main.RAW'): (DIDType.DATASET, _content('archive', 'raw.'), {'project': 'data18_13TeV', 'datatype': 'RAW'}),
+    ('physics', 'data26_13TeV'): (DIDType.CONTAINER, (('physics', 'data26_13TeV.00456789.calibration.NTUP'), ('physics', 'data26_13TeV.00456789.physics_Main.RAW')),
+                                  {'project': 'data26_13TeV'}),
+    ('physics', 'mc26_13TeV'): (DIDType.CONTAINER, (('physics', 'mc26_13TeV.601229.ttbar.simul.HITS'),), {'project': 'mc26_13TeV'}),
+}
+
+
+@dataclass(frozen=True)
+class RoleSetup:
+    # (operation, DID pattern) of the DID permissions
+    did: frozenset[tuple[str, str]]
+    # (DID pattern, operations, keys) of the metadata permissions: no keys for the one on no key, ('*',) for every key
+    metadata: frozenset[tuple[str, tuple[str, ...], tuple[str, ...]]]
+    holders: frozenset[str]
+
+
+ROLES = {
+    # reads and writes atlas, reads archive, and only reads some metadata keys of physics, without its data
+    'user': RoleSetup(
+        did=frozenset({('read', 'atlas:*'), ('write', 'atlas:*'), ('read', 'archive:*')}),
+        metadata=frozenset({
+            ('physics:*', ('read',), ('datatype', 'project')),                  # visible everywhere ...
+            ('physics:raw*', ('read', 'write'), ('campaign', 'version')),       # ... writable on the raw files only
+            ('physics:calib.00456789._0001.data', (), ('datatype',)),           # ... but hidden on that file
+        }),
+        holders=frozenset({'alice'}),
+    ),
+    # reads physics, and curates its metadata but its project, and the provenance of its raw files
+    'moderator': RoleSetup(
+        did=frozenset({('read', 'physics:*')}),
+        metadata=frozenset({
+            ('physics:*', ('read', 'write'), ('*',)),                           # every key Rucio does not hold ...
+            ('physics:*', ('read',), ('project',)),                             # ... but project, only read
+            ('physics:raw*', (), ('provenance',)),                              # ... and provenance, withdrawn on the raw files
+        }),
+        holders=frozenset({'carol'}),
+    ),
+    'superuser': RoleSetup(did=frozenset({('read', '*:*')}), metadata=frozenset(), holders=frozenset({'jdoe', 'panda'})),
+}
+ACCOUNTS_WITHOUT_ROLES = ['bob']
+
+MB = 10**6
+# The RSEs of the dev environment only, not used by the tests: POSIX storage within the `rucio` container,
+# each in its own directory, so that the replicas of a DID on several of them are distinct files.
+DEV_RSES = ['RSE%d' % index for index in range(1, 4)]
+DEV_RSE_ROOT = '/tmp/rucio_rse/dev'
+# matched by every dev RSE but the deposit, e.g. for a global limit on all of them: 'dev_rse=True'
+DEV_RSE_ATTRIBUTE = ('dev_rse', True)
+DEV_RSE_EXPRESSION = '%s=%s' % DEV_RSE_ATTRIBUTE
+# The dev RSE on which a non-admin account may register replicas, its name ending with a user suffix of the
+# policy package: the deposit alice uploads to before adding rules on the others. It does not carry
+# DEV_RSE_ATTRIBUTE, so that what is deposited there does not count against the global limit of the role.
+DEV_DEPOSIT_RSE = 'RSE_USERDISK'
+# role -> (RSE expression, locality, bytes): within the role, RSE1 to RSE3 are writable up to their local
+# limit, while the global limit caps the three of them together.
+DEV_RSE_ROLE_LIMITS = {
+    'user': [
+        (DEV_DEPOSIT_RSE, 'local', 1000 * MB),
+        ('RSE1', 'local', 5 * MB),
+        ('RSE2', 'local', 10 * MB),
+        ('RSE3', 'local', 10 * MB),
+        (DEV_RSE_EXPRESSION, 'global', 10 * MB),
+    ],
+}
+# account -> (RSE, bytes): the deposit is not covered by any limit of the role, the account limit applies instead
+DEV_RSE_ACCOUNT_LIMITS = {
+}
+
+
+# ------------------------------------------------------------------------------------------------
+# Reporting
+# ------------------------------------------------------------------------------------------------
+
+@dataclass
+class Result:
+    ok: bool
+    label: str
+    detail: str = ''
+
+
+class Report:
+    def __init__(self) -> None:
+        self.results: list[Result] = []
+
+    def section(self, title: str) -> None:
+        print('\n== %s' % title)
+
+    def add(self, ok: bool, label: str, detail: str = '') -> bool:
+        self.results.append(Result(ok, label, detail))
+        print('  [%s] %s%s' % ('  OK  ' if ok else 'MISSING', label, (' -- %s' % detail) if detail else ''))
+        return ok
+
+    def run(self, label: str, check: Callable[[], Optional[str]]) -> bool:
+        """Run `check`, which returns None when satisfied or the reason it is not, and record the outcome."""
+        try:
+            reason = check()
+        except Exception as error:  # a broken database must not stop the remaining checks
+            reason = '%s: %s' % (type(error).__name__, str(error).splitlines()[0] if str(error) else '')
+        return self.add(reason is None, label, reason or '')
+
+    @property
+    def failures(self) -> list[Result]:
+        return [result for result in self.results if not result.ok]
+
+
+def _read(query: Any) -> list[Any]:
+    with db_session(DatabaseOperationType.READ) as session:
+        return list(session.execute(query).all())
+
+
+def _scope(scope: str) -> InternalScope:
+    return InternalScope(scope, vo=DEFAULT_VO)
+
+
+def _account(account: str) -> InternalAccount:
+    return InternalAccount(account, vo=DEFAULT_VO)
+
+
+# ------------------------------------------------------------------------------------------------
+# Checks
+# ------------------------------------------------------------------------------------------------
+
+def _rucio_config() -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    parser.read(os.path.join(os.environ.get('RUCIO_HOME', '/opt/rucio'), 'etc', 'rucio.cfg'))
+    return parser
+
+
+def check_policy_package_configured() -> Optional[str]:
+    package = _rucio_config().get('policy', 'package', fallback=None)
+    if package != POLICY_PACKAGE:
+        return "[policy] package is %r in rucio.cfg, expected %r" % (package, POLICY_PACKAGE)
+
+
+def check_policy_package_installed() -> Optional[str]:
+    spec = importlib.util.find_spec(POLICY_PACKAGE)
+    if spec is None or not spec.origin:
+        return "not importable, install it with: pip install --no-deps --force-reinstall %s" % os.path.dirname(POLICY_PACKAGE_SOURCE)
+    installed = os.path.dirname(spec.origin)
+    if os.path.isdir(POLICY_PACKAGE_SOURCE) and os.path.realpath(installed) != os.path.realpath(POLICY_PACKAGE_SOURCE):
+        comparison = filecmp.dircmp(POLICY_PACKAGE_SOURCE, installed, ignore=['__pycache__'])
+        stale = comparison.diff_files + comparison.left_only
+        if stale:
+            return ("the installed copy in %s differs from %s (%s): reinstall it with "
+                    "`pip install --no-deps --force-reinstall %s` and restart httpd"
+                    % (installed, POLICY_PACKAGE_SOURCE, ', '.join(sorted(stale)), os.path.dirname(POLICY_PACKAGE_SOURCE)))
+
+
+def check_policy_package_roles() -> Optional[str]:
+    from rucio.core import permission
+    defined = permission.get_roles()
+    missing = set(ROLES) - set(defined)
+    if missing:
+        # tell what Rucio itself loaded, which may differ from what the checks above read: another rucio.cfg
+        # (RUCIO_CONFIG), RUCIO_POLICY_PACKAGE, or another copy of the package earlier on sys.path
+        package = permission._get_policy_package_name()
+        spec = importlib.util.find_spec('%s.role' % package) if package else None
+        return ('the policy package does not define the role(s) %s: Rucio loads the package %r (RUCIO_POLICY_PACKAGE=%r, RUCIO_CONFIG=%r), '
+                'its role module %s, defining %s'
+                % (', '.join(sorted(missing)), package, os.environ.get('RUCIO_POLICY_PACKAGE'), os.environ.get('RUCIO_CONFIG'),
+                   spec.origin if spec else 'not found', ', '.join(sorted(defined)) or 'no role'))
+
+
+def check_roles_endpoint() -> Optional[str]:
+    endpoints = [endpoint.strip() for endpoint in _rucio_config().get('api', 'endpoints', fallback='').split(',')]
+    if endpoints != [''] and 'roles' not in endpoints:
+        return "'roles' is not listed in [api] endpoints of rucio.cfg"
+
+
+def check_source_files(files_dir: str) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        missing = sorted({path for path in FILES.values() if not os.path.isfile(os.path.join(files_dir, path))})
+        if missing:
+            return 'not found in %s: %s' % (files_dir, ', '.join(missing))
+    return check
+
+
+def check_alembic_head() -> Optional[str]:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    heads = ScriptDirectory.from_config(Config(config_get('alembic', 'cfg'))).get_heads()
+    if heads != [ALEMBIC_REVISION]:
+        return 'the migrations have head(s) %s, but rucio/alembicrevision.py expects %s' % (heads, ALEMBIC_REVISION)
+
+
+def check_alembic_revision() -> Optional[str]:
+    rows = _read(text('SELECT version_num FROM %salembic_version' % _schema_prefix()))
+    revisions = [row[0] for row in rows]
+    if revisions != [ALEMBIC_REVISION]:
+        return 'the database is at %s, the code expects %s: the schema is stale, rebuild it with --reset' % (revisions, ALEMBIC_REVISION)
+
+
+def check_tables() -> Optional[str]:
+    """Check that every table of the models exists, e.g. role_metadata_permission_map, added by a later migration than the database was built with."""
+    present = set(inspect(get_engine()).get_table_names(schema=DEFAULT_SCHEMA_NAME))
+    # the keys of metadata.tables carry the schema when one is configured, the names do not
+    missing = sorted({table.name for table in models.BASE.metadata.tables.values()} - present)
+    if missing:
+        return 'missing %s: rebuild it with --reset' % ', '.join(missing)
+
+
+def _model_enums() -> dict[str, set[str]]:
+    """The values of every enum type of the models, by type name."""
+    enums = {}
+    for table in models.BASE.metadata.tables.values():
+        for column in table.columns:
+            if isinstance(column.type, Enum) and column.type.name:
+                enums[column.type.name] = set(column.type.enums)
+    return enums
+
+
+def check_enums() -> Optional[str]:
+    """Compare the enum type each column uses in the database with the models, e.g. a DidOperationType value added after the type was created."""
+    if get_engine().dialect.name != 'postgresql':
+        return None
+    rows = _read(text(
+        "SELECT c.udt_schema, c.udt_name, array_agg(e.enumlabel::text) FROM information_schema.columns c "
+        "JOIN pg_namespace n ON n.nspname = c.udt_schema JOIN pg_type t ON t.typnamespace = n.oid AND t.typname = c.udt_name "
+        "JOIN pg_enum e ON e.enumtypid = t.oid WHERE c.table_schema = :schema GROUP BY 1, 2"
+    ).bindparams(schema=config_get('database', 'schema', raise_exception=False) or 'public'))
+    expected = _model_enums()
+    stale = ['%s.%s holds %s, the models expect %s' % (schema, name, sorted(values), sorted(expected[name]))
+             for schema, name, values in rows if name in expected and set(values) != expected[name]]
+    if stale:
+        return '%s: rebuild it with --reset' % '; '.join(sorted(stale))
+
+
+def _schema_prefix() -> str:
+    schema = config_get('database', 'schema', raise_exception=False)
+    return '%s.' % schema if schema else ''
+
+
+def check_account(account: str) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        rows = _read(select(models.Account.status).where(models.Account.account == _account(account)))
+        if not rows:
+            return 'does not exist'
+        if rows[0][0].name != 'ACTIVE':
+            return 'is %s' % rows[0][0].name
+    return check
+
+
+def check_identity(account: str, identity: str) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.identity import verify_identity
+        rows = _read(select(models.IdentityAccountAssociation.account).where(
+            models.IdentityAccountAssociation.identity == identity,
+            models.IdentityAccountAssociation.identity_type == IdentityType.USERPASS,
+            models.IdentityAccountAssociation.account == _account(account)))
+        if not rows:
+            return 'userpass identity %r is not mapped to the account' % identity
+        with db_session(DatabaseOperationType.READ) as session:
+            verify_identity(identity, IdentityType.USERPASS, PASSWORD, session=session)
+    return check
+
+
+def check_scope(scope: str, owner: str) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        rows = _read(select(models.Scope.account).where(models.Scope.scope == _scope(scope)))
+        if not rows:
+            return 'does not exist'
+        if rows[0][0].external != owner:
+            return 'is owned by %s' % rows[0][0].external
+    return check
+
+
+def check_rse(rse: str, attribute: Optional[tuple[str, Any]] = None) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        rows = _read(select(models.RSE.id, models.RSE.availability_write).where(models.RSE.rse == rse, models.RSE.deleted == False))  # noqa: E712
+        if not rows:
+            return 'does not exist'
+        rse_id, writable = rows[0]
+        if writable is False:
+            return 'is not available for writing'
+        protocols = _read(select(models.RSEProtocol.scheme).where(models.RSEProtocol.rse_id == rse_id))
+        if 'file' not in {row[0] for row in protocols}:
+            return "has no 'file' protocol"
+        if attribute is not None:
+            from rucio.core.rse import list_rse_attributes
+            with db_session(DatabaseOperationType.READ) as session:
+                value = list_rse_attributes(rse_id, session=session).get(attribute[0])
+            if value != attribute[1]:
+                return 'has attribute %s=%s, expected %s' % (attribute[0], value, attribute[1])
+    return check
+
+
+def check_role_limits(role: str, expected: list[tuple[str, str, int]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.role import list_role_permissions
+        with db_session(DatabaseOperationType.READ) as session:
+            limits = list_role_permissions(role, session=session)
+        present = {(limit['rse_expression'], locality, limit[locality]) for limit in limits if limit.get('type') == RolePermissionType.LIMIT.value
+                   for locality in ('local', 'global') if locality in limit}
+        missing = [limit for limit in expected if limit not in present]
+        if missing:
+            return 'missing %s' % ', '.join('%s limit of %s on %s' % (locality, _bytes(bytes_), target) for target, locality, bytes_ in missing)
+    return check
+
+
+def check_account_limits(account: str, expected: list[tuple[str, int]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.account_limit import get_local_account_limit
+        from rucio.core.rse import get_rse_id
+        with db_session(DatabaseOperationType.READ) as session:
+            missing = [(rse, bytes_) for rse, bytes_ in expected
+                       if get_local_account_limit(_account(account), rse_ids=get_rse_id(rse, vo=DEFAULT_VO, session=session), session=session) != bytes_]
+        if missing:
+            return 'missing %s' % ', '.join('local limit of %s on %s' % (_bytes(bytes_), rse) for rse, bytes_ in missing)
+    return check
+
+
+def _bytes(bytes_: int) -> str:
+    return 'no cap' if bytes_ == ROLE_QUOTA_NOCAP else '%d MB' % (bytes_ // MB)
+
+
+def check_file(scope: str, name: str) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        rows = _read(select(models.DataIdentifier.did_type, models.DataIdentifier.guid).where(
+            models.DataIdentifier.scope == _scope(scope), models.DataIdentifier.name == name))
+        if not rows:
+            return 'does not exist'
+        if rows[0][0] != DIDType.FILE:
+            return 'is a %s, not a file' % rows[0][0].name
+        if rows[0][1] is None:
+            return 'has no GUID'
+        replicas = _read(select(models.RSEFileAssociation.state).join(models.RSE, models.RSE.id == models.RSEFileAssociation.rse_id).where(
+            models.RSEFileAssociation.scope == _scope(scope), models.RSEFileAssociation.name == name, models.RSE.rse == RSE))
+        if not replicas or replicas[0][0] != ReplicaState.AVAILABLE:
+            return 'has no AVAILABLE replica on %s' % RSE
+    return check
+
+
+def check_dataset(scope: str, name: str, content: "Sequence[tuple[str, str]]", did_type: DIDType = DIDType.DATASET) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        rows = _read(select(models.DataIdentifier.did_type).where(
+            models.DataIdentifier.scope == _scope(scope), models.DataIdentifier.name == name))
+        if not rows:
+            return 'does not exist'
+        if rows[0][0] != did_type:
+            return 'is a %s, not a %s' % (rows[0][0].name, did_type.name.lower())
+        children = _read(select(models.DataIdentifierAssociation.child_scope, models.DataIdentifierAssociation.child_name).where(
+            models.DataIdentifierAssociation.scope == _scope(scope), models.DataIdentifierAssociation.name == name))
+        missing = set(content) - {(row[0].external, row[1]) for row in children}
+        if missing:
+            return 'does not contain %s' % ', '.join('%s:%s' % did for did in sorted(missing))
+    return check
+
+
+def check_rule(scope: str, name: str) -> Optional[str]:
+    rows = _read(select(models.ReplicationRule.id).where(
+        models.ReplicationRule.scope == _scope(scope), models.ReplicationRule.name == name))
+    if not rows:
+        return 'no replication rule'
+
+
+def check_request(model: Any) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        scope, name = REQUEST_DID
+        rows = _read(select(model.id).join(models.RSE, models.RSE.id == model.dest_rse_id).where(
+            model.scope == _scope(scope), model.name == name, models.RSE.rse == RSE))
+        if not rows:
+            return 'none found'
+    return check
+
+
+def check_reserved_roles() -> Optional[str]:
+    from rucio.core.role import RESERVED_ROLES
+    present = {row[0] for row in _read(select(models.Roles.role))}
+    missing = set(RESERVED_ROLES) - present
+    if missing:
+        return 'missing %s' % ', '.join(sorted(missing))
+
+
+def check_role(role: str) -> Optional[str]:
+    if not _read(select(models.Roles.role).where(models.Roles.role == role)):
+        return 'does not exist'
+
+
+def _all(*checks: Callable[[], Optional[str]]) -> Callable[[], Optional[str]]:
+    """A check satisfied when all the given ones are, reporting the first reason one is not."""
+    def check() -> Optional[str]:
+        return next((reason for reason in (check() for check in checks) if reason is not None), None)
+    return check
+
+
+def _file_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """The metadata of a file of `DEMO_FILES`, without its size."""
+    return {key: value for key, value in meta.items() if key != 'kB'}
+
+
+def check_metadata(scope: str, name: str, expected: dict[str, Any]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.did import get_metadata
+        with db_session(DatabaseOperationType.READ) as session:
+            meta = get_metadata(_scope(scope), name, session=session)
+        wrong = ['%s=%r' % (key, meta.get(key)) for key, value in sorted(expected.items()) if meta.get(key) != value]
+        if wrong:
+            return 'has %s' % ', '.join(wrong)
+    return check
+
+
+def _describe_metadata_permission(did_pattern: str, operations: tuple[str, ...], keys: tuple[str, ...]) -> str:
+    return '%s on %s of %s' % (''.join(operation[0] for operation in operations) or 'none', ','.join(keys) or 'no key', did_pattern)
+
+
+def check_role_metadata_permissions(role: str, expected: frozenset[tuple[str, tuple[str, ...], tuple[str, ...]]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.role import list_role_permissions
+        with db_session(DatabaseOperationType.READ) as session:
+            permissions = list_role_permissions(role, session=session)
+        present = {(permission['did_pattern'], permission['meta_key'], tuple(sorted(permission['operations'])))
+                   for permission in permissions if permission.get('type') == RolePermissionType.METADATA.value}
+        missing = [(did_pattern, operations, keys) for did_pattern, operations, keys in sorted(expected)
+                   if any((did_pattern, key, tuple(sorted(operations))) not in present for key in keys or (None,))]
+        if missing:
+            return 'missing %s' % ', '.join(_describe_metadata_permission(*permission) for permission in missing)
+    return check
+
+
+def check_role_permissions(role: str, expected: frozenset[tuple[str, str]]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        model = models.RoleDidPermissionAssociation
+        rows = _read(select(model.did_pattern, *(getattr(model, operation.column) for operation in DidOperationType)).where(model.role == role))
+        granted = {(operation.value, row[0]) for row in rows for operation, is_granted in zip(DidOperationType, row[1:]) if is_granted}
+        missing = expected - granted
+        if missing:
+            return 'missing %s' % ', '.join('%s on %s' % permission for permission in sorted(missing))
+    return check
+
+
+def check_account_roles(account: str, expected: set[str]) -> Callable[[], Optional[str]]:
+    def check() -> Optional[str]:
+        from rucio.core.role import has_account_valid_role, list_account_roles
+        with db_session(DatabaseOperationType.READ) as session:
+            # only an active assignment grants a role: activated already and not expired yet
+            held = {
+                role['role'] for role in list_account_roles(_account(account), session=session)
+                if has_account_valid_role(_account(account), role['role'], session=session)
+            }
+        if expected and expected - held:
+            return 'does not hold %s' % ', '.join(sorted(expected - held))
+        if not expected and held:
+            return 'holds %s, expected none' % ', '.join(sorted(held))
+    return check
+
+
+def run_environment_checks(report: Report, files_dir: str) -> None:
+    """The checks that do not depend on the content of the database, and which --reset requires to pass first."""
+    report.section('Environment')
+    report.run('policy package configured in rucio.cfg', check_policy_package_configured)
+    report.run('policy package installed and up to date', check_policy_package_installed)
+    report.run('policy package defines the test roles', check_policy_package_roles)
+    report.run("'roles' REST endpoint enabled", check_roles_endpoint)
+    report.run('single alembic head matching rucio/alembicrevision.py', check_alembic_head)
+    report.run('files to upload present', check_source_files(files_dir))
+
+
+def run_database_checks(report: Report) -> None:
+    report.section('Database schema')
+    report.run('alembic revision is %s' % ALEMBIC_REVISION, check_alembic_revision)
+    report.run('tables match the models', check_tables)
+    report.run('enum types match the models', check_enums)
+
+    report.section('Accounts and identities')
+    for account, (_, _, identity) in ACCOUNTS.items():
+        report.run('account %s' % account, check_account(account))
+        report.run('userpass identity %s/%s for %s' % (identity, PASSWORD, account), check_identity(account, identity))
+
+    report.section('Scopes')
+    for scope, owner in SCOPES.items():
+        report.run('scope %s owned by %s' % (scope, owner), check_scope(scope, owner))
+
+    report.section('RSE and data')
+    report.run('RSE %s' % RSE, check_rse(RSE))
+    for scope, name in FILES:
+        report.run('file %s:%s' % (scope, name), check_file(scope, name))
+    for (scope, name), (_, content) in DATASETS.items():
+        report.run('dataset %s:%s' % (scope, name), check_dataset(scope, name, content))
+
+    report.section('Data of the dev environment')
+    for (scope, name), meta in DEMO_FILES.items():
+        report.run('file %s:%s with its metadata' % (scope, name), _all(check_file(scope, name), check_metadata(scope, name, _file_meta(meta))))
+    for (scope, name), (did_type, content, meta) in DEMO_COLLECTIONS.items():
+        report.run('%s %s:%s with its content and metadata' % (did_type.name.lower(), scope, name),
+                   _all(check_dataset(scope, name, content, did_type), check_metadata(scope, name, meta)))
+        if did_type == DIDType.DATASET:
+            report.run('rule on %s:%s' % (scope, name), lambda scope=scope, name=name: check_rule(scope, name))
+    for scope, name in RULE_DIDS:
+        report.run('replication rule on %s:%s' % (scope, name), lambda scope=scope, name=name: check_rule(scope, name))
+    report.run('transfer request for %s:%s to %s' % (REQUEST_DID + (RSE,)), check_request(models.Request))
+    report.run('transfer request history for %s:%s to %s' % (REQUEST_DID + (RSE,)), check_request(models.RequestHistory))
+
+    report.section('Roles')
+    report.run('reserved roles', check_reserved_roles)
+    for role, setup in ROLES.items():
+        report.run('role %s' % role, lambda role=role: check_role(role))
+        report.run('role %s grants %s' % (role, ', '.join('%s on %s' % permission for permission in sorted(setup.did))), check_role_permissions(role, setup.did))
+        if setup.metadata:
+            report.run('role %s grants %s' % (role, ', '.join(_describe_metadata_permission(*permission) for permission in sorted(setup.metadata))),
+                       check_role_metadata_permissions(role, setup.metadata))
+        for account in sorted(setup.holders):
+            report.run('account %s holds %s' % (account, role), check_account_roles(account, {role}))
+    for account in ACCOUNTS_WITHOUT_ROLES:
+        report.run('account %s holds no role' % account, check_account_roles(account, set()))
+
+    run_dev_rse_checks(report)
+
+
+def run_dev_rse_checks(report: Report) -> None:
+    report.section('Dev RSEs (not used by the tests)')
+    for rse in DEV_RSES:
+        report.run('RSE %s with %s' % (rse, DEV_RSE_EXPRESSION), check_rse(rse, DEV_RSE_ATTRIBUTE))
+    report.run('deposit RSE %s' % DEV_DEPOSIT_RSE, check_rse(DEV_DEPOSIT_RSE))
+    for role, limits in DEV_RSE_ROLE_LIMITS.items():
+        report.run('role %s has its limits on the dev RSEs' % role, check_role_limits(role, limits))
+    for account, limits in DEV_RSE_ACCOUNT_LIMITS.items():
+        report.run('account %s has its account limits on the dev RSEs' % account, check_account_limits(account, limits))
+
+
+# ------------------------------------------------------------------------------------------------
+# Reset
+# ------------------------------------------------------------------------------------------------
+
+def _step(message: str) -> None:
+    print('\n>>> %s' % message, flush=True)
+
+
+def _run_tool(*command: str) -> None:
+    print('$ %s' % ' '.join(command), flush=True)
+    subprocess.run([sys.executable, *command], check=True, cwd=BASE_PATH)
+
+
+def _restart_server() -> None:
+    """Restart httpd gracefully, so that the server drops its connections and caches of the purged schema, and wait for it."""
+    import requests
+    if shutil.which('httpd') is None:
+        print('httpd not found, restart the server yourself if the following steps fail')
+        return
+    subprocess.run(['httpd', '-k', 'graceful'], check=True)
+    url = '%s/ping' % config_get('client', 'rucio_host')
+    ca_cert = config_get('client', 'ca_cert', raise_exception=False) or False
+    for _ in range(60):
+        try:
+            if requests.get(url, verify=ca_cert, timeout=5).ok:
+                return
+        except requests.RequestException:
+            pass
+        time.sleep(1)
+    raise RuntimeError('the server did not answer on %s after the restart' % url)
+
+
+def _drop_leftover_enums() -> None:
+    """
+    Drop the enum types of the models which survived the purge.
+
+    On PostgreSQL the models create most of their enum types in the default schema of the
+    connection (`public`) rather than in the configured one, so that purging the configured
+    schema leaves them behind, and the rebuild would reuse them with their old values.
+    """
+    engine = get_engine()
+    if engine.dialect.name != 'postgresql':
+        return
+    names = set(_model_enums())
+    with engine.begin() as conn:
+        leftovers = conn.execute(text(
+            "SELECT n.nspname, t.typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace "
+            "WHERE t.typtype = 'e' AND n.nspname = current_schema()")).all()
+        for schema, name in leftovers:
+            if name in names:
+                print('Dropping enum type %s."%s"' % (schema, name))
+                conn.execute(text('DROP TYPE "%s"."%s"' % (schema, name)))
+
+
+def _rebuild_database() -> None:
+    """The equivalent of `tools/reset_database.py -b`, which also drops the enum types left behind by the purge."""
+    from rucio.db.sqla.util import build_database, create_base_vo, create_root_account, purge_db
+    purge_db()
+    _drop_leftover_enums()
+    build_database()
+    create_base_vo()
+    create_root_account()
+
+
+def _provision_accounts_and_scopes() -> None:
+    from rucio.core.account import account_exists, add_account
+    from rucio.core.identity import add_account_identity
+    from rucio.core.scope import add_scope, check_scope
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for account, (account_type, email, identity) in ACCOUNTS.items():
+            if account == 'root':
+                continue  # created by the bootstrap, along with its userpass identity
+            if not account_exists(_account(account), session=session):
+                add_account(_account(account), account_type, email, session=session)
+            add_account_identity(identity, IdentityType.USERPASS, _account(account), email, password=PASSWORD, session=session)
+        for scope, owner in SCOPES.items():
+            if not check_scope(_scope(scope), session=session):
+                add_scope(_scope(scope), _account(owner), session=session)
+
+
+def _upload_files(files_dir: str) -> None:
+    """Upload the files as root, which registers their replica and a rule on the RSE, like `rucio upload` does."""
+    _upload({did: os.path.join(files_dir, path) for did, path in FILES.items()})
+
+
+def _upload_demo_files() -> None:
+    """
+    Generate the files of the dev environment, upload them as root, gather them into their datasets and containers,
+    set the metadata of all of them, and protect each dataset by a rule of root on the RSE.
+    """
+    import tempfile
+
+    from rucio.core.did import add_did, attach_dids, set_metadata_bulk
+    from rucio.core.rule import add_rule
+    with tempfile.TemporaryDirectory() as directory:
+        paths = {}
+        for (scope, name), meta in DEMO_FILES.items():
+            paths[scope, name] = os.path.join(directory, name)
+            with open(paths[scope, name], 'wb') as file:
+                file.write(os.urandom(meta['kB'] * 1000))
+        _upload(paths)
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for (scope, name), meta in DEMO_FILES.items():
+            set_metadata_bulk(_scope(scope), name, _file_meta(meta), session=session)
+        for (scope, name), (did_type, content, meta) in DEMO_COLLECTIONS.items():
+            add_did(_scope(scope), name, did_type, _account('root'), meta=meta, session=session)
+            attach_dids(_scope(scope), name, [{'scope': _scope(child_scope), 'name': child_name} for child_scope, child_name in content],
+                        _account('root'), session=session)
+        for (scope, name), (did_type, _, _) in DEMO_COLLECTIONS.items():
+            if did_type == DIDType.DATASET:
+                add_rule(dids=[{'scope': _scope(scope), 'name': name}], account=_account('root'), copies=1, rse_expression=RSE, grouping='DATASET',
+                         weight=None, lifetime=None, locked=False, subscription_id=None, session=session)
+
+
+def _upload(paths: dict[tuple[str, str], str]) -> None:
+    """Upload local files as root to the DIDs given, see `_upload_files`."""
+    from rucio.client import Client
+    from rucio.client.uploadclient import UploadClient
+    from rucio.rse import rsemanager
+
+    client = Client()
+    rse_settings = rsemanager.get_rse_info(RSE, vo=DEFAULT_VO)
+    for (scope, name), path in paths.items():
+        # the files of a previous reset are still on the storage, while the database no longer knows them
+        pfn = list(rsemanager.lfns2pfns(rse_settings, [{'scope': scope, 'name': name}], operation='write').values())[0]
+        if pfn.startswith('file://'):
+            local = '/' + pfn.split('://', 1)[1].split('/', 1)[1]
+            if os.path.isfile(local):
+                print('Removing %s left on the storage by a previous run' % local)
+                os.remove(local)
+
+        UploadClient(_client=client).upload([{
+            'path': path,
+            'rse': RSE,
+            'did_scope': scope,
+            'did_name': name,
+            # given, so that the client does not extract it from a ROOT file ('*.pool.root') with
+            # `pool_extractFileIdentifier`, a tool of the ATLAS software the dev environment does not have
+            'guid': uuid4().hex,
+        }])
+
+
+def _provision_datasets() -> None:
+    from rucio.core.did import add_did, attach_dids
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for (scope, name), (owner, content) in DATASETS.items():
+            add_did(_scope(scope), name, DIDType.DATASET, _account(owner), session=session)
+            attach_dids(_scope(scope), name, [{'scope': _scope(child_scope), 'name': child_name} for child_scope, child_name in content],
+                        _account(owner), session=session)
+
+
+def _provision_requests() -> None:
+    """Queue a transfer request for the DID, archive a first one to give it a history, and queue a second one which stays active."""
+    from rucio.core.request import archive_request, queue_requests
+    from rucio.core.rse import get_rse_id
+    from rucio.core.rule import list_rules
+
+    scope, name = REQUEST_DID
+    with db_session(DatabaseOperationType.WRITE) as session:
+        rule = next(iter(list_rules(filters={'scope': _scope(scope), 'name': name}, session=session)))
+        file = session.execute(select(models.DataIdentifier).where(
+            models.DataIdentifier.scope == _scope(scope), models.DataIdentifier.name == name)).scalar_one()
+
+        def request(state: RequestState) -> dict[str, Any]:
+            return {
+                'request_type': RequestType.TRANSFER,
+                'scope': _scope(scope),
+                'name': name,
+                'dest_rse_id': get_rse_id(RSE, vo=DEFAULT_VO, session=session),
+                'rule_id': rule['id'],
+                'account': _account('root'),
+                'retry_count': 0,
+                'state': state,
+                'attributes': {'activity': 'User Subscriptions', 'bytes': file.bytes, 'md5': file.md5, 'adler32': file.adler32},
+            }
+
+        # despite its docstring, queue_requests returns the queued requests themselves, not their ids
+        for queued in queue_requests([request(RequestState.DONE)], session=session):
+            archive_request(queued['id'], session=session)
+        queue_requests([request(RequestState.QUEUED)], session=session)
+
+
+def _provision_roles() -> None:
+    from rucio.core import role as role_core
+    with db_session(DatabaseOperationType.WRITE) as session:
+        role_core.setup_reserved_roles(session=session)
+    with db_session(DatabaseOperationType.WRITE) as session:
+        role_core.sync_roles_from_policy_package(session=session)
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for role, setup in ROLES.items():
+            # a DID permission sets every operation of its pattern at once
+            for did_pattern in sorted({did_pattern for _, did_pattern in setup.did}):
+                operations = [operation for operation, pattern in sorted(setup.did) if pattern == did_pattern]
+                role_core.add_role_permission(role, RolePermissionType.DID, {'did_pattern': did_pattern, 'operations': operations}, session=session)
+            for did_pattern, operations, keys in sorted(setup.metadata):
+                parameters = {'did_pattern': did_pattern, 'operations': list(operations), **({'keys': list(keys)} if keys else {})}
+                role_core.add_role_permission(role, RolePermissionType.METADATA, parameters, session=session)
+            for account in sorted(setup.holders):
+                role_core.add_account_role(_account(account), role, session=session)
+
+
+def _clear_dev_rse_storage() -> None:
+    """Remove the files a previous run left on the dev RSEs, which the rebuilt database no longer knows."""
+    if os.path.isdir(DEV_RSE_ROOT):
+        print('Removing %s, left on the storage by a previous run' % DEV_RSE_ROOT)
+        shutil.rmtree(DEV_RSE_ROOT)
+
+
+def _provision_dev_rses() -> None:
+    """Add what is missing of the dev RSEs and of the limits on them, keeping whatever exists already."""
+    from rucio.core.account_limit import set_local_account_limit
+    from rucio.core.role import add_role_permission
+    from rucio.core.rse import add_protocol, add_rse, add_rse_attribute, get_rse_id, get_rse_protocols, list_rse_attributes, rse_exists
+
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for rse in DEV_RSES + [DEV_DEPOSIT_RSE]:
+            if rse_exists(rse, vo=DEFAULT_VO, session=session):
+                rse_id = get_rse_id(rse, vo=DEFAULT_VO, session=session)
+            else:
+                rse_id = add_rse(rse, vo=DEFAULT_VO, session=session)
+                print('Added RSE %s' % rse)
+            if not any(protocol['scheme'] == 'file' for protocol in get_rse_protocols(rse_id, session=session)['protocols']):
+                # the same protocol as MOCK-POSIX in etc/rse_repository.json, writing within the `rucio` container
+                add_protocol(rse_id, {
+                    'scheme': 'file',
+                    'prefix': '%s/%s/' % (DEV_RSE_ROOT, rse),
+                    'impl': 'rucio.rse.protocols.posix.Default',
+                    'domains': {domain: {'read': 1, 'write': 1, 'delete': 1} for domain in ('lan', 'wan')},
+                }, session=session)
+            key, value = DEV_RSE_ATTRIBUTE
+            if rse in DEV_RSES and list_rse_attributes(rse_id, session=session).get(key) != value:
+                add_rse_attribute(rse_id, key, value, session=session)
+
+    # a global limit needs the RSEs its expression matches to exist already
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for role, limits in DEV_RSE_ROLE_LIMITS.items():
+            for target, locality, bytes_ in limits:
+                # setting a limit which exists already overwrites it
+                add_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': target, locality: bytes_}, force=True, session=session)
+        for account, account_limits in DEV_RSE_ACCOUNT_LIMITS.items():
+            for rse, bytes_ in account_limits:
+                set_local_account_limit(_account(account), get_rse_id(rse, vo=DEFAULT_VO, session=session), bytes_, session=session)
+
+
+def reset(files_dir: str) -> None:
+    _step('Purging and rebuilding the database schema')
+    _rebuild_database()
+
+    _step('Restarting the server')
+    _restart_server()
+
+    _step('Bootstrapping the dev environment')
+    _run_tool('tools/bootstrap_tests.py')
+    _run_tool('tools/sync_rses.py')
+    _run_tool('tools/sync_meta.py')
+
+    _step('Creating the RBAC roles from the policy package')
+    _provision_accounts_and_scopes()  # the role assignments need the accounts
+    _provision_roles()
+
+    _step('Uploading the files')
+    _upload_files(files_dir)
+
+    _step('Uploading the data of the dev environment: files, datasets, containers, their metadata and rules')
+    _upload_demo_files()
+
+    _step('Creating the datasets and the transfer requests')
+    _provision_datasets()
+    _provision_requests()
+
+    _step('Creating the dev RSEs %s, and the limits on them' % ', '.join(DEV_RSES + [DEV_DEPOSIT_RSE]))
+    _clear_dev_rse_storage()
+    _provision_dev_rses()
+
+
+# ------------------------------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description='Check, and optionally rebuild from scratch, everything the RBAC tests rely on.')
+    parser.add_argument('--reset', action='store_true', help='DROP THE WHOLE DATABASE and recreate everything from scratch (default: dry run, only check)')
+    parser.add_argument('--dev-rses', action='store_true',
+                        help='only add what is missing of the dev RSEs %s and of the limits on them, leaving the rest of the database untouched' % ', '.join(DEV_RSES + [DEV_DEPOSIT_RSE]))
+    parser.add_argument('--yes', action='store_true', help='do not ask for confirmation before --reset')
+    parser.add_argument('--files-dir', default=os.path.join(os.environ.get('RUCIO_HOME', '/opt/rucio')),
+                        help='directory holding the files to upload (default: %(default)s)')
+    args = parser.parse_args()
+
+    if args.reset and args.dev_rses:
+        parser.error('--dev-rses is part of --reset already, give only one of them')
+
+    if args.dev_rses:
+        _step('Adding what is missing of the dev RSEs %s, and of the limits on them' % ', '.join(DEV_RSES + [DEV_DEPOSIT_RSE]))
+        try:
+            _provision_dev_rses()
+        except RucioException as error:
+            print('\nAdding the dev RSEs failed: %s' % error)
+            return 1
+        report = Report()
+        run_dev_rse_checks(report)
+        print()
+        if report.failures:
+            print('%d requirement(s) of the dev RSEs missing.' % len(report.failures))
+            return 1
+        print('The dev RSEs are ready.')
+        return 0
+
+    report = Report()
+    run_environment_checks(report, args.files_dir)
+
+    if args.reset:
+        if report.failures:
+            print('\nThe environment is not ready for --reset, so the database was NOT touched. Fix the above first.')
+            return 1
+        if not args.yes:
+            database = get_engine().url.render_as_string(hide_password=True)
+            answer = input('\nThis DROPS EVERYTHING in %s (schema %s). Type "yes" to continue: '
+                           % (database, config_get('database', 'schema', raise_exception=False)))
+            if answer.strip() != 'yes':
+                print('Aborted, nothing was changed.')
+                return 1
+        try:
+            reset(args.files_dir)
+        except (RucioException, subprocess.CalledProcessError, RuntimeError) as error:
+            print('\nThe reset failed: %s' % error)
+            return 1
+        print('\n\nReset done, checking the result:')
+        report = Report()
+        run_environment_checks(report, args.files_dir)
+
+    run_database_checks(report)
+
+    print()
+    if report.failures:
+        print('%d requirement(s) missing.%s' % (len(report.failures), '' if args.reset else ' Run with --reset to rebuild everything from scratch.'))
+        return 1
+    print('Everything the RBAC tests rely on is present.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
