@@ -16,6 +16,8 @@ import errno
 import json
 import logging
 import os
+import pydoc
+import re
 import shutil
 import signal
 import subprocess  # noqa: S404 -- subprocess used for external commands
@@ -26,7 +28,7 @@ from configparser import NoOptionError, NoSectionError
 from datetime import datetime
 from enum import Enum
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import click
 
@@ -154,9 +156,11 @@ TREE_PLACEHOLDER_INDENT = "`-- "
 # prefixes the lines of a multi-line branch other than the one it is attached by, see `format_tree`
 TREE_TRUNK = "|   "
 TREE_NO_TRUNK = "    "
-# bracket the RSEs of a global limit in a permission tree, see `format_permission_tree`
+# bracket the RSEs of a global limit in the permissions of a role, see `format_permission_lists`
 TREE_BRACKET_OPEN = "| "
 TREE_BRACKET_CLOSE = " |"
+# the permissions of a role which has none, see `format_permission_lists`
+NO_PERMISSION = "(no permission assigned)"
 
 
 def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
@@ -366,71 +370,43 @@ def permission_lines(
     return lines
 
 
-def format_permission_tree(
-        role: str,
-        permissions: "Iterable[Mapping[str, Any]]",
+def format_permission_lists(
+        roles: "Sequence[tuple[Iterable[Mapping[str, Any]], Optional[Callable[[str], int]]]]",
         rse_names: "Optional[Callable[[str], Sequence[str]]]" = None,
         sizes: SizeFormat = SizeFormat.COMPACT,
-        used: "Optional[Callable[[str], int]]" = None,
-) -> str:
+        width: Optional[int] = None,
+) -> list[str]:
     """
-    Render a role and its permissions as a tree, see :func:`format_tree`.
+    Render the permissions of several roles, each to be used as a single table cell.
 
-    Each line of :func:`permission_lines` is one branch, made of the same columns whatever its type,
-    aligned across the branches: its TYPE, its identifier and its parameters, i.e. the operations on a
-    DID pattern, those on the metadata keys of a DID pattern, one key per line, or the limit on an RSE
-    expression. A global limit on an expression matching several RSEs lists them one per line, bracketed
-    in the identifier column, its limit on the middle one:
+    Each line of :func:`permission_lines` is one entry, made of the same columns whatever its type,
+    aligned across the entries of all the roles: its TYPE, its identifier and its parameters, i.e. the
+    operations on a DID pattern, those on the metadata keys of a DID pattern, one key per line, or the
+    limit on an RSE expression. A global limit on an expression matching several RSEs lists them one per
+    line, bracketed in the identifier column, its limit on the middle one:
 
-        rse-pro
-        |-- DID     *:*      r--
-        |-- DID     atlas:*  rw-
-        |-- LIMIT   MOCK     local: 1 MB
-        |         | MOCK2 |
-        `-- LIMIT | MOCK3 |- global: 100 kB
-                  | MOCK4 |
+        DID        physics:*  r--
+        METADATA   physics:*  rw  (every key)
+                              r-  project
+        LIMIT      MOCK       local: 1 MB
+                 | MOCK2   |
+        LIMIT    | MOCK3   |- global: 100 kB
+                 | MOCK4   |
 
-    The metadata permissions of a role on a DID pattern are one branch, a line per key:
-
-        moderator
-        |-- DID        physics:*      r--
-        |-- METADATA   physics:*      rw  (every key)
-        |                             r-  project
-        `-- METADATA   physics:raw*   --  provenance
-
-    :param role: The name of the role, the root of the tree.
-    :param permissions: The permissions of the role, as listed by the server.
+    :param roles: The roles, as their permissions as listed by the server, and what gives the bytes an account uses on
+                  the RSEs of an RSE expression, to render each limit with the usage measured against it (see
+                  :func:`format_limits`), None to only render the limits, e.g. if the account does not hold the role.
     :param rse_names: Gives the names of the RSEs an RSE expression currently matches. Without it, every
                       limit holds on one line, with its RSE expression.
     :param sizes: How the sizes of the limits are rendered.
-    :param used: Gives the bytes an account uses on the RSEs of an RSE expression, to render each limit with the usage
-                 measured against it, see :func:`format_limits`.
-    :returns: The tree, to be used as a single table cell.
+    :param width: The width the lines should fit in, None for no limit. The identifier column narrows to it, down to
+                  `MIN_IDENTIFIER_WIDTH`, each identifier too long for it being broken over several lines, see
+                  :func:`break_identifier`.
+    :returns: The permissions of each role, in the order of `roles`, their lines joined by newlines.
     """
-    return format_permission_trees([(role, permissions, used)], rse_names, sizes)[0]
-
-
-def format_permission_trees(
-        roles: "Sequence[tuple[str, Iterable[Mapping[str, Any]], Optional[Callable[[str], int]]]]",
-        rse_names: "Optional[Callable[[str], Sequence[str]]]" = None,
-        sizes: SizeFormat = SizeFormat.COMPACT,
-) -> list[str]:
-    """
-    Render several roles and their permissions as trees, see :func:`format_permission_tree`.
-
-    The columns of the branches are aligned across all the trees, so that the trees read as one when
-    listed one below the other, e.g. in a table of roles.
-
-    :param roles: The roles, as their name, the root of their tree, their permissions as listed by the server, and what
-                  gives the bytes an account uses on the RSEs of an RSE expression, see :func:`format_permission_tree`,
-                  None to only render the limits of the role, e.g. if the account does not hold it.
-    :param rse_names: Gives the names of the RSEs an RSE expression currently matches, see :func:`format_permission_tree`.
-    :param sizes: How the sizes of the limits are rendered.
-    :returns: The trees, in the order of `roles`, each to be used as a single table cell.
-    """
-    # each branch of each role as (type, identifier, parameters), the identifier being the RSEs of a global limit if it covers several
+    # each entry of each role as (type, identifier, parameters), the identifier being the RSEs of a global limit if it covers several
     entries_by_role: list[list[tuple[str, Union[str, list[str]], str]]] = []
-    for _, permissions, used in roles:
+    for permissions, used in roles:
         entries: list[tuple[str, Union[str, list[str]], str]] = []
         for permission_type, target, operations, limits in permission_lines(permissions, sizes, used):
             if permission_type != 'limit':
@@ -447,136 +423,292 @@ def format_permission_trees(
 
     all_entries = [entry for entries in entries_by_role for entry in entries]
     if not all_entries:
-        return [format_tree(role, [], placeholder="(no permission assigned)") for role, _, _ in roles]
+        return [NO_PERMISSION for _ in roles]
 
     # the bracket of a list of RSEs opens in the gap before the identifier column, so that the RSEs line up
-    # with the other identifiers, and closes with '|- ' before the parameter column
+    # with the other identifiers, and closes with '|-' in the gap before the parameter column
     type_width = max(len(permission_type) for permission_type, _, _ in all_entries) + len(TREE_BRACKET_OPEN) + 1
     id_width = max(
         len(identifier) + 2 if isinstance(identifier, str) else max(len(rse) for rse in identifier) + len(TREE_BRACKET_CLOSE) + 2
         for _, identifier, _ in all_entries
     )
+    if width is not None:
+        parameters_width = max(len(line) for _, _, parameters in all_entries for line in parameters.split('\n'))
+        id_width = max(min(id_width, width - type_width - parameters_width), MIN_IDENTIFIER_WIDTH + len(TREE_BRACKET_CLOSE) + 2)
     rse_width = id_width - len(TREE_BRACKET_CLOSE) - 2
 
-    trees = []
-    for (role, _, _), entries in zip(roles, entries_by_role):
-        branches = []
+    cells = []
+    for entries in entries_by_role:
+        lines = []
         for permission_type, identifier, parameters in entries:
             if isinstance(identifier, str):
-                first, *others = parameters.split('\n')
-                branches.append('\n'.join(
-                    [f"{permission_type.ljust(type_width)}{identifier.ljust(id_width)}{first}".rstrip()]
-                    + [f"{' ' * (type_width + id_width)}{line}".rstrip() for line in others]
-                ))
+                identifier_lines = break_identifier(identifier, id_width - 2)
+                parameter_lines = parameters.split('\n')
+                lines.extend(
+                    f"{(permission_type if index == 0 else '').ljust(type_width)}"
+                    f"{(identifier_lines[index] if index < len(identifier_lines) else '').ljust(id_width)}"
+                    f"{parameter_lines[index] if index < len(parameter_lines) else ''}".rstrip()
+                    for index in range(max(len(identifier_lines), len(parameter_lines)))
+                )
                 continue
-            anchor = (len(identifier) - 1) // 2
-            branches.append('\n'.join(
-                (permission_type if index == anchor else '').ljust(type_width - len(TREE_BRACKET_OPEN))
-                + f"{TREE_BRACKET_OPEN}{rse.ljust(rse_width)}{TREE_BRACKET_CLOSE}"
-                + (f"- {parameters}" if index == anchor else '')
-                for index, rse in enumerate(identifier)
-            ))
-        trees.append(format_tree(role, branches, placeholder="(no permission assigned)"))
-    return trees
+            rse_lines = [line for rse in identifier for line in break_identifier(rse, rse_width)]
+            anchor = (len(rse_lines) - 1) // 2
+            lines.extend(
+                ((permission_type if index == anchor else '').ljust(type_width - len(TREE_BRACKET_OPEN))
+                 + f"{TREE_BRACKET_OPEN}{rse.ljust(rse_width)}{TREE_BRACKET_CLOSE}"
+                 + (f"- {parameters}" if index == anchor else '')).rstrip()
+                for index, rse in enumerate(rse_lines)
+            )
+        cells.append('\n'.join(lines) if lines else NO_PERMISSION)
+    return cells
 
 
-def format_sections(sections: "Sequence[tuple[Sequence[str], Sequence[Sequence[str]]]]") -> str:
+# --- Tables -----------------------------------------------------------------------------------
+
+# ends each line of an identifier but the last when it is broken over several lines, see `break_identifier`
+IDENTIFIER_CONTINUATION = '\\'
+# the characters an identifier is preferably broken after, e.g. 'physics:calib.' / '00456789._0001'
+IDENTIFIER_SEPARATORS = ':._-/'
+# the narrowest an identifier column gets, its identifiers being broken over several lines
+MIN_IDENTIFIER_WIDTH = 12
+# the styles a table cell may have, e.g. a role name in bold, which take no room on the terminal
+ANSI_STYLE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def terminal_width() -> int:
+    """The width of the terminal, 120 if the output is not one, e.g. piped into a file."""
+    return shutil.get_terminal_size(fallback=(120, 24)).columns
+
+
+def visible_length(text: str) -> int:
+    """The room a line takes on the terminal, without its styles, see `ANSI_STYLE`."""
+    return len(ANSI_STYLE.sub('', text))
+
+
+def break_identifier(identifier: str, width: int) -> list[str]:
     """
-    Render tables having the same number of columns one below the other, as one table split into sections.
+    Break an identifier, which has no spaces to wrap at (a DID pattern, an RSE name, ...), into lines of at most `width` characters.
+
+    Each line but the last ends with `IDENTIFIER_CONTINUATION`, so that a broken identifier does not read as several.
+    It is broken after the last of `IDENTIFIER_SEPARATORS` fitting on the line, if one is in its second half,
+    anywhere otherwise, e.g. 'physics:calib.\\' and '00456789._0001.data'.
+
+    :returns: The lines, a single one if it fits in `width`.
+    """
+    room = max(width - len(IDENTIFIER_CONTINUATION), 1)
+    lines = []
+    while len(identifier) > width:
+        cut = max(identifier.rfind(separator, 0, room) for separator in IDENTIFIER_SEPARATORS) + 1
+        if cut <= room // 2:
+            cut = room
+        lines.append(identifier[:cut] + IDENTIFIER_CONTINUATION)
+        identifier = identifier[cut:]
+    lines.append(identifier)
+    return lines
+
+
+class Wrap(Enum):
+    """How the lines of a table cell too long for its column are wrapped, see :func:`format_table`."""
+    # at the spaces, as a text
+    TEXT = 'text'
+    # anywhere, preferably after a separator, see `break_identifier`
+    IDENTIFIER = 'identifier'
+    # not at all: the cells are rendered for the width of their column, see the `fitted` columns of `format_table`
+    FITTED = 'fitted'
+
+
+class Narrowing(NamedTuple):
+    """How a column of a table narrows when the table is wider than the terminal, see :func:`format_table`."""
+    wrap: Wrap
+    # the narrowest it gets, though never so narrow that a word of its header would be broken
+    min_width: int
+    # the columns narrow by increasing order, the widest first among those of the same order
+    order: int = 0
+    # whether the column narrows to `min_width` at once rather than gradually, e.g. a date moving its time to a second line
+    snap: bool = False
+    # the widest its cells get, even if the table has room for more, e.g. so that a text keeps lines easy to read
+    max_width: Optional[int] = None
+
+
+# e.g. a description, wrapped first since it reads well over several lines, which it keeps short to be readable
+TEXT_COLUMN = Narrowing(Wrap.TEXT, min_width=20, order=0, max_width=50)
+# a role with its properties and description, one below the other, next to its permissions, see `PERMISSIONS_COLUMN`
+ROLE_COLUMN = Narrowing(Wrap.TEXT, min_width=20, order=0, max_width=32)
+# e.g. a DID pattern or an RSE name, broken only if wrapping the texts is not enough
+IDENTIFIER_COLUMN = Narrowing(Wrap.IDENTIFIER, min_width=MIN_IDENTIFIER_WIDTH, order=1)
+# the permissions of a role, see `format_permission_lists`, rendered for the width they are left
+PERMISSIONS_COLUMN = Narrowing(Wrap.FITTED, min_width=1, order=1)
+# the parameters of a permission, e.g. 'local: 0/10 MB (0% used)'
+PARAMETER_COLUMN = Narrowing(Wrap.TEXT, min_width=16, order=2)
+# a date as rendered for a role assignment, '21-Oct-2026 07:58:54 UTC', its time going below it last
+DATE_COLUMN = Narrowing(Wrap.TEXT, min_width=len('07:58:54 UTC'), order=3, snap=True)
+
+
+def _wrap_cell(cell: str, width: int, wrap: Optional[Wrap]) -> list[str]:
+    """The lines of a table cell, those longer than `width` wrapped as `wrap` tells, kept as they are if it is None."""
+    lines = []
+    for line in cell.split('\n'):
+        if wrap in (None, Wrap.FITTED) or visible_length(line) <= width:
+            lines.append(line)
+            continue
+        # a line too long loses its styles, which wrapping it could cut through
+        line = ANSI_STYLE.sub('', line)
+        if wrap == Wrap.TEXT:
+            # a property, e.g. 'from:  21-Oct-2026 07:58:54 UTC', wraps under its value
+            label = re.match(r'\S+:\s+', line)
+            lines.extend(textwrap.wrap(line, width, subsequent_indent=' ' * len(label.group()) if label else ''))
+        else:
+            # at its spaces first, if any, e.g. those of 'admin (built-in)'
+            lines.extend(part for word in textwrap.wrap(line, width, break_long_words=False) for part in break_identifier(word, width))
+    return lines
+
+
+def _narrow(widths: list[int], minimums: "Sequence[int]", narrowings: "Mapping[int, Narrowing]", excess: int) -> None:
+    """Narrow the `widths` of the columns, in place, by `excess` in total if they can, see :class:`Narrowing`."""
+    for order in sorted({narrowing.order for narrowing in narrowings.values()}):
+        columns = [column for column, narrowing in narrowings.items() if narrowing.order == order and widths[column] > minimums[column]]
+        while excess > 0 and columns:
+            column = max(columns, key=lambda column: widths[column])
+            step = widths[column] - minimums[column] if narrowings[column].snap else 1
+            widths[column] -= step
+            excess -= step
+            if widths[column] == minimums[column]:
+                columns.remove(column)
+
+
+def format_table(
+        sections: "Sequence[tuple[Sequence[str], Sequence[Sequence[str]]]]",
+        narrowings: "Optional[Mapping[int, Narrowing]]" = None,
+        fitted: "Optional[Mapping[int, Callable[[Optional[int]], Sequence[str]]]]" = None,
+        width: Optional[int] = None,
+) -> str:
+    """
+    Render tables having the same number of columns one below the other, as one table split into sections, fitting the terminal.
 
     Every section has its own header, the columns keeping the same width across all of them. A cell
-    may span several lines; the rows of a section are then separated by a dashed line, so that it is
-    clear which lines belong together:
+    may span several lines. As long as the first cell of each row holds on one line, it shows where
+    each row starts:
 
         +--------+------------+---------------+
         | TYPE   | IDENTIFIER | LIMIT         |
         |--------+------------+---------------|
         | limit  | MOCK1      | global: 10 MB |
         |        | MOCK2      |               |
-        |- - - - |- - - - - - |- - - - - - - -|
         | limit  | MOCK3      | local: 100 kB |
         +--------+------------+---------------+
 
+    Otherwise, the rows spanning several lines are separated by a dashed line, so that it is clear
+    which lines belong together:
+
+        +------------------+---------------+
+        | ROLE             | PERMISSIONS   |
+        |------------------+---------------|
+        | moderator        | DID  *:*  r-- |
+        | assignable: True |               |
+        |- - - - - - - - - |- - - - - - - -|
+        | user             | DID  *:*  rw- |
+        | assignable: True |               |
+        +------------------+---------------+
+
+    If the table is wider than `width`, the columns given a :class:`Narrowing` narrow, their cells being wrapped.
+    A cell may be styled, e.g. in bold, see `ANSI_STYLE`.
+
     :param sections: The sections, each as its headers and its rows.
+    :param narrowings: How each column narrows, by index. A column without one keeps its width.
+    :param fitted: The columns whose cells are rendered for the width they get rather than wrapped, by index, e.g. the
+                   permissions of roles aligned across them, see :func:`format_permission_lists`. Each gives the
+                   cells of its column, in the order of the rows of all the sections, given the width they should fit
+                   in, None for their natural width; the cells given in `sections` for it are ignored.
+    :param width: The width to fit in, that of the terminal by default. The table is wider if its columns cannot
+                  narrow enough, e.g. to be shown in a pager scrolling horizontally, see :func:`echo_fitted`.
     :returns: The table, as lines joined by newlines.
     """
+    narrowings = narrowings or {}
+    fitted = fitted or {}
+    width = width or terminal_width()
     columns = len(sections[0][0])
-    widths = [
-        max(len(line) for headers, rows in sections for cell in [headers[column], *(row[column] for row in rows)] for line in str(cell).split('\n'))
-        for column in range(columns)
-    ]
+    sections = [(headers, [list(row) for row in rows]) for headers, rows in sections]
+    all_rows = [row for _, rows in sections for row in rows]
+
+    def _fill(widths: "Optional[Sequence[int]]") -> None:
+        for column, render in fitted.items():
+            for row, cell in zip(all_rows, render(widths[column] if widths is not None else None)):
+                row[column] = cell
+
+    _fill(None)
+    widths, minimums = [], []
+    for column in range(columns):
+        cells = [str(cell) for headers, rows in sections for cell in [headers[column], *(row[column] for row in rows)]]
+        widths.append(max(visible_length(line) for cell in cells for line in cell.split('\n')))
+        narrowing = narrowings.get(column)
+        header_words = [len(word) for headers, _ in sections for word in headers[column].split()]
+        if narrowing is not None and narrowing.max_width is not None:
+            widths[column] = min(widths[column], max([narrowing.max_width, *header_words]))
+        minimums.append(widths[column] if narrowing is None else min(widths[column], max([narrowing.min_width, *header_words])))
+    # each column is padded and separated by borders, e.g. '| a | b |'
+    _narrow(widths, minimums, narrowings, sum(widths) + 3 * columns + 1 - width)
+
+    if fitted:
+        _fill(widths)
+        # a fitted column takes the width its cells were rendered to, more than it was given if they could not narrow enough
+        for column in fitted:
+            header_width = max(len(headers[column]) for headers, _ in sections)
+            widths[column] = max([header_width, *(visible_length(line) for row in all_rows for line in str(row[column]).split('\n'))])
 
     def _border(char: str = '-', joint: str = '+', edge: str = '+') -> str:
-        return edge + joint.join(char * (width + 2) for width in widths) + edge
+        return edge + joint.join(char * (column_width + 2) for column_width in widths) + edge
 
-    def _dashes(width: int) -> str:
-        return ('- ' * (width + 2))[:width + 2]
+    def _dashes(column_width: int) -> str:
+        return ('- ' * (column_width + 2))[:column_width + 2]
 
-    def _row(cells: "Sequence[str]") -> list[str]:
-        cell_lines = [str(cell).split('\n') for cell in cells]
-        height = max(len(lines) for lines in cell_lines)
-        return [
-            '| ' + ' | '.join((lines[line_index] if line_index < len(lines) else '').ljust(width) for lines, width in zip(cell_lines, widths)) + ' |'
-            for line_index in range(height)
+    def _pad(text: str, column_width: int) -> str:
+        return text + ' ' * (column_width - visible_length(text))
+
+    def _row(cells: "Sequence[Any]", header: bool = False) -> list[str]:
+        cell_lines = [
+            _wrap_cell(str(cell), column_width, Wrap.TEXT if header else narrowings[column].wrap if column in narrowings else None)
+            for column, (cell, column_width) in enumerate(zip(cells, widths))
         ]
+        return [
+            '| ' + ' | '.join(_pad(lines[line_index] if line_index < len(lines) else '', column_width) for lines, column_width in zip(cell_lines, widths)) + ' |'
+            for line_index in range(max(len(lines) for lines in cell_lines))
+        ]
+
+    # a first column filled on the first line of each row only already shows where each row starts
+    first_wrap = narrowings[0].wrap if 0 in narrowings else None
+    marked = all(len(lines) == 1 and lines[0] for lines in (_wrap_cell(str(row[0]), widths[0], first_wrap) for row in all_rows))
 
     lines = [_border()]
     for section_index, (headers, rows) in enumerate(sections):
         if section_index:
             lines.append(_border())
-        lines.extend(_row(headers))
+        lines.extend(_row(headers, header=True))
         lines.append(_border(joint='+', edge='|'))
-        for row_index, row in enumerate(rows):
-            if row_index and any('\n' in str(cell) for cell in (*row, *rows[row_index - 1])):
-                lines.append('|' + '|'.join(_dashes(width) for width in widths) + '|')
-            lines.extend(_row(row))
+        previous: list[str] = []
+        for row in rows:
+            row_lines = _row(row)
+            if previous and not marked and (len(previous) > 1 or len(row_lines) > 1):
+                lines.append('|' + '|'.join(_dashes(column_width) for column_width in widths) + '|')
+            lines.extend(row_lines)
+            previous = row_lines
     lines.append(_border())
     return '\n'.join(lines)
 
 
-def wrap_table_column(
-    rows: "Sequence[Sequence[Any]]",
-    headers: "Sequence[str]",
-    column: int,
-    min_width: int = 24,
-) -> list[list[Any]]:
+def echo_fitted(ctx: click.Context, output: str) -> None:
     """
-    Wrap a free-text column so that a tabulated table still fits the terminal.
+    Print the output of a command, made to fit the terminal, see :func:`format_table`.
 
-    The other columns keep their natural width and whatever horizontal space is left over
-    is given to `column`, so that long values (e.g. a role description) wrap instead of
-    stretching the table far beyond the terminal. Line breaks already present in the text
-    are kept, so paragraphs stay intact.
-
-    :param rows: The rows that will be tabulated.
-    :param headers: The column headers of the table.
-    :param column: Index of the column to wrap.
-    :param min_width: Lower bound, so a narrow terminal yields a tall table rather than one character per line.
-    :returns: A new list of rows, with `column` wrapped.
+    If a line is still wider than the terminal, e.g. an identifier no column could narrow enough for, the output
+    is shown in a pager scrolling horizontally, as the rich tables are, rather than letting the terminal wrap it.
+    The styles of the output, see `ANSI_STYLE`, are dropped if it is not printed on a terminal.
     """
-    natural_width = 0
-    for index, header in enumerate(headers):
-        if index == column:
-            continue
-        # a multi-line cell is as wide as its longest line
-        natural_width += max([len(header)] + [len(line) for row in rows for line in str(row[index]).splitlines()])
-
-    # every column is padded and separated by borders, e.g. '| a | b |' in the default 'psql' format
-    borders = 3 * len(headers) + 1
-    terminal_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-    width = max(min_width, terminal_width - natural_width - borders)
-
-    wrapped_rows = []
-    for row in rows:
-        wrapped_row = list(row)
-        lines = []
-        for line in str(wrapped_row[column]).splitlines():
-            # an empty line wraps to nothing, keep it so blank lines between paragraphs survive
-            lines.extend(textwrap.wrap(line, width) or [''])
-        wrapped_row[column] = '\n'.join(lines)
-        wrapped_rows.append(wrapped_row)
-
-    return wrapped_rows
+    too_wide = max(visible_length(line) for line in output.split('\n')) > terminal_width()
+    if too_wide and ctx.obj.console.is_terminal and not ctx.obj.no_pager and shutil.which('less') is not None:
+        # unlike the default pager, without -F, so that it does not quit with the lines chopped if they fit vertically
+        pydoc.pipepager(output, 'less -RSXK')
+    else:
+        click.echo(output)
 
 
 def exception_handler(function):

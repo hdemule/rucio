@@ -4,9 +4,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import click
-from tabulate import tabulate
 
 from rucio.cli.utils import (
+    DATE_COLUMN,
+    IDENTIFIER_COLUMN,
+    PARAMETER_COLUMN,
+    PERMISSIONS_COLUMN,
+    ROLE_COLUMN,
+    TEXT_COLUMN,
     DidOperationType,
     MetadataOperations,
     OptionalDateTime,
@@ -14,14 +19,15 @@ from rucio.cli.utils import (
     RoleOperations,
     SizeFormat,
     describe_metadata_keys,
+    echo_fitted,
     format_metadata_operations,
     format_operations,
-    format_permission_trees,
+    format_permission_lists,
     format_quota,
-    format_sections,
+    format_table,
     format_tree,
     permission_lines,
-    wrap_table_column,
+    terminal_width,
 )
 from rucio.common.exception import AccessDenied, AccountNotFound, InvalidRSEExpression, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound, RSENotFound
 from rucio.common.utils import str_to_date
@@ -38,12 +44,9 @@ OPTIONAL_DATE = OptionalDateTime()
 DATE = click.DateTime(formats=OptionalDateTime.FORMATS)
 DATE_EXAMPLE = "2012-02-29 or 2012-02-29T16:33:30"
 
-# appended to the name of a reserved role when listing roles, and explained below it with `--detail`
+# appended to the name of a reserved role when listing roles, and explained in place of its permissions with `--detail`
 RESERVED_ROLE_TAG = "(built-in)"
-RESERVED_ROLE_DETAIL = textwrap.fill(
-    "`-- (managed by Rucio)",
-    width=40, initial_indent="", subsequent_indent="  ",
-)
+RESERVED_ROLE_PERMISSIONS = "(managed by Rucio)"
 
 
 @contextmanager
@@ -90,35 +93,66 @@ def _format_date(date: Optional[str]) -> str:
         return date
 
 
-def _role_label(role_name: str, reserved: bool) -> str:
-    """The name of a role, tagged with `RESERVED_ROLE_TAG` if it is reserved."""
-    return f"{role_name} {RESERVED_ROLE_TAG}" if reserved else role_name
+def _fill(text: str) -> str:
+    """Wrap a line printed along a table, e.g. its title, to the width of the terminal, so that it does not make the output too wide, see :func:`echo_fitted`."""
+    return textwrap.fill(text, terminal_width())
 
 
-def _role_details(
+def _role_label(role_name: str, reserved: bool, emphasized: bool = False) -> str:
+    """The name of a role, in bold if `emphasized`, tagged with `RESERVED_ROLE_TAG` if it is reserved."""
+    name = click.style(role_name, bold=True) if emphasized else role_name
+    return f"{name} {RESERVED_ROLE_TAG}" if reserved else name
+
+
+def _role_card(role_name: str, reserved: bool, properties: "Sequence[tuple[str, str]]", description: Optional[str]) -> str:
+    """
+    A role as the first cell of a row of a `--detail` table, its name emphasized, its properties and its description below it:
+
+        moderator
+        assignable: True
+        locked:     False
+
+        Reads the DIDs of scope physics.
+
+    :param properties: The properties, as their label and value, e.g. ('assignable', 'True').
+    """
+    label_width = max(len(label) for label, _ in properties) + 1
+    lines = [_role_label(role_name, reserved, emphasized=True)]
+    lines.extend(f"{(label + ':').ljust(label_width)} {value}" for label, value in properties)
+    if description:
+        lines.extend(['', description])
+    return '\n'.join(lines)
+
+
+def _role_permissions(
         ctx: click.Context,
         roles: "Sequence[tuple[str, bool, Iterable[Mapping[str, Any]]]]",
         account_name: Optional[str] = None,
         held: "Collection[str]" = (),
-) -> list[str]:
+) -> "Callable[[Optional[int]], list[str]]":
     """
-    The label of each role followed by its permission tree, the trees being aligned with each other, see :func:`format_permission_trees`.
+    The permissions of each role, as the PERMISSIONS column of a `--detail` table, aligned with each other, see
+    :func:`format_permission_lists`.
 
-    A reserved role has no permissions, so its tag is explained instead of an empty permission tree.
+    A reserved role has no permissions, so its tag is explained instead.
 
     :param roles: The roles, as their name, whether they are reserved, and their permissions as listed by the server.
     :param account_name: The account to measure the limits against, see :func:`_usage_resolver`. None to only list the limits.
     :param held: The roles `account_name` holds, see :func:`_holds`: only their limits are measured, the others being
                  limits the account is not bound by.
-    :returns: The details, in the order of `roles`, each to be used as a single table cell.
+    :returns: Gives the permissions, in the order of `roles`, given the width they should fit in, see `format_table`.
     """
     rse_names = _rse_names_resolver(ctx)
     used = _usage_resolver(ctx, account_name, rse_names) if account_name is not None and held else None
-    trees = iter(format_permission_trees(
-        [(_role_label(role_name, reserved), permissions, used if role_name in held else None) for role_name, reserved, permissions in roles if not reserved],
-        rse_names, SizeFormat.of(ctx.obj.human),
-    ))
-    return [f"{_role_label(role_name, reserved)}\n{RESERVED_ROLE_DETAIL}" if reserved else next(trees) for role_name, reserved, _ in roles]
+
+    def _permissions(width: Optional[int]) -> list[str]:
+        cells = iter(format_permission_lists(
+            [(permissions, used if role_name in held else None) for role_name, reserved, permissions in roles if not reserved],
+            rse_names, SizeFormat.of(ctx.obj.human), width=width,
+        ))
+        return [RESERVED_ROLE_PERMISSIONS if reserved else next(cells) for _, reserved, _ in roles]
+
+    return _permissions
 
 
 class _RBACStatusHelp:
@@ -155,19 +189,23 @@ def role():
 def list_(ctx: click.Context, detail: bool) -> None:
     """List the roles. Roles managed by Rucio are tagged (built-in)."""
     roles = ctx.obj.client.list_roles()
-    headers = ["ROLE", "ASSIGNABLE", "LOCKED", "DESCRIPTION"]
     if not detail:
-        rows = [[_role_label(entry['role'], bool(entry.get('reserved'))), entry.get('assignable'), entry.get('locked'), entry.get('description') or ''] for entry in roles]
-        click.echo(tabulate(wrap_table_column(rows, headers, column=3), headers=headers, tablefmt=ctx.obj.tablefmt))
+        rows = [
+            [_role_label(entry['role'], bool(entry.get('reserved'))), str(entry.get('assignable')), str(entry.get('locked')), entry.get('description') or '-']
+            for entry in roles
+        ]
+        echo_fitted(ctx, format_table([(["ROLE", "ASSIGNABLE", "LOCKED", "DESCRIPTION"], rows)], {0: IDENTIFIER_COLUMN, 3: TEXT_COLUMN}))
         return
 
-    role_cells = _role_details(ctx, [
+    rows = [
+        [_role_card(entry['role'], bool(entry.get('reserved')), [('assignable', str(entry.get('assignable'))), ('locked', str(entry.get('locked')))], entry.get('description')), '']
+        for entry in roles
+    ]
+    permissions = _role_permissions(ctx, [
         (entry['role'], bool(entry.get('reserved')), [] if entry.get('reserved') else ctx.obj.client.list_role_permissions(entry['role']))
         for entry in roles
     ])
-    rows = [[role_cell, str(entry.get('assignable')), str(entry.get('locked')), entry.get('description') or '-'] for role_cell, entry in zip(role_cells, roles)]
-    # each role spans several lines, so that the rows are separated, see `format_sections`
-    click.echo(format_sections([(headers, wrap_table_column(rows, headers, column=3))]))
+    echo_fitted(ctx, format_table([(["ROLE", "PERMISSIONS"], rows)], {0: ROLE_COLUMN, 1: PERMISSIONS_COLUMN}, fitted={1: permissions}))
 
 
 @role.command("add")
@@ -278,38 +316,35 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
     if role_name is not None:
         assignments = ctx.obj.client.list_role_accounts(role_name)
         reserved = any(entry['role'] == role_name and entry.get('reserved') for entry in ctx.obj.client.list_roles())
-        click.echo(f"Accounts assigned to role {_role_label(role_name, reserved)}:")
         rows = [[assignment['account'], _format_date(assignment.get('activates_at')), _format_date(assignment.get('expires_at'))] for assignment in assignments]
-        click.echo(tabulate(rows, headers=["ACCOUNT", "ACTIVATES AT", "EXPIRES AT"], tablefmt=ctx.obj.tablefmt))
-    else:
-        rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
-        click.echo(f"Roles for account '{rbac['account']}':")
-        if not detail:
-            rows = [
-                [_role_label(entry['role'], bool(entry.get('reserved'))), _format_date(entry.get('activates_at')), _format_date(entry.get('expires_at'))]
-                for entry in rbac['roles']
-            ]
-            headers = ["ROLE", "ACTIVATES AT", "EXPIRES AT"]
-            click.echo(tabulate(wrap_table_column(rows, headers, column=2), headers=headers, tablefmt=ctx.obj.tablefmt))
-        else:
-            permissions_by_role: dict[str, list[dict[str, Any]]] = {}
-            for permission in rbac['permissions']:
-                permissions_by_role.setdefault(permission['role'], []).append(permission)
+        table = format_table([(["ACCOUNT", "ACTIVATES AT", "EXPIRES AT"], rows)], {0: IDENTIFIER_COLUMN, 1: DATE_COLUMN, 2: DATE_COLUMN})
+        echo_fitted(ctx, f"{_fill(f'Accounts assigned to role {_role_label(role_name, reserved)}:')}\n{table}")
+        return
 
-            role_cells = _role_details(
-                ctx, [(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], [])) for entry in rbac['roles']],
-                account_name=rbac['account'], held={entry['role'] for entry in rbac['roles'] if _holds(entry)},
-            )
-            rows = [
-                [role_cell, _format_date(entry.get('activates_at')), _format_date(entry.get('expires_at')), entry.get('description') or '-']
-                for role_cell, entry in zip(role_cells, rbac['roles'])
-            ]
-            headers = ["ROLE", "ACTIVATES AT", "EXPIRES AT", "DESCRIPTION"]
-            if rows:
-                # each role spans several lines, so that the rows are separated, see `format_sections`
-                click.echo(format_sections([(headers, wrap_table_column(rows, headers, column=3))]))
-            else:
-                click.echo(tabulate(rows, headers=headers, tablefmt=ctx.obj.tablefmt))
+    rbac = ctx.obj.client.list_account_roles(account_name, use_issuer_account=me, detail=detail)
+    title = _fill(f"Roles for account '{rbac['account']}':")
+    if not detail:
+        rows = [
+            [_role_label(entry['role'], bool(entry.get('reserved'))), _format_date(entry.get('activates_at')), _format_date(entry.get('expires_at'))]
+            for entry in rbac['roles']
+        ]
+        table = format_table([(["ROLE", "ACTIVATES AT", "EXPIRES AT"], rows)], {0: IDENTIFIER_COLUMN, 1: DATE_COLUMN, 2: DATE_COLUMN})
+        echo_fitted(ctx, f"{title}\n{table}")
+        return
+
+    permissions_by_role: dict[str, list[dict[str, Any]]] = {}
+    for permission in rbac['permissions']:
+        permissions_by_role.setdefault(permission['role'], []).append(permission)
+    rows = [
+        [_role_card(entry['role'], bool(entry.get('reserved')), [('from', _format_date(entry.get('activates_at'))), ('until', _format_date(entry.get('expires_at')))], entry.get('description')), '']
+        for entry in rbac['roles']
+    ]
+    permissions = _role_permissions(
+        ctx, [(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], [])) for entry in rbac['roles']],
+        account_name=rbac['account'], held={entry['role'] for entry in rbac['roles'] if _holds(entry)},
+    )
+    table = format_table([(["ROLE", "PERMISSIONS"], rows)], {0: ROLE_COLUMN, 1: PERMISSIONS_COLUMN}, fitted={1: permissions})
+    echo_fitted(ctx, f"{title}\n{table}")
 
 
 @account.command("add")
@@ -411,10 +446,10 @@ def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
     if not sections:
         click.echo(f"No permission associated with role '{role_name}'.")
         return
-    click.echo(f"Permissions associated with role '{role_name}':")
-    click.echo(format_sections(sections))
+    output = [_fill(f"Permissions associated with role '{role_name}':"), format_table(sections, {1: IDENTIFIER_COLUMN, 2: PARAMETER_COLUMN})]
     if limit_rows and used is not None:
-        click.echo(f"Limits measured against the usage of your account '{account_name}'.")
+        output.append(_fill(f"Limits measured against the usage of your account '{account_name}'."))
+    echo_fitted(ctx, '\n'.join(output))
 
 
 # --- DIDs -------------------------------------------------------------------------------------
