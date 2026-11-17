@@ -47,6 +47,10 @@ RBAC_WARNING_HEADER = 'X-Rucio-Warning'
 # setting them takes DELETE on the DID, or owning it, see `rucio.core.permission.generic`.
 RBAC_DELETE_METADATA_KEYS = frozenset({'lifetime', 'expired_at', 'eol_at', 'purge_replicas'})
 
+# The quota of a role permission on RSEs which does not cap anything, like an account limit of -1.
+# It must always be given explicitly: a quota which is not given is 0, so that nothing may be written.
+ROLE_QUOTA_NOCAP = -1
+
 # Stands for the issuer's account in REST paths. It cannot collide with an account name,
 # since '@' is not allowed in those.
 ISSUER_ACCOUNT_ALIAS = '@me'
