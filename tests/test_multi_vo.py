@@ -101,9 +101,9 @@ class TestVOCoreGateway:
             delete_replication_rule(rule_id=rule_id, purge_replicas=False, issuer='root', vo=second_vo)
 
         # check locks are not accessible from other VO
-        locks = list(get_replica_locks_for_rule_id(rule_id, vo=vo))
+        locks = list(get_replica_locks_for_rule_id(issuer='root', rule_id=rule_id, vo=vo))
         assert len(locks) == 1
-        locks = list(get_replica_locks_for_rule_id(rule_id, vo=second_vo))
+        locks = list(get_replica_locks_for_rule_id(issuer='root', rule_id=rule_id, vo=second_vo))
         assert len(locks) == 0
 
         delete_replication_rule(rule_id=rule_id, purge_replicas=False, issuer='root', vo=vo)
@@ -651,7 +651,7 @@ class TestMultiVoClients:
         add_did(scope, new, 'DATASET', 'root', vo=second_vo)
         add_did(scope, shr, 'DATASET', 'root', vo=second_vo)
         did_list_tst = list(did_client.list_dids(scope, {}))
-        did_list_new = list(list_dids(scope, {}, vo=second_vo))
+        did_list_new = list(list_dids(issuer='root', scope=scope, filters={}, vo=second_vo))
         assert tst in did_list_tst
         assert new not in did_list_tst
         assert shr in did_list_tst
@@ -724,7 +724,7 @@ class TestMultiVoClients:
         add_scope(new, 'root', 'root', vo=second_vo)
         add_scope(shr, 'root', 'root', vo=second_vo)
         scope_list_tst = scope_client.list_scopes()
-        scope_list_new = list(list_scopes(filter_={}, vo=second_vo))
+        scope_list_new = list(list_scopes(issuer='root', filter_={}, vo=second_vo))
         assert tst in scope_list_tst
         assert new not in scope_list_tst
         assert shr in scope_list_tst
@@ -1029,7 +1029,7 @@ class TestMultiVODaemons:
         )
 
         did_list_tst = list(did_client.list_dids(shr_scope, {}))
-        did_list_new = list(list_dids(shr_scope, {}, vo=second_vo))
+        did_list_new = list(list_dids(issuer='root', scope=shr_scope, filters={}, vo=second_vo))
         assert len(did_list_tst) != 0
         assert len(did_list_new) == 0
 
