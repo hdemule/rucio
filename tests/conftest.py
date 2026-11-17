@@ -165,6 +165,18 @@ def vo() -> str:
         return get_long_vo()
 
 
+@pytest.fixture
+def generic_permission_policy(vo: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Check the permissions of the VO with the generic permission policy, whatever the policy package of the
+    instance is: the role permissions (RBAC) are part of the generic policy. Only applies in-process, not to
+    the REST server.
+    """
+    from rucio.core import permission
+    from rucio.core.permission import generic
+    monkeypatch.setitem(permission.permission_modules, vo, generic)
+
+
 @pytest.fixture(scope='session')
 def second_vo() -> str:
     from rucio.common.config import config_get_bool
