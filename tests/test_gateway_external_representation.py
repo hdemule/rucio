@@ -185,7 +185,7 @@ class TestGatewayExternalRepresentation:
         attach_dids_to_dids([attachment], issuer='root', vo=vo)
 
         # test scope_list
-        out = scope_list(scope_name, recursive=True, vo=vo)
+        out = scope_list(issuer='root', scope=scope_name, recursive=True, vo=vo)
         out = list(out)
         assert 0 != len(out)
         parent_found = False
@@ -197,8 +197,8 @@ class TestGatewayExternalRepresentation:
         assert parent_found
 
         # test get_did
-        add_did_to_followed(scope_name, ext_parent, account_name, vo=vo)
-        out = get_users_following_did(ext_parent, scope_name, vo=vo)
+        add_did_to_followed(issuer='root', scope=scope_name, name=ext_parent, account=account_name, vo=vo)
+        out = get_users_following_did(issuer='root', name=ext_parent, scope=scope_name, vo=vo)
         out = list(out)
         assert 0 != len(out)
         for user in out:
@@ -257,7 +257,7 @@ class TestGatewayExternalRepresentation:
                       'dids': [{'scope': scope_name, 'name': did}]}
         attach_dids_to_dids([attachment], issuer='root', vo=vo)
 
-        out = list_replicas(dids=[{'scope': scope_name, 'name': did}], resolve_parents=True, vo=vo)
+        out = list_replicas(dids=[{'scope': scope_name, 'name': did}], resolve_parents=True, issuer='root', vo=vo)
         out = list(out)
         assert 0 != len(out)
         parents_found = False
@@ -393,12 +393,12 @@ class TestGatewayExternalRepresentation:
     def test_gateway_scope(self, vo, vo2, account_name, scope_name, scope):
         """ SCOPE (Gateway): Test external representation of scopes """
 
-        out = list_scopes()
+        out = list_scopes(issuer='root')
         assert scope_name in out
         if vo2:
             assert scope.internal not in out
 
-        out = get_scopes(account_name, vo=vo)
+        out = get_scopes(account_name, issuer='root', vo=vo)
         assert scope_name in out
         if vo2:
             assert scope.internal not in out
