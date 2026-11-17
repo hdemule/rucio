@@ -325,7 +325,9 @@ def list_replicas(
 
         # the requested collections may contain files, and the files may have parents, in other scopes
         internal_issuer = InternalAccount(issuer, vo=vo)
-        can_access = rucio.core.permission.did_filter(internal_issuer, 'list_replicas', session=session)
+        # the PFNs of the replicas give access to the data, which a metadata permission making a DID visible does not grant
+        can_access = rucio.core.permission.did_filter(internal_issuer, 'list_replicas', session=session,
+                                             reads_data=True)
 
         for rep in replicas:
             if not can_access(rep['scope'], rep['name']):
