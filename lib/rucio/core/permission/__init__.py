@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from rucio.common.types import InternalAccount, InternalScope
+    from rucio.core.permission.generic import MetadataKeyFilter
 
 LOGGER = logging.getLogger('policy')
 
@@ -428,8 +429,8 @@ def scope_filter(issuer: "InternalAccount", action: str, *, session: "Session", 
     return _policy_function(issuer, 'scope_filter')(issuer, action, session=session, operation=operation, any_did=any_did)
 
 
-def did_filter(issuer: "InternalAccount", action: str, *, session: "Session",
-               operation: DidOperationType = DidOperationType.READ) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
+def did_filter(issuer: "InternalAccount", action: str, *, session: "Session", operation: DidOperationType = DidOperationType.READ,
+               reads_data: bool = False) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
     """
     Build a callable telling whether an account may perform an operation on a DID, see :func:`rucio.core.permission.generic.did_filter`.
 
@@ -437,8 +438,20 @@ def did_filter(issuer: "InternalAccount", action: str, *, session: "Session",
     :param action: The filter of the listing, e.g. 'list_dids'.
     :param session: The database session.
     :param operation: The operation to check.
+    :param reads_data: Whether the data of the DIDs are read, e.g. the PFNs of their replicas.
     """
-    return _policy_function(issuer, 'did_filter')(issuer, action, session=session, operation=operation)
+    return _policy_function(issuer, 'did_filter')(issuer, action, session=session, operation=operation, reads_data=reads_data)
+
+
+def metadata_key_filter(issuer: "InternalAccount", *, session: "Session") -> "MetadataKeyFilter":
+    """
+    Build the filter hiding from the DIDs an account sees the metadata keys it may not read, see
+    :func:`rucio.core.permission.generic.metadata_key_filter`.
+
+    :param issuer: The account the listing is made for.
+    :param session: The database session.
+    """
+    return _policy_function(issuer, 'metadata_key_filter')(issuer, session=session)
 
 
 def filter_scopes(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", action: str, *, session: "Session",
@@ -462,7 +475,7 @@ def filter_scopes(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", 
 
 
 def filter_dids(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", action: str, *, session: "Session",
-                operation: DidOperationType = DidOperationType.READ, scope_keyword: str = "scope",
+                operation: DidOperationType = DidOperationType.READ, reads_data: bool = False, scope_keyword: str = "scope",
                 name_keyword: str = "name") -> "Iterator[dict[str, Any]]":
     """
     Yield the items whose DID the account may perform an operation on, see :func:`did_filter`.
@@ -472,10 +485,28 @@ def filter_dids(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", ac
     :param action: The filter of the listing, e.g. 'list_dids'.
     :param session: The database session.
     :param operation: The operation to check.
+    :param reads_data: Whether the data of the DIDs are read, e.g. the PFNs of their replicas.
     :param scope_keyword: The key of the scope in the items.
     :param name_keyword: The key of the name in the items.
     """
-    can_access = did_filter(issuer, action, session=session, operation=operation)
+    can_access = did_filter(issuer, action, session=session, operation=operation, reads_data=reads_data)
     for item in items:
         if can_access(item.get(scope_keyword), item.get(name_keyword)):
             yield item
+
+
+def filter_metadata_keys(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", *, session: "Session", scope_keyword: str = "scope",
+                         name_keyword: str = "name") -> "Iterator[dict[str, Any]]":
+    """
+    Yield the items standing for DIDs, each with only the metadata keys the account may read, see :func:`metadata_key_filter`.
+    The DIDs themselves are filtered beforehand, with :func:`filter_dids`.
+
+    :param items: The items, each with the scope and the name of its DID under `scope_keyword` and `name_keyword`.
+    :param issuer: The account the listing is made for.
+    :param session: The database session.
+    :param scope_keyword: The key of the scope in the items.
+    :param name_keyword: The key of the name in the items.
+    """
+    key_filter = metadata_key_filter(issuer, session=session)
+    for item in items:
+        yield key_filter.project_item(item, scope_keyword=scope_keyword, name_keyword=name_keyword)
