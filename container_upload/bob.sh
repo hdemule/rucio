@@ -1,0 +1,1 @@
+export RUCIO_CONFIG=/opt/rucio/etc/rucio-bob.cfg
