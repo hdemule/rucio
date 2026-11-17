@@ -171,7 +171,10 @@ class Search(ErrorHandlingMethodView):
         """
         ---
         summary: List Data identifier
-        description: "List all data identifiers in a scope which match a given metadata."
+        description: |
+          List all data identifiers in a scope which match a given metadata.
+          With RBAC, a DID is only listed if the account may read every metadata key the filters use on it, and
+          the long format leaves out the keys it may not read.
         tags:
           - Data Identifiers
         parameters:
@@ -1350,7 +1353,9 @@ class Meta(ErrorHandlingMethodView):
         """
         ---
         summary: Get metadata
-        description: "Retrieve the metadata of a data identifier (DID)."
+        description: |
+          Retrieve the metadata of a data identifier (DID).
+          With RBAC, the keys the account may not read are left out.
         tags:
           - Data Identifiers
         parameters:
@@ -1772,6 +1777,7 @@ class BulkDIDsMeta(ErrorHandlingMethodView):
             (plug‑in permitting).
           * `plugin` chooses the metadata plug‑in; `"ALL"` returns the union of every
             available plug‑in.
+          * With RBAC, the keys the account may not read on a DID are left out.
 
         tags:
           - Data Identifiers
