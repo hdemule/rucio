@@ -52,6 +52,8 @@ def has_permission(issuer: str, action: str, kwargs: dict[str, Any], vo: str = D
 
     if 'scope' in kwargs:
         kwargs['scope'] = InternalScope(kwargs['scope'], vo=vo)
+    if 'scopes' in kwargs:
+        kwargs['scopes'] = [InternalScope(s, vo=vo) for s in kwargs['scopes']]
     if 'attachments' in kwargs:
         for a in kwargs['attachments']:
             a['scope'] = InternalScope(a['scope'], vo=vo)
