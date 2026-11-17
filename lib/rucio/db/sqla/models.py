@@ -16,13 +16,13 @@ import uuid
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, Integer, SmallInteger, String, Text, UniqueConstraint, event
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, Integer, SmallInteger, String, Text, UniqueConstraint, event, false, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm import Mapped, mapped_column, object_mapper, relationship
 from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, Index, PrimaryKeyConstraint, Table
-from sqlalchemy.sql import Delete
+from sqlalchemy.sql import Delete, column
 from sqlalchemy.types import LargeBinary
 
 # schema must be imported as a module to avoid circular imports with policy packages,
@@ -32,6 +32,7 @@ from rucio.common import utils
 from rucio.common.constants import DEFAULT_VO, TransferLimitDirection
 from rucio.common.types import InternalAccount, InternalScope  # noqa: TCH001 (types are needed by SQLAlchemy)
 from rucio.db.sqla.constants import (
+    METADATA_PERMISSION_NO_KEY,
     AccountStatus,
     AccountType,
     BadFilesStatus,
@@ -445,6 +446,38 @@ class RoleDidPermissionAssociation(BASE, ModelBase):
                    CheckConstraint('CAN_READ IS NOT NULL', name='ROLE_DID_PERMISSION_MAP_CAN_READ_NN'),
                    CheckConstraint('CAN_WRITE IS NOT NULL', name='ROLE_DID_PERMISSION_MAP_CAN_WRITE_NN'),
                    CheckConstraint('CAN_DELETE IS NOT NULL', name='ROLE_DID_PERMISSION_MAP_CAN_DELETE_NN'))
+
+
+class RoleMetadataPermissionAssociation(BASE, ModelBase):
+    """
+    Represents a role's permission on a metadata key (DID pattern + metadata key + operations) for Role-Based Access Control (RBAC)
+
+    The DID pattern has the format of `RoleDidPermissionAssociation.did_pattern`. A row overrides, for this
+    key of the DIDs its pattern matches, what the DID permissions of the same role grant on their metadata,
+    even when it grants no operation. Each operation of `MetadataOperationType` has its own boolean column,
+    named by `MetadataOperationType.column`.
+
+    Two values of `meta_key` are reserved: METADATA_PERMISSION_ALL_KEYS ('*') covers every key, and
+    METADATA_PERMISSION_NO_KEY (':none:') no key at all, which may only grant READ, see `rucio.db.sqla.constants`.
+    """
+    __tablename__ = 'role_metadata_permission_map'
+    role: Mapped[str] = mapped_column(String(64))
+    did_pattern: Mapped[str] = mapped_column(String(common_schema.get_schema_value('SCOPE_LENGTH') + 1 + common_schema.get_schema_value('NAME_LENGTH')))
+    # Intentionally shorter than did_keys.key (255), to keep the primary key (role, did_pattern, meta_key) well within
+    # the 3072 bytes MySQL (InnoDB) allows for an index.
+    meta_key: Mapped[str] = mapped_column(String(128))
+    can_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_write: Mapped[bool] = mapped_column(Boolean, default=False)
+    _table_args = (PrimaryKeyConstraint('role', 'did_pattern', 'meta_key', name='ROLE_METADATA_PERMISSION_MAP_PK'),
+                   ForeignKeyConstraint(['role'], ['roles.role'], name='ROLE_METADATA_PERMISSION_MAP_ROLE_FK', ondelete='CASCADE'),
+                   CheckConstraint('ROLE IS NOT NULL', name='ROLE_METADATA_PERMISSION_MAP_ROLE_NN'),
+                   CheckConstraint('DID_PATTERN IS NOT NULL', name='ROLE_METADATA_PERMISSION_MAP_DID_PATTERN_NN'),
+                   CheckConstraint('META_KEY IS NOT NULL', name='ROLE_METADATA_PERMISSION_MAP_META_KEY_NN'),
+                   CheckConstraint('CAN_READ IS NOT NULL', name='ROLE_METADATA_PERMISSION_MAP_CAN_READ_NN'),
+                   CheckConstraint('CAN_WRITE IS NOT NULL', name='ROLE_METADATA_PERMISSION_MAP_CAN_WRITE_NN'),
+                   # an expression rather than text, so that each database compares the boolean its own way (0 on Oracle)
+                   CheckConstraint(or_(column('meta_key') != METADATA_PERMISSION_NO_KEY, column('can_write') == false()),
+                                   name='ROLE_METADATA_PERMISSION_MAP_NO_KEY_CHK'))
 
 
 class DataIdentifier(BASE, ModelBase):
