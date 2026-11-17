@@ -246,15 +246,18 @@ def test_ownership_needs_write_on_the_did(random_account, grant, catalogue, gene
     grant('mock:%(prefix)s_new*', 'w')
     # setting a key leading to its removal alters the DID
     assert not generic.perm_set_metadata(random_account, {'scope': MOCK, 'name': own, 'key': 'lifetime'}, db_session)
-    assert not generic.perm_read_data(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert not generic.perm_list_replicas(random_account, {'scope': MOCK, 'name': own}, db_session)
 
     grant('mock:%(prefix)s_own*', 'r')
     assert not generic.perm_set_metadata(random_account, {'scope': MOCK, 'name': own, 'key': 'lifetime'}, db_session)
-    assert generic.perm_read_data(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert generic.perm_list_replicas(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert not generic.did_filter(random_account, 'list_dids', db_session, operation=DidOperationType.DELETE)(MOCK, own)
 
+    # ownership and WRITE make DELETE
     grant('mock:%(prefix)s_own*', 'w')
     assert generic.perm_set_metadata(random_account, {'scope': MOCK, 'name': own, 'key': 'lifetime'}, db_session)
-    assert generic.perm_read_data(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert generic.perm_list_replicas(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert generic.did_filter(random_account, 'list_dids', db_session, operation=DidOperationType.DELETE)(MOCK, own)
 
 
 def test_filtering_listings_per_did(random_account, grant, catalogue, generic, db_session):
@@ -628,7 +631,7 @@ def test_read_only_area_in_a_writable_scope(random_account, grant, catalogue, ge
     catalogue.add(calib, owner='someone else')
     grant('rbac_other:%(prefix)s*', 'rwd')
     grant('rbac_other:%(prefix)s_raw*', 'r')
-    assert generic.perm_read_data(random_account, {'scope': OTHER, 'name': raw}, db_session)
+    assert generic.perm_list_replicas(random_account, {'scope': OTHER, 'name': raw}, db_session)
     # setting a key leading to its removal alters the DID
     assert not generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': raw, 'key': 'lifetime'}, db_session)
     assert generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': calib, 'key': 'lifetime'}, db_session)
