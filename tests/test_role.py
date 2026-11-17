@@ -21,6 +21,7 @@ from rucio.common.exception import RoleReserved
 from rucio.common.utils import generate_uuid
 from rucio.core import role as core_role
 from rucio.db.sqla import models
+from rucio.db.sqla.constants import DidOperationType, RolePermissionType
 
 pytestmark = pytest.mark.noparallel(reason='alters the roles shared by the whole instance')
 
@@ -84,6 +85,21 @@ def test_update_reserved_role_assignable(reserved_role, db_session):
     assert updated['locked'] is True
 
 
+@pytest.mark.parametrize('force', [False, True])
+def test_add_reserved_role_permission(reserved_role, db_session, force):
+    """ROLE (CORE): A reserved role cannot be granted a permission, even forced."""
+    with pytest.raises(RoleReserved):
+        core_role.add_role_permission(reserved_role, RolePermissionType.DID, {'did_pattern': 'user.*', 'operations': [DidOperationType.READ]}, force=force, session=db_session)
+    assert core_role.list_role_permissions(reserved_role, session=db_session) == []
+
+
+@pytest.mark.parametrize('force', [False, True])
+def test_delete_reserved_role_permission(reserved_role, db_session, force):
+    """ROLE (CORE): A reserved role cannot have a permission removed, even forced."""
+    with pytest.raises(RoleReserved):
+        core_role.delete_role_permission(reserved_role, RolePermissionType.DID, {'did_pattern': 'user.*'}, force=force, session=db_session)
+
+
 def test_list_account_roles_reserved_role(reserved_role, db_session, root_account):
     """ROLE (CORE): A reserved role is flagged as such among the roles of an account."""
     core_role.add_account_role(root_account, reserved_role, force=True, session=db_session)
@@ -118,6 +134,15 @@ def policy_role(db_session):
     db_session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role == role))
     db_session.execute(delete(models.Roles).where(models.Roles.role == role))
     db_session.commit()
+
+
+@pytest.mark.parametrize('skip_filtering, expected', [(False, []), (True, [{'scope': None}])])
+def test_filter_iterable_by_scope_access_skip_filtering(db_session, root_account, skip_filtering, expected):
+    """ROLE (CORE): Skipping the filtering yields every item, even one whose scope would be refused."""
+    items = [{'scope': None}]
+    assert list(core_role.filter_iterable_by_scope_access(items, account=root_account, session=db_session, skip_filtering=skip_filtering)) == expected
+    can_access = core_role.scope_access_checker(account=root_account, session=db_session, skip_filtering=skip_filtering)
+    assert can_access(None) is bool(expected)
 
 
 def _assign_expired(account, role, session):
