@@ -692,7 +692,7 @@ def _confirm_unlock(ctx: click.Context, role_name: str) -> bool:
     if not any(entry['role'] == role_name and entry.get('locked') for entry in ctx.obj.client.list_roles()):
         return True
 
-    click.echo(f"You are about to unlock role '{role_name}'. This means that its description, assignable state and associated permissions can be changed, and the role deleted.")
+    click.echo(f"You are about to unlock role '{role_name}'. This means that its description, assignable state and associated permissions can be changed, and the role deleted (e.g. by a policy package synchronization).")
 
     return click.confirm(f"Do you really want to unlock role '{role_name}'?")
 
