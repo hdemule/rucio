@@ -1315,6 +1315,52 @@ def _permission_checker(*, account: "InternalAccount", session: "Session") -> "C
     return _check
 
 
+def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session: "Session") -> bool:
+    """
+    Tell whether the policy package disables a filter for the account.
+
+    Filtering is the default: a filter is only disabled if the policy package of the instance
+    lists it, from the most general to the most specific, in:
+
+    - its `disable_filters_for_all_accounts`: for every account regardless of its roles,
+      even for an account holding no role at all;
+    - its `disable_filters_for_all_roles`: for every account holding at least one role;
+    - the 'disable-filters' of a role: for every account holding that role.
+
+    An account only holds a role through an assignment which is active. A reserved role
+    never disables a filter, since the policy package cannot define it. The filters are documented
+    in the role module of the policy package.
+
+    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`: without RBAC, the caller does not filter at all.
+
+    :param account: The account the listing is filtered for.
+    :param filter_name: The name of the filter, e.g. 'list_scopes'.
+    :param session: The database session.
+    :returns: True if the listing must not be filtered for the account.
+    """
+    if filter_name in permission.get_disabled_filters_for_all_accounts():
+        return True
+
+    if filter_name in permission.get_disabled_filters_for_all_roles():
+        # any role disables the filter, so there is no need to look at the role definitions
+        role_disables_filter = models.AccountRoleAssociation.role.not_in(list(RESERVED_ROLES))
+    else:
+        roles = [
+            role for role, definition in permission.get_roles().items()
+            if filter_name in definition.get('disable_filters', ()) and not is_reserved_role(role)
+        ]
+        if not roles:
+            return False
+        role_disables_filter = models.AccountRoleAssociation.role.in_(roles)
+
+    stmt = select(models.AccountRoleAssociation.role).where(
+        models.AccountRoleAssociation.account == account,
+        role_disables_filter,
+        _assignment_active(),
+    )
+    return session.execute(stmt).first() is not None
+
+
 def scope_access_checker(
     *,
     account: "InternalAccount",
@@ -1338,7 +1384,7 @@ def scope_access_checker(
     :param account: The account for which to check access.
     :param session: The database session.
     :param operation: The type of operation to check access for.
-    :param skip_filtering: Grant access to every scope, without checking it, e.g. without RBAC.
+    :param skip_filtering: Grant access to every scope, without checking it, see :func:`is_filter_disabled`.
     :param any_did: Grant access to a scope if the operation is granted on some of its DIDs.
     :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused, unless `skip_filtering` is given.
     """
@@ -1390,7 +1436,7 @@ def did_access_checker(
     :param account: The account for which to check access.
     :param session: The database session.
     :param operation: The type of operation to check access for.
-    :param skip_filtering: Grant access to every DID, without checking it, e.g. without RBAC.
+    :param skip_filtering: Grant access to every DID, without checking it, see :func:`is_filter_disabled`.
     :returns: A callable taking a scope and a name, returning True if the account may access the DID. A scope that is None or not an InternalScope is refused, and so is a name that is None, unless the whole scope is granted or `skip_filtering` is given.
     """
     if skip_filtering:
@@ -1436,7 +1482,7 @@ def filter_iterable_by_scope_access(
     :param session: The database session.
     :param operation: The type of operation to check access for.
     :param scope_keyword: The key in the item dictionaries that contains the associated scope.
-    :param skip_filtering: Yield every item, without checking its scope, e.g. without RBAC.
+    :param skip_filtering: Yield every item, without checking its scope, see :func:`is_filter_disabled`.
     :param any_did: Yield an item if the operation is granted on some DIDs of its scope.
     :returns: An iterator over the items that the account has access to.
     """
@@ -1466,7 +1512,7 @@ def filter_iterable_by_did_access(
     :param operation: The type of operation to check access for.
     :param scope_keyword: The key in the item dictionaries that contains the scope of the DID.
     :param name_keyword: The key in the item dictionaries that contains the name of the DID.
-    :param skip_filtering: Yield every item, without checking its DID, e.g. without RBAC.
+    :param skip_filtering: Yield every item, without checking its DID, see :func:`is_filter_disabled`.
     :returns: An iterator over the items that the account has access to.
     """
     can_access = did_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering)
