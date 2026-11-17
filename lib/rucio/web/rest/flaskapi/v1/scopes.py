@@ -47,7 +47,7 @@ class Scope(ErrorHandlingMethodView):
           406:
             description: "Not acceptable"
         """
-        return jsonify(list_scopes(vo=request.environ['vo']))
+        return jsonify(list_scopes(issuer=request.environ['issuer'], vo=request.environ['vo']))
 
     def post(self, account, scope):
         """
@@ -170,7 +170,7 @@ class AccountScopeList(ErrorHandlingMethodView):
             description: "Not acceptable"
         """
         try:
-            scopes = get_scopes(account, vo=request.environ['vo'])
+            scopes = get_scopes(account, issuer=request.environ['issuer'], vo=request.environ['vo'])
         except AccountNotFound as error:
             return generate_http_error_flask(404, error)
 
@@ -210,7 +210,7 @@ class ScopeOwnershipList(ErrorHandlingMethodView):
           406:
             description: "Not acceptable"
         """
-        scopes = list_scopes_with_account(vo=request.environ['vo'])
+        scopes = list_scopes_with_account(account=request.environ['issuer'], vo=request.environ['vo'])
         res = []
         for dictionary in scopes:
             res.append(dictionary)

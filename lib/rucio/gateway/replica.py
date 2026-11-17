@@ -20,7 +20,7 @@ from rucio.common.constants import DEFAULT_VO, SuspiciousAvailability
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope, IPDict, ReplicaDict
 from rucio.common.utils import gateway_update_return_dict, invert_dict
-from rucio.core import replica, replica_sorter
+from rucio.core import replica, replica_sorter, role
 from rucio.core.did import find_files_with_missing_dids
 from rucio.core.rse import get_rse_id, get_rse_name
 from rucio.db.sqla.constants import BadFilesStatus, DatabaseOperationType
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 
 def get_bad_replicas_summary(
+        issuer: str,
         rse_expression: Optional[str] = None,
         from_date: Optional[datetime.datetime] = None,
         to_date: Optional[datetime.date] = None,
@@ -39,17 +40,35 @@ def get_bad_replicas_summary(
 ) -> list[dict[str, Any]]:
     """
     List the bad file replicas summary. Method used by the rucio-ui.
+    :param issuer: The issuer account.
     :param rse_expression: The RSE expression.
     :param from_date: The start date.
     :param to_date: The end date.
     :param vo: the VO to act on.
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
+
     with db_session(DatabaseOperationType.READ) as session:
-        replicas = replica.get_bad_replicas_summary(rse_expression=rse_expression, from_date=from_date, to_date=to_date, filter_={'vo': vo}, session=session)
-        return [gateway_update_return_dict(r, session=session) for r in replicas]
+        if not role.is_rbac_enabled():
+            replicas = replica.get_bad_replicas_summary(rse_expression=rse_expression, from_date=from_date, to_date=to_date, filter_={'vo': vo}, session=session)
+            return [gateway_update_return_dict(r, session=session) for r in replicas]
+
+        # the summary only holds counts, so it is broken down by scope to drop the scopes the issuer cannot read,
+        # and the counts of the readable scopes are then summed back into one incident per RSE, day and reason
+        replicas = replica.get_bad_replicas_summary(rse_expression=rse_expression, from_date=from_date, to_date=to_date, filter_={'vo': vo},
+                                                    by_scope=True, session=session)
+        incidents: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for r in role.filter_iterable_by_scope_access(replicas, account=internal_issuer, session=session):
+            incident = incidents.setdefault((r['rse_id'], r['created_at'], r['reason']), {})
+            for state in BadFilesStatus:
+                if state.name in r:
+                    incident[state.name] = incident.get(state.name, 0) + r[state.name]
+            incident.update(rse_id=r['rse_id'], rse=r['rse'], created_at=r['created_at'], reason=r['reason'])
+        return [gateway_update_return_dict(r, session=session) for r in incidents.values()]
 
 
 def list_bad_replicas_status(
+        issuer: str,
         state: Optional[BadFilesStatus] = BadFilesStatus.BAD,
         rse: Optional[str] = None,
         younger_than: Optional[datetime.datetime] = None,
@@ -59,6 +78,7 @@ def list_bad_replicas_status(
         vo: str = DEFAULT_VO):
     """
     List the bad file replicas history states. Method used by the rucio-ui.
+    :param issuer: The issuer account.
     :param state: The state of the file (SUSPICIOUS or BAD).
     :param rse: The RSE name.
     :param younger_than: datetime object to select bad replicas younger than this date.
@@ -67,13 +87,18 @@ def list_bad_replicas_status(
     :param vo: The VO to act on.
     """
     rse_id = None
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         if rse is not None:
             rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
         replicas = replica.list_bad_replicas_status(state=state, rse_id=rse_id, younger_than=younger_than,
-                                                    older_than=older_than, limit=limit, list_pfns=list_pfns, vo=vo, session=session)
+                                                    older_than=older_than, limit=limit, list_pfns=False, vo=vo, session=session)
+        replicas = list(role.filter_iterable_by_did_access(replicas, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()))
+        if list_pfns:
+            # a PFN embeds the scope and name of the replica, so the PFNs are only resolved once the replicas are filtered
+            return replica.list_bad_replicas_pfns(replicas, rse_id=rse_id, session=session)
         return [gateway_update_return_dict(r, session=session) for r in replicas]
 
 
@@ -205,6 +230,7 @@ def declare_suspicious_file_replicas(
 
 
 def get_did_from_pfns(
+        issuer: str,
         pfns: "Iterable[str]",
         rse: str,
         vo: str = DEFAULT_VO
@@ -212,16 +238,23 @@ def get_did_from_pfns(
     """
     Get the DIDs associated to a PFN on one given RSE
 
+    :param issuer: The issuer account.
     :param pfns: The list of PFNs.
     :param rse: The RSE name.
     :param vo: The VO to act on.
     :returns: A dictionary {pfn: {'scope': scope, 'name': name}}
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
+
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
         replicas = replica.get_did_from_pfns(pfns=pfns, rse_id=rse_id, vo=vo, session=session)
 
         for r in replicas:
+            # each item maps a single PFN to its DID, drop it if the issuer cannot read the DID
+            if not all(can_access(did_['scope'], did_['name']) for did_ in r.values()):
+                continue
             for k in r.keys():
                 r[k]['scope'] = r[k]['scope'].external
             yield r
@@ -274,6 +307,10 @@ def list_replicas(
             sign_urls = True
 
         for d in dids:
+            auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_replicas', kwargs={'scope': d['scope'], 'name': d['name']}, session=session)
+            if not auth_result.allowed:
+                raise exception.AccessDenied('Account %s cannot list replicas of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, d['scope'], d['name']))
+
             d['scope'] = InternalScope(d['scope'], vo=vo)
 
         replicas = replica.list_replicas(dids=dids, schemes=schemes, unavailable=unavailable,
@@ -285,14 +322,23 @@ def list_replicas(
                                          resolve_archives=resolve_archives, resolve_parents=resolve_parents,
                                          nrandom=nrandom, updated_after=updated_after, by_rse_name=True, session=session)
 
+        # the requested collections may contain files, and the files may have parents, in other scopes
+        internal_issuer = InternalAccount(issuer, vo=vo)
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
+
         for rep in replicas:
+            if not can_access(rep['scope'], rep['name']):
+                continue
+
             rep['scope'] = rep['scope'].external
             if 'parents' in rep:
                 new_parents = []
                 for p in rep['parents']:
                     scope, name = p.split(':')
-                    scope = InternalScope(scope, from_external=False).external
-                    new_parents.append('{}:{}'.format(scope, name))
+                    internal_parent_scope = InternalScope(scope, from_external=False)
+                    if not can_access(internal_parent_scope, name):
+                        continue
+                    new_parents.append('{}:{}'.format(internal_parent_scope.external, name))
                 rep['parents'] = new_parents
 
             yield rep
@@ -321,7 +367,8 @@ def add_replicas(
     with db_session(DatabaseOperationType.WRITE) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'rse': rse, 'rse_id': rse_id}
+        kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({f['scope'] for f in files}),
+                  'dids': [{'scope': f['scope'], 'name': f['name']} for f in files]}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='add_replicas', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied('Account %s can not add file replicas on %s. %s' % (issuer, rse, auth_result.message))
@@ -374,7 +421,8 @@ def delete_replicas(
     with db_session(DatabaseOperationType.WRITE) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'rse': rse, 'rse_id': rse_id}
+        kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({f['scope'] for f in files}),
+                  'dids': [{'scope': f['scope'], 'name': f['name']} for f in files]}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='delete_replicas', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied('Account %s can not delete file replicas on %s. %s' % (issuer, rse, auth_result.message))
@@ -408,7 +456,8 @@ def update_replicas_states(
     with db_session(DatabaseOperationType.WRITE) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
 
-        kwargs = {'rse': rse, 'rse_id': rse_id}
+        kwargs = {'rse': rse, 'rse_id': rse_id, 'scopes': list({f['scope'] for f in files}),
+                  'dids': [{'scope': f['scope'], 'name': f['name'], 'state': f.get('state'), 'path': f.get('path')} for f in files]}
         auth_result = permission.has_permission(issuer=issuer, vo=vo, action='update_replicas_states', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise exception.AccessDenied('Account %s can not update file replicas state on %s. %s' % (issuer, rse, auth_result.message))
@@ -422,6 +471,7 @@ def update_replicas_states(
 
 
 def list_dataset_replicas(
+        issuer: str,
         scope: str,
         name: str,
         deep: bool = False,
@@ -439,6 +489,10 @@ def list_dataset_replicas(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas', kwargs={'scope': scope, 'name': name}, session=session)
+        if not auth_result.allowed:
+            raise exception.AccessDenied('Account %s cannot list dataset replicas of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         replicas = replica.list_dataset_replicas(scope=internal_scope, name=name, deep=deep, session=session)
 
         for r in replicas:
@@ -447,6 +501,7 @@ def list_dataset_replicas(
 
 
 def list_dataset_replicas_bulk(
+        issuer: str,
         dids: 'Iterable[dict[str, Any]]',
         vo: str = DEFAULT_VO
 ) -> 'Iterator[dict[str, Any]]':
@@ -471,6 +526,12 @@ def list_dataset_replicas_bulk(
         names_by_intscope[internal_scope] = names_by_scope[scope]
 
     with db_session(DatabaseOperationType.READ) as session:
+        for scope, names in names_by_intscope.items():
+            for name in names:
+                auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas_bulk', kwargs={'scope': scope.external, 'name': name}, session=session)
+                if not auth_result.allowed:
+                    raise exception.AccessDenied('Account %s cannot list dataset replicas of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope.external, name))
+
         replicas = replica.list_dataset_replicas_bulk(names_by_intscope, session=session)
 
         for r in replicas:
@@ -478,6 +539,7 @@ def list_dataset_replicas_bulk(
 
 
 def list_dataset_replicas_vp(
+        issuer: str,
         scope: str,
         name: str,
         deep: bool = False,
@@ -497,12 +559,20 @@ def list_dataset_replicas_vp(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        auth_result = permission.has_permission(issuer=issuer, vo=vo, action='list_dataset_replicas_vp', kwargs={'scope': scope, 'name': name}, session=session)
+        if not auth_result.allowed:
+            raise exception.AccessDenied(
+                'Account %s cannot list virtual placement dataset replicas of data identifier %s:%s. '
+                'Either the requested scope does not exist or the account lacks required permissions.'
+                % (issuer, scope, name)
+            )
         for r in replica.list_dataset_replicas_vp(scope=internal_scope, name=name, deep=deep, session=session):
             yield gateway_update_return_dict(r, session=session)
 
 
-def list_datasets_per_rse(rse: str, filters: Optional[dict[str, Any]] = None, limit: Optional[int] = None, vo: str = DEFAULT_VO) -> 'Iterator[dict[str, Any]]':
+def list_datasets_per_rse(issuer: str, rse: str, filters: Optional[dict[str, Any]] = None, limit: Optional[int] = None, vo: str = DEFAULT_VO) -> 'Iterator[dict[str, Any]]':
     """
+    :param issuer: The issuer account.
     :param scope: The scope of the dataset.
     :param name: The name of the dataset.
     :param filters: dictionary of attributes by which the results should be filtered.
@@ -513,12 +583,14 @@ def list_datasets_per_rse(rse: str, filters: Optional[dict[str, Any]] = None, li
     """
 
     filters = filters or {}
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
         if 'scope' in filters:
             filters['scope'] = InternalScope(filters['scope'], vo=vo)
-        for r in replica.list_datasets_per_rse(rse_id, filters=filters, limit=limit, session=session):
+        datasets = replica.list_datasets_per_rse(rse_id, filters=filters, limit=limit, session=session)
+        for r in role.filter_iterable_by_did_access(datasets, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -593,6 +665,7 @@ def add_bad_dids(
 
 
 def get_suspicious_files(
+        issuer: str,
         rse_expression: Optional[str],
         younger_than: Optional[datetime.datetime] = None,
         nattempts: Optional[int] = None,
@@ -600,16 +673,18 @@ def get_suspicious_files(
 ) -> list[dict[str, Any]]:
     """
     List the list of suspicious files on a list of RSEs
+    :param issuer: The issuer account.
     :param rse_expression: The RSE expression where the suspicious files are located
     :param younger_than: datetime object to select the suspicious replicas younger than this date.
     :param nattempts: The number of time the replicas have been declared suspicious
     :param vo: The VO to act on.
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         replicas = replica.get_suspicious_files(rse_expression=rse_expression, available_elsewhere=SuspiciousAvailability["ALL"].value,
                                                 younger_than=younger_than, nattempts=nattempts, filter_={'vo': vo}, session=session)
-        return [gateway_update_return_dict(r, session=session) for r in replicas]
+        return [gateway_update_return_dict(r, session=session) for r in role.filter_iterable_by_did_access(replicas, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())]
 
 
 def set_tombstone(
