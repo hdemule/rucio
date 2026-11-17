@@ -19,12 +19,20 @@ The module is organised as follows:
 
 - Roles: create, update, delete and list roles, including the reserved ones, see `RESERVED_ROLES`.
 - Account role assignments: which account holds which role, from when and until when.
+- Permission types: the types of the permissions a role can be granted, e.g. operations on DIDs.
+  Each type has its own `role_<type>_permission_map` table(s) and a
+  :class:`PermissionTypeHandler` registered for it, and a :class:`PermissionRequest` describing what
+  is checked against it if it decides whether an account may perform an operation.
+- Role permissions: grant, remove and list the permissions of a role, of any type.
+- Permission checks: tell whether an account may perform a request, of any checked permission type,
+  with :func:`has_permission` as the single entry point, and filter listings accordingly.
 - Cleaning: remove the expired role assignments of every account of a VO.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, Union, cast
 
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -40,16 +48,21 @@ from rucio.common.exception import (
     RoleInUse,
     RoleLocked,
     RoleNotFound,
+    RolePermissionNotFound,
     RoleReserved,
 )
+from rucio.common.schema import get_schema_value
+from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
+from rucio.core.scope import is_scope_owner
 from rucio.db.sqla import models
+from rucio.db.sqla.constants import DidOperationType, RolePermissionOperationType, RolePermissionType
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
-    from sqlalchemy.sql.elements import ColumnElement
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
-    from rucio.common.types import InternalAccount
+    from sqlalchemy.orm import InstrumentedAttribute, Session
+    from sqlalchemy.sql.elements import ColumnElement
 
 
 # Marks a date of a role assignment which is to be left as it is, see :func:`set_account_role_dates`.
@@ -576,6 +589,880 @@ def set_account_role_dates(
     mapping.expires_at = expires_at
     session.commit()
     return {"activates_at": activates_at, "expires_at": expires_at}
+
+
+# ----------------------------------------------------------------------------------------------
+# Permission types
+#
+# A role is granted permissions of several types. A permission is made of its role, its type, its
+# target (e.g. a DID pattern) and the parameters of its type (e.g. the operations it grants on the
+# DIDs the pattern matches). Each permission type comes with:
+#
+# - a `RolePermissionType` member;
+# - one or more `role_<type>_permission_map` tables, whose `role` references `roles.role` with
+#   ON DELETE CASCADE;
+# - a `PermissionTypeHandler` subclass, registered with `_register_permission_handler`, telling how
+#   its permissions are validated, granted, removed and listed.
+#
+# A permission type deciding whether an account may perform an operation on a resource (e.g. on a
+# scope) has a `CheckedPermissionTypeHandler`, together with a `PermissionRequest` subclass naming
+# the resource and the operations it grants, its own subclass of `RolePermissionOperationType`
+# (e.g. `DidOperationType` for DIDs), and its own way of deciding a request from the permissions of the
+# roles of an account (`CheckedPermissionTypeHandler.checker`), see :func:`has_permission`.
+#
+# Nothing else in this module has to change to support a new permission type.
+# ----------------------------------------------------------------------------------------------
+
+# the parameter of a permission giving the operations it grants, see `CheckedPermissionTypeHandler`
+OPERATIONS = "operations"
+
+OperationT = TypeVar("OperationT", bound=RolePermissionOperationType)
+
+
+def _normalize_operation(operation: Union[OperationT, str], operation_type: type[OperationT], permission_type: RolePermissionType) -> OperationT:
+    """
+    Turn an operation given as a member of the operation type of a permission type, or as its value, into that member.
+
+    :param operation: The operation as supplied by the caller, e.g. `DidOperationType.READ` or 'read' for a DID permission.
+    :param operation_type: The operations the permission type grants, a subclass of `RolePermissionOperationType`.
+    :param permission_type: The permission type, for the error messages.
+    :raises InputValidationError: If the operation is not one the permission type grants.
+    """
+    if isinstance(operation, operation_type):
+        return operation
+    try:
+        return operation_type(operation)
+    except ValueError:
+        raise InputValidationError("Operation '%s' is not supported on a '%s' permission, expected one of: %s."
+                                   % (getattr(operation, "value", operation), permission_type.value, ", ".join(op.value for op in operation_type)))
+
+
+def _normalize_operations(operations: Any, operation_type: type[OperationT], permission_type: RolePermissionType) -> frozenset[OperationT]:
+    """
+    Validate the operations a permission grants: a list of operations (members of the operation type of the permission
+    type, or their values, e.g. ['read', 'write']), possibly empty for a permission granting nothing.
+
+    :raises InputValidationError: If it is not a list, or one of its items is not an operation of the permission type.
+    """
+    if isinstance(operations, (str, RolePermissionOperationType)) or not isinstance(operations, (list, tuple, set, frozenset)):
+        raise InputValidationError("'%s' must be a list of operations of a '%s' permission, e.g. ['%s'], or an empty list to grant none."
+                                   % (OPERATIONS, permission_type.value, "', '".join(op.value for op in operation_type)))
+    return frozenset(_normalize_operation(operation, operation_type, permission_type) for operation in operations)
+
+
+def _describe_operations(operations: "Iterable[RolePermissionOperationType]", operation_type: "type[RolePermissionOperationType]") -> str:
+    """Render the operations of a permission as the letters of the CLI, a dash for each operation not granted, e.g. 'r-d' or '---'."""
+    operations = set(operations)
+    return "".join(operation.value[0] if operation in operations else "-" for operation in operation_type)
+
+
+@dataclass(frozen=True)
+class PermissionRequest:
+    """
+    A request to perform an operation on a concrete resource, checked by :func:`has_permission`.
+
+    Each checked permission type subclasses it with the fields naming the resource, sets `permission_type`
+    and narrows `operation` to the operations of its handler, e.g. `DidOperationType` for DIDs.
+    A request is hashable, so that a decision on it can be cached, see :func:`_permission_checker`.
+    """
+    permission_type: ClassVar[RolePermissionType]
+    operation: RolePermissionOperationType
+
+
+RequestT = TypeVar("RequestT", bound=PermissionRequest)
+
+
+class PermissionTypeHandler:
+    """
+    Everything the generic permission functions need to know about one permission type.
+
+    A subclass names the parameter holding the target of a permission (`target_attribute`) and its
+    tables (`tables`), and implements how a permission is validated, granted, removed and listed.
+    The methods writing to the database do not commit.
+    """
+    permission_type: ClassVar[RolePermissionType]
+    # the parameter holding the target of a permission, also its key in a listing
+    target_attribute: ClassVar[str]
+    # how the target is called in messages
+    target_label: ClassVar[str]
+    # the `role_<type>_permission_map` models
+    tables: ClassVar[tuple[Any, ...]]
+
+    def normalize_target(self, target: Any, *, session: "Session") -> Any:
+        """
+        Validate a target given when granting or removing a permission, and turn it into what is stored.
+
+        :raises InputValidationError: If the target is not valid for this permission type.
+        """
+        return target
+
+    def normalize_parameters(self, parameters: "Mapping[str, Any]", *, removing: bool) -> dict[str, Any]:
+        """
+        Validate the parameters given, besides the target, when granting a permission, or when `removing` one.
+
+        :raises InputValidationError: If a parameter is missing, unknown or not valid.
+        """
+        raise NotImplementedError
+
+    def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
+        """Render a permission for a message, e.g. "'read' permission on DID pattern 'data*:*'"."""
+        raise NotImplementedError
+
+    def list_permissions(self, role: str, *, session: "Session") -> list[dict[str, Any]]:
+        """List the permissions of this type of a role, each with its target under `target_attribute` and its parameters."""
+        raise NotImplementedError
+
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> None:
+        """Grant a permission to a role, see :func:`add_role_permission`."""
+        raise NotImplementedError
+
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> int:
+        """Remove permissions from a role, see :func:`delete_role_permission`, and tell how many were removed."""
+        raise NotImplementedError
+
+
+class CheckedPermissionTypeHandler(PermissionTypeHandler, Generic[RequestT]):
+    """
+    A permission type granting operations on a resource, checked against a :class:`PermissionRequest`, see :func:`has_permission`.
+
+    Its permissions are stored in a single table (`model`) whose primary key is `role` and the target
+    column named by `target_attribute`, with one boolean column per operation, named by
+    `RolePermissionOperationType.column`: a row holds every operation a role is granted on a target.
+    A permission is given as its target and its `operations`, the list of the operations it grants,
+    possibly empty: granting it sets exactly these operations on the target, replacing what the role was
+    granted on it, a row granting no operation being kept, and removing it deletes the row. A subclass
+    names its request (`request_type`) and the operations it grants (`operation_type`), its own subclass
+    of `RolePermissionOperationType`, and implements :meth:`checker`, which decides the requests.
+    """
+    # the `role_<type>_permission_map` model
+    model: ClassVar[Any]
+    request_type: ClassVar[type[PermissionRequest]]
+    # the operations this permission type grants, e.g. `DidOperationType`
+    operation_type: ClassVar[type[RolePermissionOperationType]]
+
+    @property
+    def target_column(self) -> "InstrumentedAttribute[Any]":
+        """The column of `model` holding the target of a permission."""
+        return getattr(self.model, self.target_attribute)
+
+    def _permission_row(self, role: str, target: Any, *, session: "Session") -> Optional[Any]:
+        """The row holding the operations a role is granted on a target, locked for update, if any."""
+        stmt = (
+            select(self.model)
+            .where(self.model.role == role, self.target_column == target)
+            .with_for_update()
+        )
+        return session.execute(stmt).scalar_one_or_none()
+
+    def normalize_parameters(self, parameters: "Mapping[str, Any]", *, removing: bool) -> dict[str, Any]:
+        expected = set() if removing else {OPERATIONS}
+        unknown = sorted(set(parameters) - expected)
+        if unknown:
+            raise InputValidationError("Parameter(s) %s not supported %s a '%s' permission%s."
+                                       % (", ".join(unknown), "when removing" if removing else "on", self.permission_type.value,
+                                          ", only its %s is given" % self.target_attribute if removing else ", expected: %s" % OPERATIONS))
+        if removing:
+            return {}
+        if parameters.get(OPERATIONS) is None:
+            raise InputValidationError("'%s' must be given for a '%s' permission, an empty list to grant none." % (OPERATIONS, self.permission_type.value))
+        return {OPERATIONS: _normalize_operations(parameters[OPERATIONS], self.operation_type, self.permission_type)}
+
+    def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
+        operations = parameters.get(OPERATIONS)
+        granted = "" if operations is None else "'%s' " % _describe_operations(operations, self.operation_type)
+        return "%spermission on %s '%s'" % (granted, self.target_label, target)
+
+    def list_permissions(self, role: str, *, session: "Session") -> list[dict[str, Any]]:
+        stmt = (
+            select(self.model)
+            .where(self.model.role == role)
+            .order_by(self.target_column)
+        )
+        return [{self.target_attribute: getattr(row, self.target_attribute),
+                 OPERATIONS: [operation.value for operation in self.operation_type if getattr(row, operation.column)]}
+                for row in session.execute(stmt).scalars()]
+
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> None:
+        columns = {operation.column: operation in parameters[OPERATIONS] for operation in self.operation_type}
+        row = self._permission_row(role, target, session=session)
+        if row is None:
+            # a missing role is told by the foreign key, see :func:`add_role_permission`
+            session.add(self.model(role=role, **{self.target_attribute: target}, **columns))
+        else:
+            for column, granted in columns.items():
+                setattr(row, column, granted)
+        session.flush()
+
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> int:
+        row = self._permission_row(role, target, session=session)
+        if row is None:
+            return 0
+        session.delete(row)
+        session.flush()
+        return 1
+
+    def checker(self, account: "InternalAccount", *, session: "Session") -> "Callable[[RequestT], bool]":
+        """
+        Build a callable telling whether the active roles of the account grant it a request of this type, see :func:`has_permission`.
+
+        Role assignments which are not active, i.e. whose `activates_at` is in the future or whose `expires_at` is in the past,
+        are ignored. The permissions are read once, when the callable is built, so that many requests are decided in a row
+        without querying the database again.
+        """
+        raise NotImplementedError
+
+
+_PERMISSION_HANDLERS: dict[RolePermissionType, PermissionTypeHandler] = {}
+
+
+def _register_permission_handler(handler_class: "type[PermissionTypeHandler]") -> "type[PermissionTypeHandler]":
+    """Class decorator registering the handler of a permission type, see :class:`PermissionTypeHandler`."""
+    _PERMISSION_HANDLERS[handler_class.permission_type] = handler_class()
+    return handler_class
+
+
+def _permission_handler(permission_type: Optional[Union[RolePermissionType, str]]) -> PermissionTypeHandler:
+    """
+    Find the handler of a permission type, given as a `RolePermissionType` or as its value (e.g. 'did').
+
+    :raises InputValidationError: If no handler is registered for the permission type.
+    """
+    try:
+        return _PERMISSION_HANDLERS[RolePermissionType(permission_type)]
+    except (ValueError, KeyError):
+        raise InputValidationError("Permission type '%s' is not supported, expected one of: %s."
+                                   % (getattr(permission_type, "value", permission_type), ", ".join(sorted(t.value for t in _PERMISSION_HANDLERS))))
+
+
+def _request_handler(request: PermissionRequest) -> CheckedPermissionTypeHandler[Any]:
+    """
+    Find the handler a permission request is checked by.
+
+    :raises InputValidationError: If the request is not one of a registered permission type which is checked against requests.
+    """
+    handler = _permission_handler(getattr(type(request), "permission_type", None))
+    if not isinstance(handler, CheckedPermissionTypeHandler):
+        raise InputValidationError("'%s' permissions are not checked against requests." % handler.permission_type.value)
+    if not isinstance(request, handler.request_type):
+        raise InputValidationError("A '%s' request must be a %s, got '%s'." % (handler.permission_type.value, handler.request_type.__name__, type(request).__name__))
+    if not isinstance(request.operation, handler.operation_type):
+        raise InputValidationError("A '%s' request must ask for a %s, got '%s'." % (handler.permission_type.value, handler.operation_type.__name__, request.operation))
+    return handler
+
+
+# --- DIDs -------------------------------------------------------------------------------------
+#
+# A DID permission grants READ, WRITE and DELETE on the DIDs a DID pattern matches, see :func:`_validate_did_pattern`.
+# A pattern matches the DID itself only: there is no inheritance from the collections a DID is attached to.
+#
+# Within a role, the most specific pattern decides: for a DID, the row of the role whose pattern matches it and is
+# the most specific (see :func:`_did_pattern_specificity`) gives every operation the role grants on it, the other
+# rows matching it are not looked at. A row granting no operation therefore withdraws the DIDs it matches from a
+# less specific row of its role, e.g. 'rwd' on 'data:*' and 'r' on 'data:raw*' keep the raw DIDs read-only. Across
+# roles, what they grant adds up: a role never takes away what another grants. See :class:`DidAccess`.
+
+# the only wildcard a DID pattern may use, see `_validate_did_pattern`
+DID_WILDCARD = "*"
+# separates the scope part from the name part of a DID pattern
+DID_SEPARATOR = ":"
+
+
+def _validate_did_pattern(did_pattern: str) -> str:
+    """
+    Validate a DID pattern of a role permission, and bring it to the form it is stored and listed in.
+
+    A DID pattern is always stored as a scope part and a name part, so that a scope is never
+    mistaken for the name of a DID:
+
+    - 'data*:*': every DID of every scope starting with 'data' ('*:*' for every scope);
+    - 'data:*': every DID of the scope 'data';
+    - 'data:raw*': every DID of the scope 'data' whose name starts with 'raw';
+    - 'data:raw1': the DID 'data:raw1'.
+
+    A pattern given without a name part ('data', 'data*', '*') stands for the whole scope(s), and is
+    stored with the '*' name part ('data:*', 'data*:*', '*:*').
+
+    A '*' is the only wildcard, and it is only accepted at the end of either part: a leading or
+    embedded wildcard is refused, since it cannot be matched unambiguously, and so is a wildcard
+    scope part followed by anything but the '*' name part. The pattern is not checked against the
+    scopes and DIDs which currently exist: it is stored as given, and a DID created later is covered
+    by it immediately.
+
+    :param did_pattern: The DID pattern as supplied by the caller.
+    :returns: The DID pattern, stripped of surrounding whitespace, with its name part.
+    :raises InputValidationError: If the DID pattern is not a string, is empty, is too long, or does not have one of the forms above.
+    """
+    if not isinstance(did_pattern, str):
+        raise InputValidationError("DID pattern must be a string, got '%s'." % type(did_pattern).__name__)
+
+    did_pattern = did_pattern.strip()
+    if not did_pattern:
+        raise InputValidationError("DID pattern must not be empty.")
+
+    scope_pattern, separator, name_pattern = did_pattern.partition(DID_SEPARATOR)
+    if not separator:
+        name_pattern = DID_WILDCARD
+    if not scope_pattern or not name_pattern or DID_SEPARATOR in name_pattern:
+        raise InputValidationError(
+            "DID pattern '%s' is not supported, expected a scope part and a name part separated by a single '%s', as in 'data:raw*'." % (did_pattern, DID_SEPARATOR))
+
+    for part in (scope_pattern, name_pattern):
+        if part.count(DID_WILDCARD) > 1 or (DID_WILDCARD in part and not part.endswith(DID_WILDCARD)):
+            raise InputValidationError(
+                "DID pattern '%s' is not supported, a '*' may only close the scope part or the name part, as in 'data*:*' or 'data:raw*'." % did_pattern)
+    if DID_WILDCARD in scope_pattern and name_pattern != DID_WILDCARD:
+        raise InputValidationError(
+            "DID pattern '%s' is not supported, a wildcard scope part may only be followed by the '*' name part, as in 'data*:*'." % did_pattern)
+
+    if len(scope_pattern) > get_schema_value('SCOPE_LENGTH') or len(name_pattern) > get_schema_value('NAME_LENGTH'):
+        raise InputValidationError("DID pattern '%s' is too long for a scope or a name." % did_pattern)
+
+    return scope_pattern + DID_SEPARATOR + name_pattern
+
+
+def _prefix_pattern_matches(value: str, pattern: str) -> bool:
+    """Tell whether a value matches a pattern ending in '*', which matches every value starting with what precedes it, or equals a pattern without '*'."""
+    if pattern.endswith(DID_WILDCARD):
+        return value.startswith(pattern[:-1])
+    return value == pattern
+
+
+def _did_pattern_matches(scope: "InternalScope", name: Optional[str], did_pattern: str) -> bool:
+    """
+    Tell whether a concrete DID, or a whole scope, matches a role's DID pattern, see :func:`_validate_did_pattern`.
+
+    The scope is matched by its external (human-readable) name. A pattern with the '*' name part
+    ('data:*', 'data*:*') matches every DID of the scopes its scope part matches, and the scopes
+    themselves. Any other pattern only matches the DIDs of its scope whose name matches its name part:
+    it never matches a whole scope (`name` is None).
+
+    :param scope: The scope of the DID, or the scope to check.
+    :param name: The name of the DID, or None to check the whole scope.
+    :param did_pattern: The DID pattern of a role permission, as stored.
+    :returns: True if the DID, or the whole scope, matches the pattern.
+    """
+    external = str(scope.external)
+    scope_pattern, _, name_pattern = did_pattern.partition(DID_SEPARATOR)
+    if name_pattern == DID_WILDCARD:
+        return _prefix_pattern_matches(external, scope_pattern)
+    return name is not None and external == scope_pattern and _prefix_pattern_matches(name, name_pattern)
+
+
+def _did_pattern_specificity(did_pattern: str) -> tuple[int, int]:
+    """
+    Rank a DID pattern by how specific it is, the higher the more, to decide between the rows of a role matching a DID.
+
+    From the most to the least specific: a single DID ('data:raw1'), a name pattern ('data:raw*', the longer the
+    more specific), a whole scope ('data:*'), a scope pattern ('data*:*', the longer the more specific). Two
+    different patterns of the same rank and length never match the same DID.
+
+    :param did_pattern: The DID pattern of a role permission, as stored, see :func:`_validate_did_pattern`.
+    :returns: The rank of the pattern, and the length of what it fixes within that rank.
+    """
+    scope_pattern, _, name_pattern = did_pattern.partition(DID_SEPARATOR)
+    if name_pattern != DID_WILDCARD:
+        if name_pattern.endswith(DID_WILDCARD):
+            return 2, len(name_pattern) - 1
+        return 3, len(name_pattern)
+    if scope_pattern.endswith(DID_WILDCARD):
+        return 0, len(scope_pattern) - 1
+    return 1, len(scope_pattern)
+
+
+@dataclass(frozen=True)
+class DidPermissionRequest(PermissionRequest):
+    """
+    A request to perform `operation` on the DID `scope`:`name`, or on the content of the whole `scope` if `name` is None.
+
+    A request on a whole scope is only granted by the patterns with the '*' name part, see :class:`DidAccess`.
+    """
+    permission_type: ClassVar[RolePermissionType] = RolePermissionType.DID
+    operation: DidOperationType
+    scope: InternalScope
+    name: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _DidRow:
+    """A DID permission of a role, as stored: its pattern and the operations it grants, possibly none."""
+    did_pattern: str
+    operations: frozenset[DidOperationType]
+
+    @property
+    def scope_part(self) -> str:
+        """The scope part of the pattern, e.g. 'data' for 'data:raw*', 'data*' for 'data*:*'."""
+        return self.did_pattern.partition(DID_SEPARATOR)[0]
+
+    @property
+    def is_name_pattern(self) -> bool:
+        """Whether the pattern names DIDs of a single scope ('data:raw*', 'data:raw1') rather than whole scopes ('data:*', 'data*:*')."""
+        return self.did_pattern.partition(DID_SEPARATOR)[2] != DID_WILDCARD
+
+
+class DidAccess:
+    """
+    What the DID permissions of the active roles of an account grant, see the comment of the DID permissions above.
+
+    The DID permissions are read once, when it is built, and each request is decided from them, so that a listing
+    is decided without querying the database again. Only the roles are looked at: not whether RBAC is enabled,
+    root and admin privileges, nor the owners of the scope or of the DID.
+    """
+
+    def __init__(self, account: "InternalAccount", *, session: "Session") -> None:
+        association, model = models.AccountRoleAssociation, models.RoleDidPermissionAssociation
+        stmt = (
+            select(association.role, model.did_pattern, *(getattr(model, operation.column) for operation in DidOperationType))
+            .join(model, model.role == association.role)
+            .where(association.account == account, _assignment_active())
+        )
+        self._rows: dict[str, list[_DidRow]] = {}
+        for role, did_pattern, *granted in session.execute(stmt).all():
+            operations = frozenset(operation for operation, flag in zip(DidOperationType, granted) if flag)
+            self._rows.setdefault(role, []).append(_DidRow(did_pattern, operations))
+
+    @property
+    def roles(self) -> "Iterable[str]":
+        """The roles of the account which have DID permissions."""
+        return self._rows.keys()
+
+    def _deciding_row(self, role: str, scope: "InternalScope", name: Optional[str]) -> Optional[_DidRow]:
+        """The row of a role deciding a DID, or a whole scope without `name`: the most specific pattern matching it; None if no row matches."""
+        rows = [row for row in self._rows.get(role, ()) if _did_pattern_matches(scope, name, row.did_pattern)]
+        return max(rows, key=lambda row: _did_pattern_specificity(row.did_pattern)) if rows else None
+
+    def _name_rows(self, role: str, scope: "InternalScope") -> "Iterator[_DidRow]":
+        """The rows of a role on DIDs of a scope by their names ('data:raw*', 'data:raw1')."""
+        external = str(scope.external)
+        return (row for row in self._rows.get(role, ()) if row.is_name_pattern and row.scope_part == external)
+
+    def role_grants(self, role: str, scope: "InternalScope", name: Optional[str], operation: DidOperationType) -> bool:
+        """
+        Tell whether a role grants an operation on a DID, or on a whole scope without `name`.
+
+        A DID is decided by the most specific pattern of the role matching it. A whole scope is granted by the most
+        specific pattern of the role covering the whole scope, provided no name pattern of the role in that scope
+        withdraws the operation from some of its DIDs: what stands for the whole scope must not tell about them.
+        """
+        row = self._deciding_row(role, scope, name)
+        if row is None or operation not in row.operations:
+            return False
+        return name is not None or all(operation in name_row.operations for name_row in self._name_rows(role, scope))
+
+    def grants(self, scope: "InternalScope", name: Optional[str], operation: DidOperationType) -> bool:
+        """Tell whether a role grants an operation on a DID, or on a whole scope without `name`: the roles add up."""
+        return any(self.role_grants(role, scope, name, operation) for role in self._rows)
+
+    def role_grants_some_did(self, role: str, scope: "InternalScope", operation: DidOperationType) -> bool:
+        """
+        Tell whether a role grants an operation on at least one DID of a scope, whatever its name: its pattern deciding
+        the whole scope grants it, or one of its name patterns in the scope does.
+        """
+        row = self._deciding_row(role, scope, None)
+        return (row is not None and operation in row.operations) or any(operation in name_row.operations for name_row in self._name_rows(role, scope))
+
+    def grants_some_did(self, scope: "InternalScope", operation: DidOperationType) -> bool:
+        """Tell whether a role grants an operation on at least one DID of a scope, whatever its name: the roles add up."""
+        return any(self.role_grants_some_did(role, scope, operation) for role in self._rows)
+
+
+@_register_permission_handler
+class DidPermissionHandler(CheckedPermissionTypeHandler[DidPermissionRequest]):
+    """
+    Operations on DIDs, granted on DID patterns, see :func:`_validate_did_pattern` and :class:`DidAccess`.
+
+    The operations are those of `DidOperationType`: 'read', 'write' and 'delete'. A permission sets exactly the
+    operations of its pattern, replacing what it had, and one granting none is kept: within its role, it withdraws
+    from the DIDs it matches what a less specific pattern grants. Only what the roles grant is looked at: who may act
+    without a role (root, admins, the owner of a scope, ...) is the business of the permission policy, see
+    :mod:`rucio.core.permission.generic`.
+    """
+    permission_type = RolePermissionType.DID
+    model = models.RoleDidPermissionAssociation
+    tables = (models.RoleDidPermissionAssociation,)
+    request_type = DidPermissionRequest
+    operation_type = DidOperationType
+    target_attribute = "did_pattern"
+    target_label = "DID pattern"
+
+    def normalize_target(self, target: Any, *, session: "Session") -> str:
+        return _validate_did_pattern(target)
+
+    def checker(self, account: "InternalAccount", *, session: "Session") -> "Callable[[DidPermissionRequest], bool]":
+        access = DidAccess(account, session=session)
+        return lambda request: access.grants(request.scope, request.name, request.operation)
+
+
+# ----------------------------------------------------------------------------------------------
+# Role permissions
+# ----------------------------------------------------------------------------------------------
+
+def _split_target(handler: PermissionTypeHandler, parameters: "Mapping[str, Any]") -> tuple[Any, dict[str, Any]]:
+    """
+    Take the target of a permission out of its parameters.
+
+    :returns: The target, and the other parameters.
+    :raises InputValidationError: If the target is not given.
+    """
+    parameters = dict(parameters)
+    if handler.target_attribute not in parameters:
+        raise InputValidationError("'%s' must be given for a '%s' permission." % (handler.target_attribute, handler.permission_type.value))
+    return parameters.pop(handler.target_attribute), parameters
+
+
+def _violates_table_constraint(error: IntegrityError, handler: PermissionTypeHandler, suffix: str) -> bool:
+    """Tell whether the IntegrityError comes from the constraint of one of the tables of a permission type, e.g. its '_PK'."""
+    return any(_violates_constraint(error, "%s_%s" % (table.__tablename__.upper(), suffix)) for table in handler.tables)
+
+
+def list_role_permissions(role: str, *, session: "Session") -> list[dict[str, Any]]:
+    """
+    List the permissions granted to a role, of every type.
+
+    Each permission is given as its `type`, its target under the key its type names it by, and its
+    parameters, in the shape it is granted with, see :func:`add_role_permission`: e.g. a 'did_pattern'
+    and its list of 'operations' for a DID permission.
+
+    :param role: The role whose permissions to list.
+    :param session: The database session.
+    :raises RoleNotFound: If the role does not exist.
+    """
+    _ensure_role_exists(role, session)
+
+    return [
+        {"type": permission_type.value, **permission}
+        for permission_type, handler in _PERMISSION_HANDLERS.items()
+        for permission in handler.list_permissions(role, session=session)
+    ]
+
+
+def add_role_permission(
+        role: str,
+        permission_type: Union[RolePermissionType, str],
+        parameters: "Mapping[str, Any]",
+        force: bool = False,
+        *,
+        session: "Session") -> None:
+    """
+    Grant a role a permission of a type.
+
+        add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data*:*', 'operations': ['read']}, session=session)
+        add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:tmp*', 'operations': []}, session=session)
+
+    A permission which exists already is overwritten: a DID permission gets exactly the operations given.
+
+    :param role: The role to grant the permission to.
+    :param permission_type: The type of the permission, e.g. `RolePermissionType.DID`.
+    :param parameters: The target of the permission under the key its type names it by, e.g. 'did_pattern',
+                       and its parameters, see the `PermissionTypeHandler` of the type.
+    :param force: Grant the permission even if the role is locked.
+    :param session: The database session.
+    :raises InputValidationError: If the permission type, the target or a parameter is not valid.
+    :raises RoleLocked: If the role is locked and `force` is not given.
+    :raises RoleNotFound: If the role does not exist.
+    :raises Duplicate: If the role already has that permission, and its type refuses it.
+    :raises RoleReserved: If the role is reserved, whether or not `force` is given.
+    """
+    handler = _permission_handler(permission_type)
+    target, parameters = _split_target(handler, parameters)
+    target = handler.normalize_target(target, session=session)
+    parameters = handler.normalize_parameters(parameters, removing=False)
+    if is_reserved_role(role):
+        raise RoleReserved("Role '%s' is reserved, so no permission can be granted to it." % role)
+    _ensure_unlocked(role, force, session)
+
+    try:
+        handler.add(role, target, parameters, session=session)
+        session.commit()
+    except Duplicate:
+        session.rollback()
+        raise
+    except IntegrityError as error:
+        session.rollback()
+        described = handler.describe(target, parameters)
+        if _violates_table_constraint(error, handler, "ROLE_FK"):
+            raise RoleNotFound("Role '%s' does not exist." % role)
+        if _violates_table_constraint(error, handler, "PK"):
+            raise Duplicate("Role '%s' already has %s." % (role, described))
+        raise Duplicate("Either role '%s' does not exist, or it already has %s." % (role, described))
+
+
+def delete_role_permission(
+        role: str,
+        permission_type: Union[RolePermissionType, str],
+        parameters: "Mapping[str, Any]",
+        force: bool = False,
+        *,
+        session: "Session") -> int:
+    """
+    Remove permissions of a type from a role.
+
+        delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data*:*'}, session=session)
+
+    :param role: The role to remove the permissions from.
+    :param permission_type: The type of the permissions, e.g. `RolePermissionType.DID`.
+    :param parameters: The target of the permissions under the key its type names it by, e.g. 'did_pattern',
+                       and the parameters identifying them, see the `PermissionTypeHandler` of the type.
+    :param force: Remove the permissions even if the role is locked.
+    :param session: The database session.
+    :returns: The number of permissions removed.
+    :raises InputValidationError: If the permission type, the target or a parameter is not valid.
+    :raises RoleLocked: If the role is locked and `force` is not given.
+    :raises RolePermissionNotFound: If the role does not have any such permission.
+    :raises RoleReserved: If the role is reserved, whether or not `force` is given.
+    """
+    handler = _permission_handler(permission_type)
+    target, parameters = _split_target(handler, parameters)
+    target = handler.normalize_target(target, session=session)
+    parameters = handler.normalize_parameters(parameters, removing=True)
+    if is_reserved_role(role):
+        raise RoleReserved("Role '%s' is reserved, so no permission can be removed from it." % role)
+    _ensure_unlocked(role, force, session)
+
+    removed = handler.remove(role, target, parameters, session=session)
+    if not removed:
+        session.rollback()
+        raise RolePermissionNotFound("Either role '%s' does not exist, or it does not have %s." % (role, handler.describe(target, parameters)))
+    session.commit()
+    return removed
+
+
+# ----------------------------------------------------------------------------------------------
+# Permission checks
+# ----------------------------------------------------------------------------------------------
+
+def has_permission(account: "InternalAccount", request: PermissionRequest, *, session: "Session") -> bool:
+    """
+    Tell whether the roles of the account grant it the request, of any checked permission type: one of its roles
+    grants it through an assignment which is active, activated already and not expired yet. How a role decides a
+    request is up to the permission type, e.g. the most specific DID pattern of the role for DIDs, see :class:`DidAccess`.
+
+    Only the roles are looked at. Whether RBAC is enabled (see :func:`is_rbac_enabled`), root and admin privileges
+    and the ownership of the resource (e.g. of a scope) are the permission policy's business, see :mod:`rucio.core.permission.generic`.
+
+        has_permission(account, DidPermissionRequest(operation=DidOperationType.READ, scope=scope), session=session)
+
+    :param account: The account to check.
+    :param request: What the account asks to do, e.g. a :class:`DidPermissionRequest`.
+    :param session: The database session.
+    :raises InputValidationError: If the request is not one of a registered permission type checked against requests.
+    """
+    handler = _request_handler(request)
+    return handler.checker(account, session=session)(request)
+
+
+def has_any_scope_prefix_access(account: "InternalAccount", scope: "InternalScope", operation: DidOperationType, *, session: "Session") -> bool:
+    """
+    Tell whether RBAC grants the account an operation on at least one DID of a scope, whatever its name, see
+    :meth:`DidAccess.grants_some_did`: within a role, the pattern deciding the whole scope grants it, or one of the
+    name patterns of the role in the scope does.
+
+    For the scope 'data', 'r' on 'data:raw1', 'data:raw*', 'data:*', 'da*:*' or '*:*' all count, 'r' on 'other:*' does not,
+    nor does 'r' on 'da*:*' in a role which has '---' on 'data:*'.
+    Like :func:`has_permission`, only the roles are looked at: not whether RBAC is enabled, root and admin privileges, nor the owner of the scope.
+
+    :param account: The account to check.
+    :param scope: The scope.
+    :param operation: The operation, e.g. `DidOperationType.READ`.
+    :param session: The database session.
+    :returns: True if the account's roles grant the operation on some DIDs of the scope.
+    """
+    return DidAccess(account, session=session).grants_some_did(scope, operation)
+
+
+def _permission_checker(*, account: "InternalAccount", session: "Session") -> "Callable[[PermissionRequest], bool]":
+    """
+    Build a callable telling whether RBAC grants the account a request, as :func:`has_permission` does,
+    except that root and the holders of the admin role are granted every request: listings are filtered
+    here directly, not through the permission policy, so nothing else checks their privileges.
+    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`.
+
+    This is meant for checking many requests in a row, e.g. to filter a listing: admin/root
+    privileges are looked up once, the permissions of the account's roles once per permission type,
+    and each distinct request is decided once, for the lifetime of the callable.
+
+    :param account: The account for which to check the requests.
+    :param session: The database session.
+    :returns: A callable taking a request and returning True if the account may perform it.
+    """
+    privileged = account.external == "root" or has_admin_role(account=account, session=session)
+    checkers: dict[RolePermissionType, "Callable[[Any], bool]"] = {}
+    decisions: dict[PermissionRequest, bool] = {}
+
+    def _decide(request: PermissionRequest) -> bool:
+        handler = _request_handler(request)
+        if privileged:
+            return True
+        if handler.permission_type not in checkers:
+            checkers[handler.permission_type] = handler.checker(account, session=session)
+        return checkers[handler.permission_type](request)
+
+    def _check(request: PermissionRequest) -> bool:
+        if request not in decisions:
+            decisions[request] = _decide(request)
+        return decisions[request]
+
+    return _check
+
+
+def scope_access_checker(
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: DidOperationType = DidOperationType.READ,
+    skip_filtering: bool = False,
+    any_did: bool = False,
+) -> "Callable[[Optional[InternalScope]], bool]":
+    """
+    Build a callable telling whether the account may perform an operation on a given scope, see :func:`_permission_checker`.
+
+    By default, the operation must be granted on the whole scope, by a pattern with the '*' name part, and withdrawn
+    from none of its DIDs by a name pattern of the same role, see :meth:`DidAccess.role_grants`: this is meant for items
+    standing for the whole content of a scope, e.g. counts. With `any_did`, a grant on some DIDs of the scope is enough,
+    as in :func:`has_any_scope_prefix_access`: this is meant for listing the scopes themselves.
+    Items standing for DIDs are filtered with :func:`did_access_checker` instead.
+
+    The owner of a scope may access it, as the permission policy decides it (see `perm_read_data` in
+    :mod:`rucio.core.permission.generic`): listings are filtered here directly, not through the permission policy.
+
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param skip_filtering: Grant access to every scope, without checking it, e.g. without RBAC.
+    :param any_did: Grant access to a scope if the operation is granted on some of its DIDs.
+    :returns: A callable taking a scope and returning True if the account may access it. A scope that is None or not an InternalScope is refused, unless `skip_filtering` is given.
+    """
+    if skip_filtering:
+        return lambda scope: True
+
+    check = _permission_checker(account=account, session=session)
+    did_access = DidAccess(account, session=session) if any_did else None
+    owned_scopes: dict[InternalScope, bool] = {}
+
+    def _can_access(scope: "Optional[InternalScope]") -> bool:
+        if scope is None or not isinstance(scope, InternalScope):
+            return False
+        if check(DidPermissionRequest(operation=operation, scope=scope)):
+            return True
+        if scope not in owned_scopes:
+            owned_scopes[scope] = is_scope_owner(scope=scope, account=account, session=session)
+        if owned_scopes[scope]:
+            return True
+        return did_access is not None and did_access.grants_some_did(scope, operation)
+
+    return _can_access
+
+
+def _did_owner(scope: "InternalScope", name: str, *, session: "Session") -> "Optional[InternalAccount]":
+    """The account owning a DID, None if the DID does not exist."""
+    stmt = select(models.DataIdentifier.account).where(models.DataIdentifier.scope == scope, models.DataIdentifier.name == name)
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def did_access_checker(
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: DidOperationType = DidOperationType.READ,
+    skip_filtering: bool = False,
+) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
+    """
+    Build a callable telling whether the account may perform an operation on a given DID, as the permission policy
+    decides it with RBAC (see `_rbac_permission_access` and `_owns_did` in :mod:`rucio.core.permission.generic`): a role grants the operation
+    on the DID through its most specific DID pattern matching it (see :class:`DidAccess`), or the account owns the DID
+    and a role grants it some READ in its scope.
+    Root, the holders of the admin role and the owner of the scope may access every DID of the scope, see :func:`scope_access_checker`.
+
+    The roles of the account are looked up once and the whole-scope decisions are kept per scope, see
+    :func:`scope_access_checker`, but the DIDs are decided one by one, so that a long listing is not kept in memory.
+    The owner of a DID is only looked up when no role grants the operation on it, and some READ is granted in its scope.
+
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param skip_filtering: Grant access to every DID, without checking it, e.g. without RBAC.
+    :returns: A callable taking a scope and a name, returning True if the account may access the DID. A scope that is None or not an InternalScope is refused, and so is a name that is None, unless the whole scope is granted or `skip_filtering` is given.
+    """
+    if skip_filtering:
+        return lambda scope, name: True
+
+    # a whole scope granted means each of its DIDs is, see :meth:`DidAccess.role_grants`, which spares deciding them one by one
+    whole_scope = scope_access_checker(account=account, session=session, operation=operation)
+    # owning a DID requires some READ in its scope
+    reads_in_scope = scope_access_checker(account=account, session=session, operation=DidOperationType.READ, any_did=True)
+    did_access = DidAccess(account, session=session)
+    scopes_read: dict[InternalScope, bool] = {}
+
+    def _can_access(scope: "Optional[InternalScope]", name: Optional[str]) -> bool:
+        if whole_scope(scope):
+            return True
+        if scope is None or not isinstance(scope, InternalScope) or name is None:
+            return False
+        if did_access.grants(scope, name, operation):
+            return True
+        if scope not in scopes_read:
+            scopes_read[scope] = reads_in_scope(scope)
+        return scopes_read[scope] and _did_owner(scope, name, session=session) == account
+
+    return _can_access
+
+
+def filter_iterable_by_scope_access(
+    items: "Iterable[dict[str, Any]]",
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: DidOperationType = DidOperationType.READ,
+    scope_keyword: str = "scope",
+    skip_filtering: bool = False,
+    any_did: bool = False,
+) -> "Iterator[dict[str, Any]]":
+    """
+    Yield only items whose scope the account may perform an operation on, see :func:`scope_access_checker`.
+    Items standing for DIDs are filtered with :func:`filter_iterable_by_did_access` instead.
+
+    :param items: An iterable of dictionaries representing items with associated scopes.
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param scope_keyword: The key in the item dictionaries that contains the associated scope.
+    :param skip_filtering: Yield every item, without checking its scope, e.g. without RBAC.
+    :param any_did: Yield an item if the operation is granted on some DIDs of its scope.
+    :returns: An iterator over the items that the account has access to.
+    """
+    can_access = scope_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering, any_did=any_did)
+
+    for item in items:
+        if can_access(item.get(scope_keyword)):
+            yield item
+
+
+def filter_iterable_by_did_access(
+    items: "Iterable[dict[str, Any]]",
+    *,
+    account: "InternalAccount",
+    session: "Session",
+    operation: DidOperationType = DidOperationType.READ,
+    scope_keyword: str = "scope",
+    name_keyword: str = "name",
+    skip_filtering: bool = False,
+) -> "Iterator[dict[str, Any]]":
+    """
+    Yield only items whose DID the account may perform an operation on, see :func:`did_access_checker`.
+
+    :param items: An iterable of dictionaries representing items with associated DIDs.
+    :param account: The account for which to check access.
+    :param session: The database session.
+    :param operation: The type of operation to check access for.
+    :param scope_keyword: The key in the item dictionaries that contains the scope of the DID.
+    :param name_keyword: The key in the item dictionaries that contains the name of the DID.
+    :param skip_filtering: Yield every item, without checking its DID, e.g. without RBAC.
+    :returns: An iterator over the items that the account has access to.
+    """
+    can_access = did_access_checker(account=account, session=session, operation=operation, skip_filtering=skip_filtering)
+
+    for item in items:
+        if can_access(item.get(scope_keyword), item.get(name_keyword)):
+            yield item
 
 
 # ----------------------------------------------------------------------------------------------
