@@ -193,7 +193,9 @@ class RoleClient(BaseClient):
         Returns
         -------
             A list of dictionaries, one per permission, with its `type` and, in the shape it is granted with
-            (see `add_role_permission`): a `did_pattern` and its list of `operations`, possibly empty, for a 'did' permission.
+            (see `add_role_permission`): a `did_pattern` and its list of `operations`, possibly empty, for a 'did' permission; a
+            `did_pattern`, a `meta_key` ('*' for every key, None for no key) and its list of `operations`,
+            possibly empty, for a 'metadata' permission, one per key.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions")
         response = self._send_request(url, method=HTTPMethod.GET)
@@ -408,7 +410,7 @@ class RoleClient(BaseClient):
         role :
             The role to grant the permission to.
         permission_type :
-            The type of the permission: 'did'.
+            The type of the permission: 'did' or 'metadata'.
         parameters :
             The target of the permission and its parameters, e.g.:
 
@@ -420,7 +422,14 @@ class RoleClient(BaseClient):
               'write' includes 'read' and 'delete' includes 'write' and 'read', and they are stored so, e.g. ['write']
               as ['read', 'write'].
               Within a role, the most specific pattern matching a DID decides, so an empty list withdraws the DIDs
-              the pattern matches from a less specific pattern of the role.
+              the pattern matches from a less specific pattern of the role;
+            - {'did_pattern': 'data:raw*', 'keys': ['quality', 'datatype'], 'operations': ['read', 'write']} for a
+              'metadata' permission on the keys of the DIDs the pattern matches, overriding what the 'did' permissions
+              of the role grant on them. The keys are a list or a comma-separated string, '*' standing for every key;
+              without keys, the permission is on no key, only makes the DIDs visible and takes ['read']. The operations
+              are 'read' and 'write' (adding, modifying or deleting a key), 'write' including 'read' and being stored
+              so, an empty list withdrawing what the 'did' permissions grant on the keys. The operations a role already has on a key are replaced. The keys held by
+              Rucio and those leading to the deletion of a DID (e.g. 'bytes', 'lifetime') cannot be granted 'write'.
         force :
             Grant the permission even if the role is locked.
         """
@@ -438,17 +447,20 @@ class RoleClient(BaseClient):
         role :
             The role to remove the permissions from.
         permission_type :
-            The type of the permissions: 'did'.
+            The type of the permissions: 'did' or 'metadata'.
         parameters :
             The target of the permissions and the parameters identifying them, e.g.:
 
-            - {'did_pattern': 'data*:*'} for a 'did' permission, given as it is listed: every operation on it is removed.
+            - {'did_pattern': 'data*:*'} for a 'did' permission, given as it is listed: every operation on it is removed;
+            - {'did_pattern': 'data:*', 'keys': 'quality,comment'} for a 'metadata' permission, '*' standing for the
+              permission on every key and no keys for the one on no key. Nothing is removed if one of the keys has
+              no permission (RolePermissionNotFound).
         force :
             Remove the permissions even if the role is locked.
 
         Returns
         -------
-            The number of permissions removed.
+            The number of permissions removed, e.g. one per metadata key.
         """
         response = self._send_permission_request(HTTPMethod.DELETE, role, permission_type, parameters, force)
         if response.status_code == codes.ok:
