@@ -317,10 +317,12 @@ def add_role_permission(
     Grant a role a permission of a type, see :func:`rucio.core.role.add_role_permission`.
 
     :param role: The role to grant the permission to.
-    :param permission_type: The type of the permission: 'did'.
+    :param permission_type: The type of the permission: 'did' or 'metadata'.
     :param parameters: The target of the permission and its parameters: a 'did_pattern', on which only a trailing '*'
                        wildcard is accepted, and the list of its 'operations', possibly empty, for a DID permission,
-                       which replaces what the role was granted on the pattern.
+                       which replaces what the role was granted on the pattern; a 'did_pattern', its metadata
+                       'keys' ('*' for every key, none for no key) and the list of its 'operations', possibly empty,
+                       for a metadata permission, which replaces what the role was granted on these keys.
     :param issuer: The account issuing the command.
     :param force: Grant the permission even if the role is locked.
     :param vo: The VO of the issuing account.
@@ -344,13 +346,14 @@ def delete_role_permission(
     Remove permissions of a type from a role, see :func:`rucio.core.role.delete_role_permission`.
 
     :param role: The role to remove the permissions from.
-    :param permission_type: The type of the permissions: 'did'.
+    :param permission_type: The type of the permissions: 'did' or 'metadata'.
     :param parameters: The target of the permissions and the parameters identifying them: a 'did_pattern' for a DID
-                       permission.
+                       permission; a 'did_pattern' and its metadata 'keys' for a metadata
+                       permission, all of which must exist.
     :param issuer: The account issuing the command.
     :param force: Remove the permissions even if the role is locked.
     :param vo: The VO of the issuing account.
-    :returns: The number of permissions removed.
+    :returns: The number of permissions removed, e.g. one per metadata key.
     """
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)

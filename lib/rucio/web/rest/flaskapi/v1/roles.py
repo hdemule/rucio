@@ -154,7 +154,8 @@ class RolePermission(ErrorHandlingMethodView):
 
     The request body names the permission: its target and its parameters, in the shape the permissions
     are listed with, together with `force`, e.g. {"did_pattern": "data:raw*", "operations": ["read", "write"]} for a
-    DID permission.
+    DID permission, or {"did_pattern": "data:raw*", "keys": "quality,datatype", "operations": ["read", "write"]}
+    for a metadata permission.
 
     Granting a DID permission sets exactly its `operations` on the `did_pattern`, replacing what the role had on it,
     completed with those they include: "write" includes "read", and "delete" includes "write" and "read", so
@@ -162,6 +163,14 @@ class RolePermission(ErrorHandlingMethodView):
     specific pattern matching a DID decides, so such a permission withdraws the DIDs it matches from a less specific
     pattern of the role. Removing a DID permission takes only the `did_pattern`, and removes nothing (404) if the
     role has no permission on it.
+
+    The `keys` of a metadata permission are a list or a comma-separated string, '*' standing for every key and
+    no keys for none: such a permission only makes the matching DIDs visible, and only takes `["read"]`. Its
+    `operations` may be empty (`---`), which withdraws what the role would otherwise be granted on these keys.
+    Its operations are completed as those of a DID permission, "write" including "read": ["write"] is stored and
+    listed as ["read", "write"]. Granting a metadata permission which exists already replaces its operations.
+    Removing metadata permissions takes the `did_pattern` and the `keys`, and removes nothing (404) if one of the
+    keys has no permission.
     """
 
     def post(self, role_name: str, permission_type: str):
