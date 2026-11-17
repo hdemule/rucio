@@ -38,6 +38,12 @@ RESERVED_ROLES = {
     ADMIN_ROLE: 'Rucio administrator.',
 }
 
+# Logged by the server and sent to the client, under `RBAC_WARNING_HEADER`, whenever a role endpoint is called while RBAC is disabled,
+# see `rucio.core.role.is_rbac_enabled`.
+RBAC_DISABLED_WARNING = ("Role-based access control is currently disabled in the current rucio instance. "
+"You can still manage roles but everything will work as in standard Rucio as long as you do not explicitly enable RBAC in the current instance configuration.")
+RBAC_WARNING_HEADER = 'X-Rucio-Warning'
+
 # RBAC: metadata keys whose update leads to the removal of the DID or of its replicas (e.g. `rucio did remove` sets
 # the lifetime). Setting metadata on an existing DID already requires to alter it (owning it or DELETE on it), so these
 # only matter when the DID is created: WRITE on the new DID is then not enough to set them, see `perm_add_did`
@@ -53,6 +59,10 @@ RBAC_PROTECTED_METADATA_KEYS = frozenset({
     'is_archive', 'constituent', 'is_new', 'closed_at', 'deleted_at', 'accessed_at', 'access_cnt',
     'created_at', 'updated_at',
 })
+
+# Stands for the issuer's account in REST paths. It cannot collide with an account name,
+# since '@' is not allowed in those.
+ISSUER_ACCOUNT_ALIAS = '@me'
 
 DEFAULT_ACTIVITY = 'User Subscriptions'
 
