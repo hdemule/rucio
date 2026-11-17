@@ -23,13 +23,15 @@ from rucio.common import config, exception
 from rucio.common.constants import DEFAULT_VO
 from rucio.common.plugins import check_policy_module_version
 from rucio.common.policy import get_policy
-from rucio.db.sqla.constants import DatabaseOperationType
+from rucio.db.sqla.constants import DatabaseOperationType, DidOperationType
 from rucio.db.sqla.session import db_session
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator
+
     from sqlalchemy.orm import Session
 
-    from rucio.common.types import InternalAccount
+    from rucio.common.types import InternalAccount, InternalScope
 
 LOGGER = logging.getLogger('policy')
 
@@ -176,3 +178,96 @@ def has_permission(
     if isinstance(result, bool):
         result = PermissionResult(result)
     return result
+
+
+# ----------------------------------------------------------------------------------------------
+# Listing filters
+#
+# A listing is filtered item by item with a callable built once for the listing, rather than with `has_permission`
+# for each item. Like the permissions, the filters are those of the policy package of the VO of the issuer, falling
+# back to the generic ones, see :mod:`rucio.core.permission.generic`, for each filter the policy package does not define.
+# ----------------------------------------------------------------------------------------------
+
+def _policy_function(issuer: "InternalAccount", name: str) -> "Callable[..., Any]":
+    """The function of the policy package of the VO of the issuer, or the generic one if the policy package does not define it."""
+    if issuer.vo not in permission_modules:
+        load_permission_for_vo(issuer.vo)
+    return getattr(permission_modules[issuer.vo], name, None) or getattr(rucio.core.permission.generic, name)
+
+
+def is_listing_filtered(issuer: "InternalAccount", action: str, *, session: "Session") -> bool:
+    """
+    Tell whether a listing is filtered for an account, see :func:`rucio.core.permission.generic.is_listing_filtered`.
+
+    :param issuer: The account the listing is made for.
+    :param action: The filter of the listing, e.g. 'list_dids'.
+    :param session: The database session.
+    """
+    return _policy_function(issuer, 'is_listing_filtered')(issuer, action, session=session)
+
+
+def scope_filter(issuer: "InternalAccount", action: str, *, session: "Session", operation: DidOperationType = DidOperationType.READ,
+                 any_did: bool = False) -> "Callable[[Optional[InternalScope]], bool]":
+    """
+    Build a callable telling whether an account may perform an operation on a scope, see :func:`rucio.core.permission.generic.scope_filter`.
+
+    :param issuer: The account the listing is made for.
+    :param action: The filter of the listing, e.g. 'list_scopes'.
+    :param session: The database session.
+    :param operation: The operation to check.
+    :param any_did: Grant a scope if the operation is granted on some of its DIDs.
+    """
+    return _policy_function(issuer, 'scope_filter')(issuer, action, session=session, operation=operation, any_did=any_did)
+
+
+def did_filter(issuer: "InternalAccount", action: str, *, session: "Session",
+               operation: DidOperationType = DidOperationType.READ) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
+    """
+    Build a callable telling whether an account may perform an operation on a DID, see :func:`rucio.core.permission.generic.did_filter`.
+
+    :param issuer: The account the listing is made for.
+    :param action: The filter of the listing, e.g. 'list_dids'.
+    :param session: The database session.
+    :param operation: The operation to check.
+    """
+    return _policy_function(issuer, 'did_filter')(issuer, action, session=session, operation=operation)
+
+
+def filter_scopes(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", action: str, *, session: "Session",
+                  operation: DidOperationType = DidOperationType.READ, any_did: bool = False, scope_keyword: str = "scope") -> "Iterator[dict[str, Any]]":
+    """
+    Yield the items whose scope the account may perform an operation on, see :func:`scope_filter`.
+    Items standing for DIDs are filtered with :func:`filter_dids` instead.
+
+    :param items: The items, each with its scope under `scope_keyword`.
+    :param issuer: The account the listing is made for.
+    :param action: The filter of the listing, e.g. 'list_scopes'.
+    :param session: The database session.
+    :param operation: The operation to check.
+    :param any_did: Yield an item if the operation is granted on some DIDs of its scope.
+    :param scope_keyword: The key of the scope in the items.
+    """
+    can_access = scope_filter(issuer, action, session=session, operation=operation, any_did=any_did)
+    for item in items:
+        if can_access(item.get(scope_keyword)):
+            yield item
+
+
+def filter_dids(items: "Iterable[dict[str, Any]]", issuer: "InternalAccount", action: str, *, session: "Session",
+                operation: DidOperationType = DidOperationType.READ, scope_keyword: str = "scope",
+                name_keyword: str = "name") -> "Iterator[dict[str, Any]]":
+    """
+    Yield the items whose DID the account may perform an operation on, see :func:`did_filter`.
+
+    :param items: The items, each with the scope and the name of its DID under `scope_keyword` and `name_keyword`.
+    :param issuer: The account the listing is made for.
+    :param action: The filter of the listing, e.g. 'list_dids'.
+    :param session: The database session.
+    :param operation: The operation to check.
+    :param scope_keyword: The key of the scope in the items.
+    :param name_keyword: The key of the name in the items.
+    """
+    can_access = did_filter(issuer, action, session=session, operation=operation)
+    for item in items:
+        if can_access(item.get(scope_keyword), item.get(name_keyword)):
+            yield item
