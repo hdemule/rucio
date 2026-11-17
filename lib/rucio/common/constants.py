@@ -38,6 +38,22 @@ RESERVED_ROLES = {
     ADMIN_ROLE: 'Rucio administrator.',
 }
 
+# RBAC: metadata keys whose update leads to the removal of the DID or of its replicas (e.g. `rucio did remove` sets
+# the lifetime). Setting metadata on an existing DID already requires to alter it (owning it or DELETE on it), so these
+# only matter when the DID is created: WRITE on the new DID is then not enough to set them, see `_rbac_can_create_did`
+# in `rucio.core.permission.generic`.
+RBAC_DELETE_METADATA_KEYS = frozenset({'lifetime', 'expired_at', 'eol_at', 'purge_replicas'})
+
+# RBAC: metadata keys held by Rucio itself: the identity, size, checksums and state of a DID, and its bookkeeping.
+# Setting them would rename a DID, falsify its size (and the account usage computed from it) or its checksums, or
+# change how Rucio handles it, so no role grants it: only root, admins and the owner of the scope may.
+RBAC_PROTECTED_METADATA_KEYS = frozenset({
+    'name', 'scope', 'account', 'did_type', 'bytes', 'length', 'events', 'adler32', 'md5', 'guid',
+    'availability', 'complete', 'is_open', 'monotonic', 'obsolete', 'suppressed', 'hidden', 'transient',
+    'is_archive', 'constituent', 'is_new', 'closed_at', 'deleted_at', 'accessed_at', 'access_cnt',
+    'created_at', 'updated_at',
+})
+
 DEFAULT_ACTIVITY = 'User Subscriptions'
 
 KEY_TYPES = ['ALL', 'COLLECTION', 'FILE', 'DERIVED']
