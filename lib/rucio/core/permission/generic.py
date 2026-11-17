@@ -15,7 +15,7 @@
 from typing import TYPE_CHECKING, Any, Optional
 
 import rucio.core.scope
-from rucio.common.constants import RESERVED_KEYS, RseAttr
+from rucio.common.constants import RBAC_DELETE_METADATA_KEYS, RESERVED_KEYS, RseAttr
 from rucio.common.exception import DataIdentifierNotFound
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.core import role as role_core
@@ -151,7 +151,7 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
             'get_dataset_locks': perm_read_data,
             'get_dataset_locks_bulk': perm_read_data,
             'list_associated_replication_rules_for_file': perm_read_data,
-            'list_replicas': perm_read_data,
+            'list_replicas': perm_list_replicas,
             'list_dataset_replicas': perm_read_data,
             'list_dataset_replicas_bulk': perm_read_data,
             'list_dataset_replicas_vp': perm_read_data,
@@ -287,6 +287,31 @@ def _rbac_can_alter_did(issuer: "InternalAccount", scope: "InternalScope", name:
             else role_core.has_did_permission(issuer, scope, name, operation, session=session)
 
     return grants(DidOperationType.DELETE) or (grants(DidOperationType.WRITE) and _is_did_owner(issuer, scope, name, session))
+
+
+def _rbac_can_alter_metadata(issuer: "InternalAccount", scope: "InternalScope", name: str, keys: "Iterable[str]", session: "Session") -> bool:
+    """
+    Checks if RBAC grants an account to set metadata keys on an existing DID, the owner of its scope being checked
+    before by the permission functions. The keys leading to the removal of the DID (see RBAC_DELETE_METADATA_KEYS), and
+    a call setting no key at all, require to alter the DID, see :func:`_rbac_can_alter_did`. The other keys are decided
+    per key by the metadata permissions, falling back to altering the DID as without metadata permissions, see
+    :func:`rucio.core.role.can_write_metadata_keys`.
+    A recursive update, which rewrites the metadata of the whole content, is granted by no role: the permission
+    functions refuse it before calling this check.
+
+    :param issuer: Account identifier which issues the command.
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param keys: The metadata keys to set.
+    :param session: The DB session to use
+    :returns: True if RBAC grants it, otherwise False
+    """
+    keys = set(keys)
+    if (not keys or keys & RBAC_DELETE_METADATA_KEYS) and not _rbac_can_alter_did(issuer, scope, name, session):
+        return False
+    other_keys = keys - RBAC_DELETE_METADATA_KEYS
+    return not other_keys or role_core.can_write_metadata_keys(account=issuer, scope=scope, name=name, keys=other_keys,
+                                                               as_owner=_is_did_owner(issuer, scope, name, session), session=session)
 
 
 def _rbac_can_attach_dids(issuer: "InternalAccount", dids: "Iterable[Mapping[str, Any]]", registered: bool, session: "Session") -> bool:
@@ -843,10 +868,8 @@ def perm_set_metadata_bulk(issuer: "InternalAccount", kwargs: dict[str, Any], se
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    # With RBAC, setting metadata alters the DID, see :func:`_rbac_can_alter_did`. A recursive update, which rewrites
-    # the metadata of the whole content, is granted by no role.
     return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
-        or (_use_roles() and not kwargs.get('recursive') and _rbac_can_alter_did(issuer, kwargs['scope'], kwargs['name'], session))
+        or (_use_roles() and not kwargs.get('recursive') and _rbac_can_alter_metadata(issuer, kwargs['scope'], kwargs['name'], kwargs['meta'], session))
 
 
 def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -858,10 +881,8 @@ def perm_set_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], session
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    # With RBAC, setting metadata alters the DID, see :func:`_rbac_can_alter_did`. A recursive update, which rewrites
-    # the metadata of the whole content, is granted by no role.
     return _is_root(issuer) or _is_admin(issuer, session) or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
-        or (_use_roles() and not kwargs.get('recursive') and _rbac_can_alter_did(issuer, kwargs['scope'], kwargs['name'], session))
+        or (_use_roles() and not kwargs.get('recursive') and _rbac_can_alter_metadata(issuer, kwargs['scope'], kwargs['name'], [kwargs['key']], session))
 
 
 def perm_set_status(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1081,14 +1102,14 @@ def perm_get_request_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], s
 
     Every account can, unless RBAC is enabled: a transfer request tells where the replica of the DID comes from and
     goes to, its source and destination URLs included, so it then requires to read the data of the DID like its
-    replicas do, see :func:`perm_read_data`.
+    replicas do, see :func:`perm_list_replicas`. A metadata permission making the DID visible does not grant it.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
     :param session: The DB session to use
     :returns: True if account is allowed, otherwise False
     """
-    return perm_read_data(issuer, kwargs, session)
+    return perm_list_replicas(issuer, kwargs, session)
 
 
 def perm_get_request_history_by_did(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1471,7 +1492,14 @@ def perm_delete_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], sess
 
     Every account can, unless RBAC is enabled.
 
-    With RBAC, it alters the DID: owning its scope, or altering the DID through the roles, see :func:`_rbac_can_alter_did`.
+    Only the custom metadata plugins (e.g. JSON) delete keys: the core refuses to delete a key of the DID columns,
+    which hold every deletion key and most reserved ones. A reserved key it deletes, e.g. 'is_open', is therefore a
+    custom key of that name, not the state of the DID.
+
+    With RBAC, owning the scope grants every key. Otherwise, the metadata permissions decide the key, falling back to
+    altering the DID as without metadata permissions, see :func:`rucio.core.role.can_write_metadata_keys`. No metadata
+    permission decides the keys of `rucio.core.role.METADATA_KEYS_NOT_WRITABLE`, so altering the DID decides them
+    directly, see :func:`_rbac_can_alter_did`.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
@@ -1480,9 +1508,14 @@ def perm_delete_metadata(issuer: "InternalAccount", kwargs: dict[str, Any], sess
     """
     if not _use_roles() or _is_root(issuer) or _is_admin(issuer, session):
         return True
-    scope, name = kwargs['scope'], kwargs['name']
-    return rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)\
-        or _rbac_can_alter_did(issuer, scope, name, session)
+    scope, name, key = kwargs['scope'], kwargs['name'], kwargs['key']
+    if rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session):
+        return True
+    if key in role_core.METADATA_KEYS_NOT_WRITABLE:
+        # `can_write_metadata_keys` refuses them outright, without falling back to the DID permissions
+        return _rbac_can_alter_did(issuer, scope, name, session)
+    return role_core.can_write_metadata_keys(account=issuer, scope=scope, name=name, keys=[key],
+                                             as_owner=_is_did_owner(issuer, scope, name, session), session=session)
 
 
 def perm_list_account_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
@@ -1512,12 +1545,13 @@ def perm_list_role_permissions(issuer: "InternalAccount", kwargs: dict[str, Any]
 
 def perm_read_data(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
     """
-    Checks if an account can read the data of a scope: the replicas of its DIDs, with their PFNs, which allow
-    to download them. Every account can read every scope, unless RBAC is enabled: it then requires to read the DID
-    the action names ('name'): owning its scope, or READ on it. An action naming no
-    DID (a listing of the scope) only requires to own the scope or READ on some DIDs of the scope, see
+    Checks if an account can read the content of a scope (its DIDs, their metadata, rules, locks and dataset replicas).
+    Every account can read every scope, unless RBAC is enabled: it then requires to read the DID the action names
+    ('name'): owning its scope, READ on it, or a metadata permission making it
+    visible, see :func:`rucio.core.role.has_metadata_visibility`. An action naming no DID (a listing of the scope) only requires to
+    own the scope, or READ or metadata visibility on some DIDs of the scope, see
     :func:`rucio.core.role.has_any_scope_prefix_access`: the gateway then filters what it returns per DID, see
-    :func:`did_filter`.
+    :func:`did_filter`, and hides the metadata keys the account may not read, see :func:`metadata_key_filter`.
 
     :param issuer: Account identifier which issues the command.
     :param kwargs: List of arguments for the action.
@@ -1530,8 +1564,26 @@ def perm_read_data(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
     if rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session):
         return True
     if name:
-        return role_core.has_did_permission(issuer, scope, name, DidOperationType.READ, session=session)
-    return role_core.has_any_scope_prefix_access(account=issuer, scope=scope, operation=DidOperationType.READ, session=session)
+        return role_core.has_did_permission(issuer, scope, name, DidOperationType.READ, session=session)\
+            or role_core.has_metadata_visibility(account=issuer, scope=scope, name=name, session=session)
+    return role_core.has_any_scope_prefix_access(account=issuer, scope=scope, operation=DidOperationType.READ, session=session)\
+        or role_core.has_any_scope_prefix_metadata_visibility(account=issuer, scope=scope, session=session)
+
+
+def perm_list_replicas(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the replicas of a DID, with their PFNs, which allow to download it. Every account
+    can, unless RBAC is enabled: it then requires to read the DID, owning its scope or READ on it. Unlike
+    :func:`perm_read_data`, a metadata permission making the DID visible does not grant it.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return not _use_roles() or _is_root(issuer) or _is_admin(issuer, session)\
+        or rucio.core.scope.is_scope_owner(scope=kwargs['scope'], account=issuer, session=session)\
+        or role_core.has_did_permission(issuer, kwargs['scope'], kwargs['name'], DidOperationType.READ, session=session)
 
 
 # ----- Listing filters -----
