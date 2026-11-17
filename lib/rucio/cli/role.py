@@ -17,17 +17,18 @@ import re
 import shutil
 import textwrap
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import click
 
-from rucio.common.exception import RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound
-from rucio.common.utils import str_to_date
+from rucio.common.constants import ROLE_QUOTA_NOCAP
+from rucio.common.exception import AccessDenied, AccountNotFound, InvalidRSEExpression, RoleAssignmentDisabled, RoleInUse, RoleLocked, RolePermissionNotFound, RSENotFound
+from rucio.common.utils import get_bytes_value_from_string, str_to_date
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 
 
 # Client-side representation of the operations a DID permission can grant.
@@ -125,6 +126,9 @@ TREE_PLACEHOLDER_INDENT = "`-- "
 # prefixes the lines of a multi-line branch other than the one it is attached by, see `format_tree`
 TREE_TRUNK = "|   "
 TREE_NO_TRUNK = "    "
+# bracket the RSEs of a global limit in the permissions of a role, see `format_permission_lists`
+TREE_BRACKET_OPEN = "| "
+TREE_BRACKET_CLOSE = " |"
 # the permissions of a role which has none, see `format_permission_lists`
 NO_PERMISSION = "(no permission assigned)"
 
@@ -137,7 +141,7 @@ def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
     of the same row wraps over several lines, and keeps the indentation of the branches, which
     tabulate would strip from single-line cells.
 
-    A branch may span several lines: it is attached to the
+    A branch may span several lines, e.g. one per RSE a global limit covers: it is attached to the
     tree by its middle line, the trunk running along the lines above it, and along those below it
     unless it is the last branch.
 
@@ -165,74 +169,265 @@ def format_tree(root: str, branches: "Sequence[str]", placeholder: str) -> str:
     return '\n'.join(lines)
 
 
-def permission_lines(permissions: "Iterable[Mapping[str, Any]]") -> list[tuple[str, str, str]]:
+class SizeFormat(Enum):
+    """How the sizes of the limits of a role, and the usage measured against them, are rendered."""
+    # with a storage unit, e.g. '1.5 TB'
+    COMPACT = 'compact'
+    # to the byte, with grouped digits, e.g. '1,500,000,000,000 B'
+    EXACT = 'exact'
+    # to the byte, as a bare number for scripts, e.g. '1500000000000'
+    RAW = 'raw'
+
+    @classmethod
+    def of(cls, human: bool, exact: bool = False) -> "SizeFormat":
+        """The format matching `--robot` (`human` being False with it) and a request for sizes to the byte, e.g. `--detail`."""
+        if not human:
+            return cls.RAW
+        return cls.EXACT if exact else cls.COMPACT
+
+
+# The decimal storage units, as `sizefmt` names them.
+SIZE_UNITS = ('B', 'kB', 'MB', 'GB', 'TB', 'PB', 'EB')
+
+
+def _compact_size(bytes_: float, decimals: int) -> tuple[str, str]:
+    """
+    Render a size with the largest decimal unit it reaches, without trailing zeros, e.g. ('1.5', 'TB').
+
+    :param bytes_: The size, in bytes.
+    :param decimals: The decimals kept at most, the size being rounded to them.
+    :returns: The number and its unit, apart so that two sizes in the same unit can share it.
+    """
+    value = float(bytes_)
+    # the unit is chosen once rounded, so that 999.96 kB reads as 1 MB rather than 1000 kB
+    for unit in SIZE_UNITS:
+        if abs(round(value, decimals)) < 1000 or unit == SIZE_UNITS[-1]:
+            break
+        value /= 1000
+    number = f"{value:.{decimals}f}"
+    return (number.rstrip('0').rstrip('.') if '.' in number else number), unit
+
+
+def format_size(bytes_: int, sizes: SizeFormat = SizeFormat.COMPACT) -> str:
+    """Render a size in bytes, see :class:`SizeFormat`, e.g. '1.234 TB', '1,234,000,000,000 B' or '1234000000000'."""
+    if sizes == SizeFormat.RAW:
+        return str(bytes_)
+    if sizes == SizeFormat.EXACT:
+        return f"{bytes_:,} B"
+    return ' '.join(_compact_size(bytes_, decimals=3))
+
+
+def format_quota(bytes_: int, sizes: SizeFormat = SizeFormat.COMPACT) -> str:
+    """Render a limit of a role, e.g. '100 GB' or '1.5 TB', 'no cap' if it is `ROLE_QUOTA_NOCAP`."""
+    if bytes_ == ROLE_QUOTA_NOCAP:
+        return "no cap"
+    return format_size(bytes_, sizes)
+
+
+def _format_percentage(used: int, limit: int, decimals: int) -> str:
+    """
+    Render the share of a (non-zero) limit which is used, rounded to `decimals`.
+
+    The rounding never hides that a limit is used, nor makes it look reached when it is not: a usage
+    rounding to 0 reads as e.g. '<1%', one rounding to 100 while still below the limit as e.g. '>99%'.
+    A usage beyond the limit reads as '>100%': it is not an error, the limit of a role being only one of
+    those an account may write by, the role leaving the most space being taken.
+    """
+    if used > limit:
+        return ">100%"
+    step = 10 ** -decimals
+    percentage = round(100 * used / limit, decimals)
+    if used and percentage == 0:
+        return f"<{step:.{decimals}f}%"
+    if used < limit and percentage >= 100:
+        return f">{100 - step:.{decimals}f}%"
+    return f"{percentage:.{decimals}f}%"
+
+
+def format_quota_usage(used: int, limit: int, sizes: SizeFormat = SizeFormat.COMPACT) -> str:
+    """
+    Render a limit of a role together with the usage of an account measured against it.
+
+    The usage and the limit share their unit when they have the same. The share of the limit used is
+    rounded to the percent in the compact format, to a tenth of a percent otherwise:
+
+        1.4/10 GB (14% used)
+        950 MB/10 GB (10% used)
+        1,395,864,371/10,000,000,000 B (14.0% used)
+        12/10 GB (>100% used)
+        3.2 TB/no cap
+        0/0 B (full)
+
+    :param used: The bytes used, on the RSE of a local limit or summed over the RSEs of a global one.
+    :param limit: The limit, `ROLE_QUOTA_NOCAP` for no cap.
+    :param sizes: How the sizes are rendered.
+    """
+    if sizes == SizeFormat.COMPACT:
+        # the usage is only indicative, a tenth of its unit is enough
+        used_number, used_unit = _compact_size(used, decimals=1)
+        # nothing used reads the same in any unit
+        shares_unit = not used or (limit != ROLE_QUOTA_NOCAP and _compact_size(limit, decimals=3)[1] == used_unit)
+        used_text = used_number if shares_unit else f"{used_number} {used_unit}"
+    else:
+        # the exact sizes always share their unit, if any
+        used_text = format_size(used, sizes).removesuffix(' B')
+
+    usage = f"{used_text}/{format_quota(limit, sizes)}"
+    if limit == ROLE_QUOTA_NOCAP:
+        return usage
+    if limit == 0:
+        return f"{usage} (full)"
+    return f"{usage} ({_format_percentage(used, limit, decimals=0 if sizes == SizeFormat.COMPACT else 1)} used)"
+
+
+# The localities of the limits of a role, in the order they are rendered.
+LIMIT_LOCALITIES = ('local', 'global')
+
+
+def format_limits(
+        permission: "Mapping[str, Any]",
+        sizes: SizeFormat = SizeFormat.COMPACT,
+        used: "Optional[Callable[[str], int]]" = None,
+) -> str:
+    """
+    Render the limits of a role on a target, as listed by the server, e.g. 'local: 10 TB' or 'global: no cap'.
+
+    :param permission: The limit permission, as listed by the server.
+    :param sizes: How the sizes are rendered.
+    :param used: Gives the bytes an account uses, summed over the RSEs an RSE expression currently matches. With it,
+                 each limit is rendered with the usage measured against it, e.g. 'local: 1.4/10 GB (14% used)', see
+                 :func:`format_quota_usage`.
+    """
+    return ', '.join(
+        f"{locality}: "
+        + (format_quota(permission[locality], sizes) if used is None else format_quota_usage(used(permission['rse_expression']), permission[locality], sizes))
+        for locality in LIMIT_LOCALITIES if locality in permission
+    )
+
+
+def permission_lines(
+        permissions: "Iterable[Mapping[str, Any]]",
+        sizes: SizeFormat = SizeFormat.COMPACT,
+        used: "Optional[Callable[[str], int]]" = None,
+) -> list[tuple[str, str, str, str]]:
     """
     Gather the permissions of a role into one line per type and target, sorted by type then target.
 
     :param permissions: The permissions of the role, as listed by the server.
-    :returns: The lines, as (type, target, operations): the operations granted on a DID pattern, e.g. 'rw-'
-              (see :func:`format_operations`), and those granted on the metadata keys of a DID pattern, one key per
-              line (see :func:`format_metadata_permissions`). A permission of a type this client does not know is
+    :param sizes: How the sizes of the limits are rendered.
+    :param used: Gives the bytes an account uses on the RSEs of an RSE expression, to render each limit with the usage
+                 measured against it, see :func:`format_limits`.
+    :returns: The lines, as (type, target, operations, limits): the operations granted on a DID pattern, e.g. 'rw-'
+              (see :func:`format_operations`), those granted on the metadata keys of a DID pattern, one key per line
+              (see :func:`format_metadata_permissions`), and the limits on an RSE expression (see
+              :func:`format_limits`), '' where they do not apply. A permission of a type this client does not know is
               left out.
     """
     ops_by_did_pattern: dict[str, list[str]] = {}
     metadata_by_did_pattern: dict[str, list["Mapping[str, Any]"]] = {}
+    limits: list["Mapping[str, Any]"] = []
     for permission in permissions:
         if permission.get('type') == 'did':
             ops_by_did_pattern[permission['did_pattern']] = permission['operations']
         elif permission.get('type') == 'metadata':
             metadata_by_did_pattern.setdefault(permission['did_pattern'], []).append(permission)
+        elif permission.get('type') == 'limit':
+            limits.append(permission)
 
-    lines = [('did', did_pattern, format_operations(ops)) for did_pattern, ops in sorted(ops_by_did_pattern.items())]
-    lines.extend(('metadata', did_pattern, format_metadata_permissions(metadata)) for did_pattern, metadata in sorted(metadata_by_did_pattern.items()))
+    lines = [('did', did_pattern, format_operations(ops), '') for did_pattern, ops in sorted(ops_by_did_pattern.items())]
+    lines.extend(('metadata', did_pattern, format_metadata_permissions(metadata), '') for did_pattern, metadata in sorted(metadata_by_did_pattern.items()))
+    lines.extend(('limit', limit['rse_expression'], '', format_limits(limit, sizes, used)) for limit in sorted(limits, key=lambda limit: limit['rse_expression']))
     return lines
 
 
-def format_permission_lists(roles: "Sequence[Iterable[Mapping[str, Any]]]", width: Optional[int] = None) -> list[str]:
+def format_permission_lists(
+        roles: "Sequence[tuple[Iterable[Mapping[str, Any]], Optional[Callable[[str], int]]]]",
+        rse_names: "Optional[Callable[[str], Sequence[str]]]" = None,
+        sizes: SizeFormat = SizeFormat.COMPACT,
+        width: Optional[int] = None,
+) -> list[str]:
     """
     Render the permissions of several roles, each to be used as a single table cell.
 
     Each line of :func:`permission_lines` is one entry, made of the same columns whatever its type,
     aligned across the entries of all the roles: its TYPE, its identifier and its parameters, i.e. the
-    operations on a DID pattern, or those on the metadata keys of a DID pattern, one key per line:
+    operations on a DID pattern, those on the metadata keys of a DID pattern, one key per line, or the
+    limit on an RSE expression. A global limit on an expression matching several RSEs lists them one per
+    line, bracketed in the identifier column, its limit on the middle one:
 
         DID        physics:*  r--
         METADATA   physics:*  rw  (every key)
                               r-  project
+        LIMIT      MOCK       local: 1 MB
+                 | MOCK2   |
+        LIMIT    | MOCK3   |- global: 100 kB
+                 | MOCK4   |
 
-    :param roles: The roles, as their permissions as listed by the server.
+    :param roles: The roles, as their permissions as listed by the server, and what gives the bytes an account uses on
+                  the RSEs of an RSE expression, to render each limit with the usage measured against it (see
+                  :func:`format_limits`), None to only render the limits, e.g. if the account does not hold the role.
+    :param rse_names: Gives the names of the RSEs an RSE expression currently matches. Without it, every
+                      limit holds on one line, with its RSE expression.
+    :param sizes: How the sizes of the limits are rendered.
     :param width: The width the lines should fit in, None for no limit. The identifier column narrows to it, down to
                   `MIN_IDENTIFIER_WIDTH`, each identifier too long for it being broken over several lines, see
                   :func:`break_identifier`.
     :returns: The permissions of each role, in the order of `roles`, their lines joined by newlines.
     """
-    # each entry of each role as (type, identifier, parameters)
-    entries_by_role = [
-        [(permission_type.upper(), target, operations) for permission_type, target, operations in permission_lines(permissions)]
-        for permissions in roles
-    ]
+    # each entry of each role as (type, identifier, parameters), the identifier being the RSEs of a global limit if it covers several
+    entries_by_role: list[list[tuple[str, Union[str, list[str]], str]]] = []
+    for permissions, used in roles:
+        entries: list[tuple[str, Union[str, list[str]], str]] = []
+        for permission_type, target, operations, limits in permission_lines(permissions, sizes, used):
+            if permission_type != 'limit':
+                entries.append((permission_type.upper(), target, operations))
+                continue
+            rses = list(rse_names(target)) if rse_names is not None else [target]
+            if not rses:
+                entries.append((permission_type.upper(), target, f"{limits} (no RSE currently matches)"))
+            elif rses == [target]:
+                entries.append((permission_type.upper(), target, limits))
+            else:
+                entries.append((permission_type.upper(), rses, limits))
+        entries_by_role.append(entries)
 
     all_entries = [entry for entries in entries_by_role for entry in entries]
     if not all_entries:
         return [NO_PERMISSION for _ in roles]
 
-    type_width = max(len(permission_type) for permission_type, _, _ in all_entries) + 3
-    id_width = max(len(identifier) + 2 for _, identifier, _ in all_entries)
+    # the bracket of a list of RSEs opens in the gap before the identifier column, so that the RSEs line up
+    # with the other identifiers, and closes with '|-' in the gap before the parameter column
+    type_width = max(len(permission_type) for permission_type, _, _ in all_entries) + len(TREE_BRACKET_OPEN) + 1
+    id_width = max(
+        len(identifier) + 2 if isinstance(identifier, str) else max(len(rse) for rse in identifier) + len(TREE_BRACKET_CLOSE) + 2
+        for _, identifier, _ in all_entries
+    )
     if width is not None:
         parameters_width = max(len(line) for _, _, parameters in all_entries for line in parameters.split('\n'))
-        id_width = max(min(id_width, width - type_width - parameters_width), MIN_IDENTIFIER_WIDTH + 2)
+        id_width = max(min(id_width, width - type_width - parameters_width), MIN_IDENTIFIER_WIDTH + len(TREE_BRACKET_CLOSE) + 2)
+    rse_width = id_width - len(TREE_BRACKET_CLOSE) - 2
 
     cells = []
     for entries in entries_by_role:
         lines = []
         for permission_type, identifier, parameters in entries:
-            identifier_lines = break_identifier(identifier, id_width - 2)
-            parameter_lines = parameters.split('\n')
+            if isinstance(identifier, str):
+                identifier_lines = break_identifier(identifier, id_width - 2)
+                parameter_lines = parameters.split('\n')
+                lines.extend(
+                    f"{(permission_type if index == 0 else '').ljust(type_width)}"
+                    f"{(identifier_lines[index] if index < len(identifier_lines) else '').ljust(id_width)}"
+                    f"{parameter_lines[index] if index < len(parameter_lines) else ''}".rstrip()
+                    for index in range(max(len(identifier_lines), len(parameter_lines)))
+                )
+                continue
+            rse_lines = [line for rse in identifier for line in break_identifier(rse, rse_width)]
+            anchor = (len(rse_lines) - 1) // 2
             lines.extend(
-                f"{(permission_type if index == 0 else '').ljust(type_width)}"
-                f"{(identifier_lines[index] if index < len(identifier_lines) else '').ljust(id_width)}"
-                f"{parameter_lines[index] if index < len(parameter_lines) else ''}".rstrip()
-                for index in range(max(len(identifier_lines), len(parameter_lines)))
+                ((permission_type if index == anchor else '').ljust(type_width - len(TREE_BRACKET_OPEN))
+                 + f"{TREE_BRACKET_OPEN}{rse.ljust(rse_width)}{TREE_BRACKET_CLOSE}"
+                 + (f"- {parameters}" if index == anchor else '')).rstrip()
+                for index, rse in enumerate(rse_lines)
             )
         cells.append('\n'.join(lines) if lines else NO_PERMISSION)
     return cells
@@ -313,7 +508,7 @@ ROLE_COLUMN = Narrowing(Wrap.TEXT, min_width=20, order=0, max_width=32)
 IDENTIFIER_COLUMN = Narrowing(Wrap.IDENTIFIER, min_width=MIN_IDENTIFIER_WIDTH, order=1)
 # the permissions of a role, see `format_permission_lists`, rendered for the width they are left
 PERMISSIONS_COLUMN = Narrowing(Wrap.FITTED, min_width=1, order=1)
-# the parameters of a permission, e.g. 'rw-'
+# the parameters of a permission, e.g. 'local: 0/10 MB (0% used)'
 PARAMETER_COLUMN = Narrowing(Wrap.TEXT, min_width=16, order=2)
 # a date as rendered for a role assignment, '21-Oct-2026 07:58:54 UTC', its time going below it last
 DATE_COLUMN = Narrowing(Wrap.TEXT, min_width=len('07:58:54 UTC'), order=3, snap=True)
@@ -364,12 +559,13 @@ def format_table(
     may span several lines. As long as the first cell of each row holds on one line, it shows where
     each row starts:
 
-        +------+------------+---------------+
-        | TYPE | IDENTIFIER | OPERATION(S)  |
-        |------+------------+---------------|
-        | did  | data:*     | rw-           |
-        | did  | data:raw*  | r--           |
-        +------+------------+---------------+
+        +--------+------------+---------------+
+        | TYPE   | IDENTIFIER | LIMIT         |
+        |--------+------------+---------------|
+        | limit  | MOCK1      | global: 10 MB |
+        |        | MOCK2      |               |
+        | limit  | MOCK3      | local: 100 kB |
+        +--------+------------+---------------+
 
     Otherwise, the rows spanning several lines are separated by a dashed line, so that it is clear
     which lines belong together:
@@ -506,6 +702,35 @@ class OptionalDateTime(click.ParamType):
         self.fail(f"{value!r} is not a valid date, expected one of {', '.join(self.FORMATS)} or {self.NEVER}", param, ctx)
 
 
+class QuotaSize(click.ParamType):
+    """
+    A limit, in bytes, or `ROLE_QUOTA_NOCAP` when the given value is `NOCAP` (case insensitive).
+
+    Accepted forms: a number of bytes ('10000'), or a number with a decimal storage unit among
+    B, KB, MB, GB, TB and PB ('100GB', '10TB'), case insensitive. 'infinity' and 'inf' are
+    accepted for `NOCAP` too, as `rucio account limit add` does.
+    """
+
+    name = "size"
+    NOCAP = "NOCAP"
+    NOCAP_ALIASES = ("NOCAP", "INFINITY", "INF")
+
+    def convert(self, value, param, ctx) -> int:
+        """Turn a command line value into a number of bytes, or `ROLE_QUOTA_NOCAP` if it is `NOCAP`."""
+        if isinstance(value, int):
+            return value
+        value = value.strip()
+        if value.upper() in self.NOCAP_ALIASES:
+            return ROLE_QUOTA_NOCAP
+        if value.isdigit():
+            return int(value)
+        bytes_ = get_bytes_value_from_string(value)
+        # False for a value which cannot be parsed, but 0 is a valid limit
+        if bytes_ is False:
+            self.fail(f"{value!r} is not a valid size, expected a number of bytes (e.g. '10000'), one with a unit (e.g. '100GB', '10TB') or {self.NOCAP} (also 'infinity')", param, ctx)
+        return int(bytes_)
+
+
 class _LetterOperations(click.ParamType):
     """
     Operations given as letters, in any order and combination, e.g. 'rw' or 'wr' for read and write, or 'none' (case
@@ -567,6 +792,7 @@ class MetadataOperations(_LetterOperations):
 
 OPERATIONS = RoleOperations()
 METADATA_OPERATIONS = MetadataOperations()
+QUOTA_SIZE = QuotaSize()
 
 OPTIONAL_DATE = OptionalDateTime()
 DATE = click.DateTime(formats=OptionalDateTime.FORMATS)
@@ -594,6 +820,17 @@ def _lock_hint(role_name: str, action: str = "altered") -> 'Generator[None, None
     except RoleLocked as error:
         forced = "--force to delete it anyway (this also revokes it from every account it is assigned to)" if action == "deleted" else "--force to bypass the lock"
         raise RoleLocked(f"Role '{role_name}' is locked, so it cannot be {action}. Add {forced}, or unlock it first with `rucio role update {role_name} -l false`.") from error
+
+
+def _holds(assignment: "Mapping[str, Any]") -> bool:
+    """
+    Tell whether a role assignment, as listed by the server, grants its role right now: activated already and not expired yet.
+
+    Only then is the account bound by the limits of the role, see `rucio role permission limit --help`.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    activates_at, expires_at = str_to_date(assignment.get('activates_at') or ''), str_to_date(assignment.get('expires_at') or '')
+    return (activates_at is None or activates_at <= now) and (expires_at is None or now < expires_at)
 
 
 ASSIGNMENT_DATE_FORMAT = "%d-%b-%Y %H:%M:%S UTC"
@@ -641,7 +878,12 @@ def _role_card(role_name: str, reserved: bool, properties: "Sequence[tuple[str, 
     return '\n'.join(lines)
 
 
-def _role_permissions(roles: "Sequence[tuple[str, bool, Iterable[Mapping[str, Any]]]]") -> "Callable[[Optional[int]], list[str]]":
+def _role_permissions(
+        ctx: click.Context,
+        roles: "Sequence[tuple[str, bool, Iterable[Mapping[str, Any]]]]",
+        account_name: Optional[str] = None,
+        held: "Collection[str]" = (),
+) -> "Callable[[Optional[int]], list[str]]":
     """
     The permissions of each role, as the PERMISSIONS column of a `--detail` table, aligned with each other, see
     :func:`format_permission_lists`.
@@ -649,10 +891,19 @@ def _role_permissions(roles: "Sequence[tuple[str, bool, Iterable[Mapping[str, An
     A reserved role has no permissions, so its tag is explained instead.
 
     :param roles: The roles, as their name, whether they are reserved, and their permissions as listed by the server.
+    :param account_name: The account to measure the limits against, see :func:`_usage_resolver`. None to only list the limits.
+    :param held: The roles `account_name` holds, see :func:`_holds`: only their limits are measured, the others being
+                 limits the account is not bound by.
     :returns: Gives the permissions, in the order of `roles`, given the width they should fit in, see `format_table`.
     """
+    rse_names = _rse_names_resolver(ctx)
+    used = _usage_resolver(ctx, account_name, rse_names) if account_name is not None and held else None
+
     def _permissions(width: Optional[int]) -> list[str]:
-        cells = iter(format_permission_lists([permissions for _, reserved, permissions in roles if not reserved], width=width))
+        cells = iter(format_permission_lists(
+            [(permissions, used if role_name in held else None) for role_name, reserved, permissions in roles if not reserved],
+            rse_names, SizeFormat.of(ctx.obj.human), width=width,
+        ))
         return [RESERVED_ROLE_PERMISSIONS if reserved else next(cells) for _, reserved, _ in roles]
 
     return _permissions
@@ -704,7 +955,7 @@ def list_(ctx: click.Context, detail: bool) -> None:
         [_role_card(entry['role'], bool(entry.get('reserved')), [('assignable', str(entry.get('assignable'))), ('locked', str(entry.get('locked')))], entry.get('description')), '']
         for entry in roles
     ]
-    permissions = _role_permissions([
+    permissions = _role_permissions(ctx, [
         (entry['role'], bool(entry.get('reserved')), [] if entry.get('reserved') else ctx.obj.client.list_role_permissions(entry['role']))
         for entry in roles
     ])
@@ -807,7 +1058,7 @@ def account() -> None:
 @click.option("-a", "--account", "account_name", metavar="ACCOUNT", help="The roles of ACCOUNT.")
 @click.option("-r", "--role", "role_name", metavar="ROLE", help="The accounts holding ROLE.")
 @click.option("--me", is_flag=True, help="Your own roles.")
-@click.option("--detail", is_flag=True, help="With -a or --me: also show the permissions of each role.")
+@click.option("--detail", is_flag=True, help="With -a or --me: also show the permissions of each role, and the usage of each limit.")
 @click.pass_context
 def account_list(ctx: click.Context, account_name: Optional[str], role_name: Optional[str], me: bool, detail: bool) -> None:
     """List role assignments: give exactly one of -a, -r or --me."""
@@ -842,7 +1093,10 @@ def account_list(ctx: click.Context, account_name: Optional[str], role_name: Opt
         [_role_card(entry['role'], bool(entry.get('reserved')), [('from', _format_date(entry.get('activates_at'))), ('until', _format_date(entry.get('expires_at')))], entry.get('description')), '']
         for entry in rbac['roles']
     ]
-    permissions = _role_permissions([(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], [])) for entry in rbac['roles']])
+    permissions = _role_permissions(
+        ctx, [(entry['role'], bool(entry.get('reserved')), permissions_by_role.get(entry['role'], [])) for entry in rbac['roles']],
+        account_name=rbac['account'], held={entry['role'] for entry in rbac['roles'] if _holds(entry)},
+    )
     table = format_table([(["ROLE", "PERMISSIONS"], rows)], {0: ROLE_COLUMN, 1: PERMISSIONS_COLUMN}, fitted={1: permissions})
     echo_fitted(ctx, f"{title}\n{table}")
 
@@ -910,31 +1164,45 @@ def permission() -> None:
 
 @permission.command("list")
 @click.argument("role_name")
-@click.option("--detail", is_flag=True, help="Expand wildcard scope patterns into their scopes.")
+@click.option("--detail", is_flag=True, help="Expand wildcard scope patterns into their scopes, and show sizes to the byte.")
 @click.pass_context
 def permission_list(ctx: click.Context, role_name: str, detail: bool) -> None:
-    """List the permissions of ROLE_NAME."""
-    lines = permission_lines(ctx.obj.client.list_role_permissions(role_name))
+    """List the permissions of ROLE_NAME. If you hold it, its limits show your usage."""
+    rbac = ctx.obj.client.list_account_roles(use_issuer_account=True)
+    account_name = rbac['account']
+    rse_names = _rse_names_resolver(ctx)
+    # the limits of a role the account does not hold do not bind it, its usage means nothing against them
+    holds_role = any(entry['role'] == role_name and _holds(entry) for entry in rbac['roles'])
+    used = _usage_resolver(ctx, account_name, rse_names) if holds_role else None
+    lines = permission_lines(ctx.obj.client.list_role_permissions(role_name), SizeFormat.of(ctx.obj.human, exact=detail), used)
 
     # only fetch the (potentially large) list of every scope if a pattern actually needs expanding
-    needs_scopes = detail and any(_is_scope_wildcard(target) for _, target, _ in lines)
+    needs_scopes = detail and any(permission_type in ('did', 'metadata') and _is_scope_wildcard(target) for permission_type, target, _, _ in lines)
     known_scopes = ctx.obj.client.list_scopes() if needs_scopes else []
 
-    did_rows, metadata_rows = [], []
-    for permission_type, target, operations in lines:
-        cell = target
-        if detail and _is_scope_wildcard(target):
-            cell = format_tree(target, _matching_scopes(target, known_scopes), placeholder="(no scope currently matches)")
-        (did_rows if permission_type == 'did' else metadata_rows).append([permission_type, cell, operations])
+    did_rows, metadata_rows, limit_rows = [], [], []
+    for permission_type, target, operations, limits in lines:
+        if permission_type in ('did', 'metadata'):
+            cell = target
+            if detail and _is_scope_wildcard(target):
+                cell = format_tree(target, _matching_scopes(target, known_scopes), placeholder="(no scope currently matches)")
+            (did_rows if permission_type == 'did' else metadata_rows).append([permission_type, cell, operations])
+        else:
+            # a local limit is listed under the name of its single RSE, a global one by the RSEs its expression
+            # currently matches, one per line, or by its expression if it matches none
+            limit_rows.append([permission_type, '\n'.join(rse_names(target) or [target]), limits])
 
     sections = [(headers, rows) for headers, rows in (
         (["TYPE", "IDENTIFIER", "OPERATION(S)"], did_rows),
         (["TYPE", "IDENTIFIER", "OPERATION(S) ON KEY(S)"], metadata_rows),
+        (["TYPE", "IDENTIFIER", "LIMIT"], limit_rows),
     ) if rows]
     if not sections:
         click.echo(f"No permission associated with role '{role_name}'.")
         return
     output = [_fill(f"Permissions associated with role '{role_name}':"), format_table(sections, {1: IDENTIFIER_COLUMN, 2: PARAMETER_COLUMN})]
+    if limit_rows and used is not None:
+        output.append(_fill(f"Limits measured against the usage of your account '{account_name}'."))
     echo_fitted(ctx, '\n'.join(output))
 
 
@@ -1207,3 +1475,146 @@ def metadata_remove(ctx: click.Context, role_name: str, did_pattern: str, keys: 
     with _lock_hint(role_name):
         ctx.obj.client.delete_role_permission(role_name, 'metadata', parameters, force=force)
     click.echo(f"Removed the metadata permission(s) on {describe_metadata_keys(meta_keys or [None])} of {did_pattern} from role '{role_name}'.")
+
+
+# --- Limits -----------------------------------------------------------------------------------
+
+def _matching_rses(ctx: click.Context, rse_expression: str) -> list[str]:
+    """Return the names of the RSEs an RSE expression currently matches, none if it is not valid or matches nothing."""
+    try:
+        return sorted(rse['rse'] for rse in ctx.obj.client.list_rses(rse_expression))
+    except (InvalidRSEExpression, RSENotFound):
+        return []
+
+
+def _rse_names_resolver(ctx: click.Context) -> "Callable[[str], list[str]]":
+    """Give the names of the RSEs an RSE expression currently matches, see :func:`_matching_rses`, asking the server once per expression."""
+    names: dict[str, list[str]] = {}
+
+    def _resolve(rse_expression: str) -> list[str]:
+        if rse_expression not in names:
+            names[rse_expression] = _matching_rses(ctx, rse_expression)
+        return names[rse_expression]
+
+    return _resolve
+
+
+def _usage_resolver(ctx: click.Context, account_name: str, rse_names: "Callable[[str], Sequence[str]]") -> "Optional[Callable[[str], int]]":
+    """
+    Give the bytes an account uses on the RSEs an RSE expression currently matches, summed over them, as a role limit on the expression measures it.
+
+    The usage of the account on every RSE is asked for once, the RSEs of each expression through `rse_names`.
+
+    :param account_name: The account whose usage to measure.
+    :param rse_names: Gives the names of the RSEs an RSE expression currently matches, see :func:`_rse_names_resolver`.
+    :returns: The resolver, or None if the usage of the account cannot be read, e.g. that of another account without the right to.
+    """
+    try:
+        usage = {entry['rse']: entry['bytes'] or 0 for entry in ctx.obj.client.get_local_account_usage(account_name)}
+    except (AccessDenied, AccountNotFound):
+        return None
+
+    def _resolve(rse_expression: str) -> int:
+        return sum(usage.get(rse, 0) for rse in rse_names(rse_expression))
+
+    return _resolve
+
+
+def _confirm_limit_add(ctx: click.Context, role_name: str, rse_expression: str, locality: str, bytes_: int, limits: "Mapping[str, Mapping[str, Any]]") -> bool:
+    """
+    Ask for confirmation if setting a limit overwrites one of the role with another value.
+
+    :param locality: The locality of the limit to set, 'local' or 'global'.
+    :param bytes_: The limit to set.
+    :param limits: The limits the role currently has, as listed by the server, by target.
+    :returns: True if the caller should proceed, False if the user declined.
+    """
+    # a local limit is listed under the name of its RSE, which the expression may only match; on an
+    # expression which does not match exactly one RSE, the server refuses it, so there is nothing to confirm
+    targets = _matching_rses(ctx, rse_expression) if locality == 'local' else [rse_expression]
+    overwritten = [(target, limits[target][locality]) for target in targets[:1] if len(targets) == 1 and limits.get(target, {}).get(locality, bytes_) != bytes_]
+    if not overwritten:
+        return True
+
+    click.echo(f"This overwrites the following limit of role '{role_name}':")
+    for target, current in overwritten:
+        click.echo(f"  {locality} limit on {target}: {format_quota(current, SizeFormat.of(ctx.obj.human))} -> {format_quota(bytes_, SizeFormat.of(ctx.obj.human))}")
+    return click.confirm("Do you still want to set this limit?")
+
+
+@permission.group("limit")
+def permission_limit() -> None:
+    """Manage the storage limits a role grants on RSEs, per account holding it.
+
+    \b
+    local   cap on one RSE: the role lets its accounts write there
+    global  cap on the total over several RSEs: it only restricts the local limits
+    Where a role has a local limit, the roles replace the account limits, the most
+    generous role applying."""
+
+
+@permission_limit.command("add")
+@click.argument("role_name")
+@click.argument("rse_expressions", metavar="RSE_EXPRESSION...", nargs=-1, required=True)
+@click.option("--local", "local_bytes", type=QUOTA_SIZE, metavar="SIZE", help="Local limit, on an expression matching one RSE.")
+@click.option("--global", "global_bytes", type=QUOTA_SIZE, metavar="SIZE", help="Global limit, on an expression matching several RSEs.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
+@click.pass_context
+def limit_add(ctx: click.Context, role_name: str, rse_expressions: tuple[str, ...], local_bytes: Optional[int], global_bytes: Optional[int], force: bool) -> None:
+    """Set a limit of ROLE_NAME on each RSE_EXPRESSION, replacing it.
+
+    \b
+    Give exactly one of --local or --global.
+    RSE_EXPRESSION  one RSE for --local, e.g. 'CERN-EOS-DISK'; several for --global,
+                    e.g. 'tier=1' (quote it).
+    SIZE            bytes ('10000'), with a unit ('10GB'), or NOCAP for no cap."""
+    if (local_bytes is None) == (global_bytes is None):
+        raise click.UsageError("Exactly one of --local or --global must be given: a local limit is set on one RSE, a global one on an expression matching several.")
+    locality, bytes_ = ('local', local_bytes) if local_bytes is not None else ('global', global_bytes)
+
+    limits = {permission['rse_expression']: permission for permission in ctx.obj.client.list_role_permissions(role_name) if permission.get('type') == 'limit'}
+    for rse_expression in rse_expressions:
+        if not _confirm_limit_add(ctx, role_name, rse_expression, locality, bytes_, limits):
+            click.echo(f"Skipped RSE expression '{rse_expression}', no limit was set on it.")
+            continue
+
+        with _lock_hint(role_name):
+            ctx.obj.client.add_role_permission(role_name, 'limit', {'rse_expression': rse_expression, locality: bytes_}, force=force)
+        click.echo(f"Set {locality} limit of {format_quota(bytes_, SizeFormat.of(ctx.obj.human))} on {rse_expression} for role '{role_name}'.")
+        if bytes_ == 0:
+            click.echo(f"Warning: a limit of 0 lets nothing be written on {rse_expression}"
+                       + (", while it still takes precedence over the account limits there." if locality == 'local' else "."))
+
+
+@permission_limit.command("remove")
+@click.argument("role_name")
+@click.argument("rse_expressions", metavar="RSE_EXPRESSION...", nargs=-1, required=True)
+@click.option("--local", "local", is_flag=True, default=False, help="Only the local limit.")
+@click.option("--global", "global_", is_flag=True, default=False, help="Only the global limit.")
+@click.option("--force", is_flag=True, default=False, help="Even if the role is locked.")
+@click.pass_context
+def limit_remove(ctx: click.Context, role_name: str, rse_expressions: tuple[str, ...], local: bool, global_: bool, force: bool) -> None:
+    """Remove the limits of ROLE_NAME on each RSE_EXPRESSION.
+
+    \b
+    Both the local and the global one, unless --local or --global is given.
+    RSE_EXPRESSION  as it was set, see `rucio role permission list`."""
+    parameters = {locality: True for locality, given in (('local', local), ('global', global_)) if given}
+    # e.g. 'local limit(s)', or just 'limit(s)' if both are looked for
+    described = ''.join(f"{locality} " for locality in parameters) + 'limit'
+
+    missing = None
+    removed_any = False
+    for rse_expression in rse_expressions:
+        try:
+            with _lock_hint(role_name):
+                removed = ctx.obj.client.delete_role_permission(role_name, 'limit', {'rse_expression': rse_expression, **parameters}, force=force)
+        except RolePermissionNotFound as error:
+            missing = error
+            click.echo(f"Warning: role '{role_name}' has no {described} on {rse_expression}.")
+            continue
+        removed_any = True
+        click.echo(f"Removed {removed} {described}(s) on {rse_expression} from role '{role_name}'.")
+
+    if missing is not None and not removed_any:
+        raise missing
