@@ -107,7 +107,7 @@ class RoleClient(BaseClient):
         assignable :
             Whether an identity provider may assign this role to, or take it away from, an account.
         locked :
-            Whether the role is locked, which prevents it from being altered or deleted without `force`.
+            Whether the role is locked, which prevents a policy package from altering or deleting it.
         """
         url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
         data = render_json(description=description, assignable=assignable, locked=locked)
@@ -347,6 +347,36 @@ class RoleClient(BaseClient):
         if response.status_code != codes.ok:
             exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
             raise exc_cls(exc_msg)
+
+    def sync_account_roles(self, account: str, roles: Any, dry_run: bool = False) -> dict[str, Any]:
+        """
+        Synchronize the role assignments of an account with the roles supplied by an identity provider.
+
+        Expired assignments and roles which are not supplied are removed, supplied roles are assigned
+        and their expiry dates updated. Roles which are not assignable are left untouched.
+
+        Parameters
+        ----------
+        account :
+            The account whose role assignments are synchronised.
+        roles :
+            The roles supplied by the IdP: a list of role names and/or of {'role': ..., 'expires_at': ...}
+            dictionaries, or a dictionary mapping role name to expiry date.
+        dry_run :
+            Only report what the synchronisation would do, without changing anything.
+
+        Returns
+        -------
+            The report of the synchronisation: the roles supplied and currently held, what was (or would be)
+            removed, added, updated, left unchanged, held back or ignored, the messages describing each step,
+            and a one-line summary.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/accounts/{quote_plus(account)}")
+        response = self._send_request(url, method=HTTPMethod.PUT, data=render_json(roles=roles, dry_run=dry_run))
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
 
     def clean_expired_account_roles(self, dry_run: bool = False) -> dict[str, Any]:
         """
