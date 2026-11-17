@@ -19,8 +19,8 @@ The module is organised as follows:
 
 - Roles: create, update, delete and list roles, including the reserved ones, see `RESERVED_ROLES`.
 - Account role assignments: which account holds which role, from when and until when.
-- Permission types: the types of the permissions a role can be granted, e.g. operations on DIDs.
-  Each type has its own `role_<type>_permission_map` table(s), a
+- Permission types: the types of the permissions a role can be granted, e.g. operations on DIDs,
+  or on their metadata keys. Each type has its own `role_<type>_permission_map` table(s), a
   :class:`PermissionTypeHandler` registered for it, and a class telling what the roles of an account grant,
   e.g. :class:`DidAccess`.
 - Role permissions: grant, remove and list the permissions of a role, of any type.
@@ -40,7 +40,7 @@ from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.config import config_get_bool
-from rucio.common.constants import ADMIN_ROLE, DEFAULT_VO, RESERVED_ROLES
+from rucio.common.constants import ADMIN_ROLE, DEFAULT_VO, RBAC_DELETE_METADATA_KEYS, RESERVED_KEYS, RESERVED_ROLES
 from rucio.common.exception import (
     AccountNotFound,
     Duplicate,
@@ -58,7 +58,14 @@ from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.core import permission
 from rucio.db.sqla import models
-from rucio.db.sqla.constants import DidOperationType, RolePermissionOperationType, RolePermissionType
+from rucio.db.sqla.constants import (
+    METADATA_PERMISSION_ALL_KEYS,
+    METADATA_PERMISSION_NO_KEY,
+    DidOperationType,
+    MetadataOperationType,
+    RolePermissionOperationType,
+    RolePermissionType,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -588,7 +595,7 @@ def set_account_role_dates(
 # - a `PermissionTypeHandler` subclass, registered with `_register_permission_handler`, telling how
 #   its permissions are validated, granted, removed and listed, see :func:`add_role_permission`;
 # - a class telling what the permissions of the active roles of an account grant, read once so that
-#   a listing is decided without querying the database again: :class:`DidAccess`.
+#   a listing is decided without querying the database again: :class:`DidAccess` and :class:`MetadataAccess`.
 #   The functions applying them are in the "Permission checks" section, e.g. :func:`has_did_permission`.
 #
 # Nothing else in this module has to change to grant, remove and list the permissions of a new type.
@@ -1013,6 +1020,301 @@ class DidPermissionHandler(PermissionTypeHandler):
         return 1
 
 
+# --- Metadata ---------------------------------------------------------------------------------
+#
+# A metadata permission grants READ (see the key and its value) and WRITE (add, modify or delete it) on one
+# metadata key of the DIDs a DID pattern matches, see :class:`MetadataPermissionHandler`. Two keys are reserved:
+# METADATA_PERMISSION_ALL_KEYS ('*') covers every key, METADATA_PERMISSION_NO_KEY none at all.
+#
+# As for the DID permissions, the operations are levels: WRITE includes READ, so a permission grants none ('--'),
+# READ ('r-') or WRITE ('rw') on a key. They are completed when the permission is granted, see :func:`_complete_operations`.
+#
+# Within a role, the narrower subject wins. For a key of a DID: the rows of the role naming that very key decide;
+# if none matches the DID, its '*' rows; if none matches either, its DID permissions, as without metadata permissions
+# (READ on the DID to read every key, DELETE on it to write them, as its most specific DID pattern decides). Within one level, the most specific DID pattern
+# decides, see :func:`_did_pattern_specificity`. A row granting no operation therefore withdraws the key from the
+# DID permissions of its role. Across roles, what they grant adds up: a role never takes away what another grants.
+#
+# A row granting READ, whatever its key, hence any row granting an operation, also makes the DIDs its pattern
+# matches visible: they are listed, and read like with READ on them, except for their data (no replica PFN, hence no
+# download), see :func:`has_metadata_visibility`. The keys of a DID visible this way are only those its rows grant.
+#
+# Only the roles are looked at here: root, admins, the owner of the scope and the owner of a DID are given every
+# key by the permission policy, see :mod:`rucio.core.permission.generic`, also when it filters the keys of a listing.
+
+# The keys no metadata permission grants WRITE on: those leading to the removal of the DID, which is left to its DID
+# permissions, and those Rucio reserves, which the gateway lets no account set.
+METADATA_KEYS_NOT_WRITABLE = RBAC_DELETE_METADATA_KEYS | frozenset(RESERVED_KEYS)
+
+# The keys naming a DID, shown for every DID an account may see: hiding them would hide the DID itself.
+METADATA_IDENTITY_KEYS = frozenset({'scope', 'name', 'type', 'did_type'})
+
+# the length of `role_metadata_permission_map.meta_key`, see `RoleMetadataPermissionAssociation`
+METADATA_KEY_LENGTH = 128
+
+# separates the keys given as a single string, e.g. 'quality,comment'
+METADATA_KEY_SEPARATOR = ","
+
+# the parameters of a metadata permission, see `MetadataPermissionHandler`
+METADATA_KEYS = "keys"
+METADATA_OPERATIONS = "operations"
+
+# the operations each metadata operation includes, see the comment of the metadata permissions above
+_INCLUDED_METADATA_OPERATIONS: dict[MetadataOperationType, frozenset[MetadataOperationType]] = {
+    MetadataOperationType.READ: frozenset(),
+    MetadataOperationType.WRITE: frozenset({MetadataOperationType.READ}),
+}
+
+
+def _normalize_metadata_keys(keys: Any) -> tuple[str, ...]:
+    """
+    Validate the metadata keys of a metadata permission, given as a list or as a comma-separated string.
+
+    Giving no key (None, an empty list or string) stands for no key at all, stored as METADATA_PERMISSION_NO_KEY,
+    which therefore cannot be given explicitly. '*' stands for every key, see METADATA_PERMISSION_ALL_KEYS.
+
+    :returns: The distinct keys, stripped of surrounding whitespace, sorted.
+    :raises InputValidationError: If a key is not a string, is empty, too long, or reserved.
+    """
+    if keys is None:
+        return (METADATA_PERMISSION_NO_KEY,)
+    if isinstance(keys, str):
+        keys = keys.split(METADATA_KEY_SEPARATOR) if keys.strip() else []
+    if not isinstance(keys, (list, tuple, set, frozenset)):
+        raise InputValidationError("The metadata keys must be a list or a comma-separated string, got '%s'." % type(keys).__name__)
+    normalized = set()
+    for key in keys:
+        if not isinstance(key, str):
+            raise InputValidationError("A metadata key must be a string, got '%s'." % type(key).__name__)
+        key = key.strip()
+        if not key:
+            raise InputValidationError("A metadata key must not be empty.")
+        if key == METADATA_PERMISSION_NO_KEY:
+            raise InputValidationError("Metadata key '%s' is reserved: give no key at all for a permission on no key." % key)
+        if len(key) > METADATA_KEY_LENGTH:
+            raise InputValidationError("Metadata key '%s' is longer than %d characters." % (key, METADATA_KEY_LENGTH))
+        normalized.add(key)
+    return tuple(sorted(normalized)) or (METADATA_PERMISSION_NO_KEY,)
+
+
+def _normalize_metadata_operations(operations: Any) -> frozenset[MetadataOperationType]:
+    """
+    Validate the operations of a metadata permission: a list of operations (members of `MetadataOperationType`
+    or their values, e.g. ['read', 'write']), possibly empty for a permission granting nothing.
+
+    :raises InputValidationError: If it is not a list, or one of its items is not an operation of a metadata permission.
+    """
+    return _normalize_operations(operations, MetadataOperationType, RolePermissionType.METADATA)
+
+
+def _describe_metadata_keys(keys: "Iterable[str]") -> str:
+    """Render the keys of a metadata permission for a message, e.g. "keys 'comment', 'quality'"."""
+    keys = list(keys)
+    if keys == [METADATA_PERMISSION_NO_KEY]:
+        return "no key"
+    if keys == [METADATA_PERMISSION_ALL_KEYS]:
+        return "every key"
+    return "key%s %s" % ("s" if len(keys) > 1 else "", ", ".join("'%s'" % key for key in keys))
+
+
+def _describe_metadata_operations(operations: "Iterable[MetadataOperationType]") -> str:
+    """Render the operations of a metadata permission as the letters of the CLI, e.g. 'r-' or '--'."""
+    return _describe_operations(operations, MetadataOperationType)
+
+
+@_register_permission_handler
+class MetadataPermissionHandler(PermissionTypeHandler):
+    """
+    Operations on metadata keys of DIDs, granted on DID patterns (see :func:`_validate_did_pattern`), one row per key.
+
+    A permission is given as its 'did_pattern', its 'keys' (a list, or a comma-separated string; '*' for every key,
+    none at all for no key) and, to grant it, its 'operations': the operations of `MetadataOperationType`, possibly
+    none, completed with those they include ('write' adds 'read'). Granting it sets exactly these operations on each
+    key, replacing what the role was granted on it, a key granted no operation being kept, see the comment of the
+    metadata permissions above. Removing it removes the rows of the keys: if one of them has no row, nothing is removed.
+
+    A permission on no key only makes the DIDs visible, so it must grant READ and only READ. WRITE is never granted
+    on the keys of METADATA_KEYS_NOT_WRITABLE; '*' does not cover them for WRITE either. Who may act without a role
+    is the permission policy's business, see :mod:`rucio.core.permission.generic`.
+    """
+    permission_type = RolePermissionType.METADATA
+    model = models.RoleMetadataPermissionAssociation
+    tables = (models.RoleMetadataPermissionAssociation,)
+    target_attribute = "did_pattern"
+    target_label = "DID pattern"
+
+    def normalize_target(self, target: Any, *, session: "Session") -> str:
+        return _validate_did_pattern(target)
+
+    def normalize_parameters(self, parameters: "Mapping[str, Any]", *, removing: bool) -> dict[str, Any]:
+        expected = {METADATA_KEYS} if removing else {METADATA_KEYS, METADATA_OPERATIONS}
+        unknown = sorted(set(parameters) - expected)
+        if unknown:
+            raise InputValidationError("Parameter(s) %s not supported %s a '%s' permission, expected: %s."
+                                       % (", ".join(unknown), "when removing" if removing else "on", self.permission_type.value, ", ".join(sorted(expected))))
+        keys = _normalize_metadata_keys(parameters.get(METADATA_KEYS))
+        if removing:
+            return {METADATA_KEYS: keys}
+
+        if parameters.get(METADATA_OPERATIONS) is None:
+            raise InputValidationError("'%s' must be given for a '%s' permission, an empty list to grant none." % (METADATA_OPERATIONS, self.permission_type.value))
+        operations = _complete_operations(_normalize_metadata_operations(parameters[METADATA_OPERATIONS]), _INCLUDED_METADATA_OPERATIONS)
+        if keys == (METADATA_PERMISSION_NO_KEY,) and operations != {MetadataOperationType.READ}:
+            raise InputValidationError("A '%s' permission on no key only makes the DIDs visible, so it must grant '%s' and only '%s'."
+                                       % (self.permission_type.value, MetadataOperationType.READ.value, MetadataOperationType.READ.value))
+        not_writable = sorted(set(keys) & METADATA_KEYS_NOT_WRITABLE)
+        if MetadataOperationType.WRITE in operations and not_writable:
+            raise InputValidationError("Metadata key(s) %s are reserved by Rucio or remove the DID: no '%s' permission grants '%s' on them."
+                                       % (", ".join("'%s'" % key for key in not_writable), self.permission_type.value, MetadataOperationType.WRITE.value))
+        return {METADATA_KEYS: keys, METADATA_OPERATIONS: operations}
+
+    def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
+        operations = parameters.get(METADATA_OPERATIONS)
+        granted = "" if operations is None else "'%s' " % _describe_metadata_operations(operations)
+        return "%smetadata permission on %s of %s '%s'" % (granted, _describe_metadata_keys(parameters[METADATA_KEYS]), self.target_label, target)
+
+    def list_permissions(self, role: str, *, session: "Session") -> list[dict[str, Any]]:
+        stmt = (
+            select(self.model)
+            .where(self.model.role == role)
+            .order_by(self.model.did_pattern, self.model.meta_key)
+        )
+        # a permission on no key is listed with no key (None), as it is granted
+        return [{self.target_attribute: row.did_pattern,
+                 "meta_key": None if row.meta_key == METADATA_PERMISSION_NO_KEY else row.meta_key,
+                 METADATA_OPERATIONS: [operation.value for operation in MetadataOperationType if getattr(row, operation.column)]}
+                for row in session.execute(stmt).scalars()]
+
+    def _rows(self, role: str, target: str, keys: "Iterable[str]", *, session: "Session") -> dict[str, Any]:
+        """The rows of a role on the given keys of a DID pattern, by key, locked for update."""
+        stmt = (
+            select(self.model)
+            .where(self.model.role == role, self.model.did_pattern == target, self.model.meta_key.in_(list(keys)))
+            .with_for_update()
+        )
+        return {row.meta_key: row for row in session.execute(stmt).scalars()}
+
+    def add(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> None:
+        keys, operations = parameters[METADATA_KEYS], parameters[METADATA_OPERATIONS]
+        rows = self._rows(role, target, keys, session=session)
+        columns = {operation.column: operation in operations for operation in MetadataOperationType}
+        for key in keys:
+            if key in rows:
+                for column, granted in columns.items():
+                    setattr(rows[key], column, granted)
+            else:
+                # a missing role is told by the foreign key, see :func:`add_role_permission`
+                session.add(self.model(role=role, did_pattern=target, meta_key=key, **columns))
+        session.flush()
+
+    def remove(self, role: str, target: Any, parameters: "Mapping[str, Any]", *, session: "Session") -> int:
+        keys = parameters[METADATA_KEYS]
+        rows = self._rows(role, target, keys, session=session)
+        if len(rows) != len(keys):
+            # the keys are removed all together or not at all
+            return 0
+        for row in rows.values():
+            session.delete(row)
+        session.flush()
+        return len(rows)
+
+
+@dataclass(frozen=True)
+class _MetadataRow:
+    """A metadata permission of a role, as stored."""
+    did_pattern: str
+    meta_key: str
+    can_read: bool
+    can_write: bool
+
+
+class MetadataAccess:
+    """
+    What the roles of an account grant on the metadata of DIDs, see the comment of the metadata permissions above.
+
+    The DID and metadata permissions of the active roles of the account are read once, when it is built, and
+    each DID is decided from them, so that a listing is decided without querying the database again. Only the
+    roles are looked at: not whether RBAC is enabled, root and admin privileges, nor the owners of the scope or of the DID.
+    """
+
+    def __init__(self, account: "InternalAccount", *, session: "Session", did_access: Optional[DidAccess] = None) -> None:
+        association, metadata_model = models.AccountRoleAssociation, models.RoleMetadataPermissionAssociation
+
+        self._did_access = did_access if did_access is not None else DidAccess(account, session=session)
+
+        self._metadata_rows: dict[str, list[_MetadataRow]] = {}
+        stmt = (
+            select(association.role, metadata_model.did_pattern, metadata_model.meta_key, metadata_model.can_read, metadata_model.can_write)
+            .join(metadata_model, metadata_model.role == association.role)
+            .where(association.account == account, _assignment_active())
+        )
+        for role, did_pattern, meta_key, can_read, can_write in session.execute(stmt).all():
+            self._metadata_rows.setdefault(role, []).append(_MetadataRow(did_pattern, meta_key, bool(can_read), bool(can_write)))
+
+        self._roles = set(self._did_access.roles) | set(self._metadata_rows)
+
+    @property
+    def has_metadata_permissions(self) -> bool:
+        """Whether a role of the account has a metadata permission: if not, the DID permissions decide everything, as before."""
+        return bool(self._metadata_rows)
+
+    def _matching_rows(self, role: str, scope: "InternalScope", name: str) -> list[_MetadataRow]:
+        return [row for row in self._metadata_rows.get(role, ()) if _did_pattern_matches(scope, name, row.did_pattern)]
+
+    def _did_grants(self, role: str, scope: "InternalScope", name: str, operation: DidOperationType) -> bool:
+        """Tell whether the DID permissions of a role grant READ or DELETE on a DID, which its metadata falls back to: its most specific pattern decides."""
+        return self._did_access.role_grants(role, scope, name, operation)
+
+    @staticmethod
+    def _deciding_row(rows: "Iterable[_MetadataRow]", key: str) -> Optional[_MetadataRow]:
+        """Among the rows of a role matching a DID, the one deciding a key: on that very key, else on '*', the most specific pattern first; None if no row does."""
+        rows = list(rows)
+        for candidate in (key, METADATA_PERMISSION_ALL_KEYS):
+            on_key = [row for row in rows if row.meta_key == candidate]
+            if on_key:
+                return max(on_key, key=lambda row: _did_pattern_specificity(row.did_pattern))
+        return None
+
+    def can_read_key(self, scope: "InternalScope", name: str, key: str) -> bool:
+        """Tell whether a role grants the account to read a metadata key of a DID."""
+        for role in self._roles:
+            row = self._deciding_row(self._matching_rows(role, scope, name), key)
+            if row.can_read if row is not None else self._did_grants(role, scope, name, DidOperationType.READ):
+                return True
+        return False
+
+    def can_write_key(self, scope: "InternalScope", name: str, key: str) -> bool:
+        """
+        Tell whether a role grants the account to add, modify or delete a metadata key of an existing DID.
+
+        Without a metadata permission deciding the key, the role must alter the DID (DELETE on it), as without
+        metadata permissions. The keys of METADATA_KEYS_NOT_WRITABLE are never granted here: the permission policy
+        checks the DID permissions itself for the keys removing the DID, and the gateway refuses the reserved ones.
+        """
+        if key in METADATA_KEYS_NOT_WRITABLE:
+            return False
+        for role in self._roles:
+            row = self._deciding_row(self._matching_rows(role, scope, name), key)
+            if row.can_write if row is not None else self._did_grants(role, scope, name, DidOperationType.DELETE):
+                return True
+        return False
+
+    def is_visible(self, scope: "InternalScope", name: str) -> bool:
+        """Tell whether a metadata permission of a role makes a DID visible: one granting READ, on any key, matches it."""
+        return any(row.can_read and _did_pattern_matches(scope, name, row.did_pattern)
+                   for rows in self._metadata_rows.values() for row in rows)
+
+    def is_visible_in_scope(self, scope: "InternalScope") -> bool:
+        """Tell whether a metadata permission of a role makes some DIDs of a scope visible, as :func:`has_any_scope_prefix_access` tells for DID permissions."""
+        external = str(scope.external)
+        return any(row.can_read and _prefix_pattern_matches(external, row.did_pattern.partition(DID_SEPARATOR)[0])
+                   for rows in self._metadata_rows.values() for row in rows)
+
+    def decides_keys(self, scope: "InternalScope", name: str) -> bool:
+        """Tell whether a metadata permission of a role matches a DID: if none does, its keys are read like the DID itself."""
+        return any(_did_pattern_matches(scope, name, row.did_pattern) for rows in self._metadata_rows.values() for row in rows)
+
+
 # ----------------------------------------------------------------------------------------------
 # Role permissions
 # ----------------------------------------------------------------------------------------------
@@ -1041,7 +1343,8 @@ def list_role_permissions(role: str, *, session: "Session") -> list[dict[str, An
 
     Each permission is given as its `type`, its target under the key its type names it by, and its
     parameters, in the shape it is granted with, see :func:`add_role_permission`: e.g. a 'did_pattern'
-    and its list of 'operations' for a DID permission.
+    and its list of 'operations' for a DID permission, a 'did_pattern', a 'meta_key' and its list of
+    'operations' for a metadata permission, one per key.
 
     :param role: The role whose permissions to list.
     :param session: The database session.
@@ -1068,8 +1371,10 @@ def add_role_permission(
 
         add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data*:*', 'operations': ['read']}, session=session)
         add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:tmp*', 'operations': []}, session=session)
+        add_role_permission(role, RolePermissionType.METADATA, {'did_pattern': 'data:*', 'keys': 'quality', 'operations': ['read']}, session=session)
 
-    A permission which exists already is overwritten: a DID permission gets exactly the operations given.
+    A permission which exists already is overwritten: a DID or metadata permission gets exactly the operations given,
+    completed with the operations they include, e.g. 'write' with 'read', see :func:`_complete_operations`.
 
     :param role: The role to grant the permission to.
     :param permission_type: The type of the permission, e.g. `RolePermissionType.DID`.
@@ -1118,6 +1423,7 @@ def delete_role_permission(
     Remove permissions of a type from a role.
 
         delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data*:*'}, session=session)
+        delete_role_permission(role, RolePermissionType.METADATA, {'did_pattern': 'data:*', 'keys': 'quality,comment'}, session=session)
 
     :param role: The role to remove the permissions from.
     :param permission_type: The type of the permissions, e.g. `RolePermissionType.DID`.
@@ -1125,7 +1431,7 @@ def delete_role_permission(
                        and the parameters identifying them, see the `PermissionTypeHandler` of the type.
     :param force: Remove the permissions even if the role is locked.
     :param session: The database session.
-    :returns: The number of permissions removed.
+    :returns: The number of permissions removed, e.g. one per metadata key of a metadata permission.
     :raises InputValidationError: If the permission type, the target or a parameter is not valid.
     :raises RoleLocked: If the role is locked and `force` is not given.
     :raises RolePermissionNotFound: If the role does not have any such permission.
@@ -1232,6 +1538,50 @@ def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session:
         _assignment_active(),
     )
     return session.execute(stmt).first() is not None
+
+
+def has_metadata_visibility(account: "InternalAccount", scope: "InternalScope", name: str, *, session: "Session") -> bool:
+    """
+    Tell whether a metadata permission of the account's roles makes a DID visible: one granting READ, on any key, matches it.
+
+    A DID visible this way is read like with READ on it, except for its data, see the comment of the metadata
+    permissions. Like :func:`has_did_permission`, only the roles are looked at.
+
+    :param account: The account to check.
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param session: The database session.
+    """
+    return MetadataAccess(account, session=session).is_visible(scope, name)
+
+
+def has_any_scope_prefix_metadata_visibility(account: "InternalAccount", scope: "InternalScope", *, session: "Session") -> bool:
+    """
+    Tell whether a metadata permission of the account's roles makes some DIDs of a scope visible, whatever their names,
+    as :func:`has_any_scope_prefix_access` tells for DID permissions. Like :func:`has_did_permission`, only the roles are looked at.
+
+    :param account: The account to check.
+    :param scope: The scope.
+    :param session: The database session.
+    """
+    return MetadataAccess(account, session=session).is_visible_in_scope(scope)
+
+
+def can_write_metadata_keys(account: "InternalAccount", scope: "InternalScope", name: str, keys: "Iterable[str]", *, session: "Session") -> bool:
+    """
+    Tell whether the account's roles grant it to add, modify or delete every given metadata key of an existing DID,
+    see :meth:`MetadataAccess.can_write_key`: without a metadata permission deciding a key, a role must grant DELETE
+    on the DID, as without metadata permissions. Like :func:`has_did_permission`, only the roles are looked at.
+
+    :param account: The account to check.
+    :param scope: The scope of the DID.
+    :param name: The name of the DID.
+    :param keys: The metadata keys.
+    :param session: The database session.
+    :returns: True if every key is granted (or if there is none).
+    """
+    access = MetadataAccess(account, session=session)
+    return all(access.can_write_key(scope, name, key) for key in keys)
 
 
 # ----------------------------------------------------------------------------------------------
