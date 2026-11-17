@@ -1335,6 +1335,16 @@ class RoleAssignmentNotFound(RucioException):
         self.error_code = 126
 
 
+class RolePermissionNotFound(RucioException):
+    """
+    RolePermissionNotFound
+    """
+    def __init__(self, *args):
+        super(RolePermissionNotFound, self).__init__(*args)
+        self._message = "The role does not have the specified permission."
+        self.error_code = 127
+
+
 class RoleAssignmentDisabled(RucioException):
     """
     RoleAssignmentDisabled
