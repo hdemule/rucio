@@ -1514,15 +1514,15 @@ def perm_read_data(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
 
 def is_listing_filtered(issuer: "InternalAccount", action: str, session: "Session") -> bool:
     """
-    Checks if a listing is filtered for an account: only with RBAC. A policy package overriding the listing filters
-    may decide it per listing, from its filter.
+    Checks if a listing is filtered for an account: only with RBAC, unless the policy package disables the filter of
+    the listing for the account, see :func:`rucio.core.role.is_filter_disabled`.
 
     :param issuer: Account identifier which issues the command.
     :param action: The filter of the listing, e.g. 'list_dids'.
     :param session: The DB session to use
     :returns: True if the listing is filtered, otherwise False
     """
-    return _use_roles()
+    return _use_roles() and not role_core.is_filter_disabled(issuer, action, session=session)
 
 
 def scope_filter(issuer: "InternalAccount", action: str, session: "Session", operation: DidOperationType = DidOperationType.READ,
