@@ -1028,6 +1028,39 @@ def list_rules(
         raise RucioException('Badly formatted input (IDs?)') from exc
 
 
+@read_session
+def get_rule_did(
+    rule_id: str,
+    *,
+    session: "Session"
+) -> tuple[InternalScope, str]:
+    """
+    Get the DID a replication rule applies to.
+
+    The rule is looked up among the existing rules first and then in the rule history,
+    so that the DID of a rule which has been deleted since can still be resolved.
+
+    :param rule_id: The id of the rule.
+    :param session: The database session in use.
+    :returns:       The scope and the name of the DID of the rule.
+    :raises:        RuleNotFound if no rule nor rule history can be found, RucioException if the rule id is badly formatted.
+    """
+    try:
+        for model in (models.ReplicationRule, models.ReplicationRuleHistory):
+            stmt = select(
+                model.scope,
+                model.name
+            ).where(
+                model.id == rule_id
+            ).limit(1)
+            row = session.execute(stmt).first()
+            if row is not None:
+                return row.scope, row.name
+    except StatementError as exc:
+        raise RucioException('Badly formatted rule id (%s)' % (rule_id)) from exc
+    raise RuleNotFound('No rule with the id %s found' % (rule_id))
+
+
 @stream_session
 def list_rule_history(
     rule_id: str,
@@ -3091,6 +3124,7 @@ def examine_rule(
             models.ReplicationRule.id == rule_id
         )
         rule = session.execute(stmt).scalar_one()
+        result['scope'] = rule.scope
         if rule.state == RuleState.OK:
             result['rule_error'] = 'This replication rule is OK'
         elif rule.state == RuleState.REPLICATING:
