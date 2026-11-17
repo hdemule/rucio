@@ -1174,6 +1174,52 @@ def has_any_scope_prefix_access(account: "InternalAccount", scope: "InternalScop
     return DidAccess(account, session=session).grants_some_did(scope, operation)
 
 
+def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session: "Session") -> bool:
+    """
+    Tell whether the policy package disables a filter for the account.
+
+    Filtering is the default: a filter is only disabled if the policy package of the instance
+    lists it, from the most general to the most specific, in:
+
+    - its `disable_filters_for_all_accounts`: for every account regardless of its roles,
+      even for an account holding no role at all;
+    - its `disable_filters_for_all_roles`: for every account holding at least one role;
+    - the 'disable_filters' of a role: for every account holding that role.
+
+    An account only holds a role through an assignment which is active. A reserved role
+    never disables a filter, since the policy package cannot define it. The filters are documented
+    in the role module of the policy package.
+
+    Whether RBAC is enabled is not looked at, see :func:`is_rbac_enabled`: without RBAC, the caller does not filter at all.
+
+    :param account: The account the listing is filtered for.
+    :param filter_name: The name of the filter, e.g. 'list_scopes'.
+    :param session: The database session.
+    :returns: True if the listing must not be filtered for the account.
+    """
+    if filter_name in permission.get_disabled_filters_for_all_accounts():
+        return True
+
+    if filter_name in permission.get_disabled_filters_for_all_roles():
+        # any role disables the filter, so there is no need to look at the role definitions
+        role_disables_filter = models.AccountRoleAssociation.role.not_in(list(RESERVED_ROLES))
+    else:
+        roles = [
+            role for role, definition in permission.get_roles().items()
+            if filter_name in definition.get('disable_filters', ()) and not is_reserved_role(role)
+        ]
+        if not roles:
+            return False
+        role_disables_filter = models.AccountRoleAssociation.role.in_(roles)
+
+    stmt = select(models.AccountRoleAssociation.role).where(
+        models.AccountRoleAssociation.account == account,
+        role_disables_filter,
+        _assignment_active(),
+    )
+    return session.execute(stmt).first() is not None
+
+
 # ----------------------------------------------------------------------------------------------
 # Synchronisation reports
 # ----------------------------------------------------------------------------------------------
