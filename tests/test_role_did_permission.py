@@ -488,8 +488,8 @@ def test_read_only_area_in_a_writable_scope(random_account, grant, catalogue, ge
     assert generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': calib, 'key': 'lifetime'}, db_session)
     assert not generic.perm_add_did(random_account, {'scope': OTHER, 'name': '%s_raw2' % grant.prefix}, db_session)
     assert generic.perm_add_did(random_account, {'scope': OTHER, 'name': '%s_calib2' % grant.prefix}, db_session)
-    # the metadata keys are set like the DID is altered
-    assert not generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': raw, 'key': 'project'}, db_session)
-    assert generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': calib, 'key': 'project'}, db_session)
+    # the metadata keys fall back to the deciding DID permission
+    assert not core_role.can_write_metadata_keys(random_account, OTHER, raw, ['project'], session=db_session)
+    assert core_role.can_write_metadata_keys(random_account, OTHER, calib, ['project'], session=db_session)
     items = [{'scope': OTHER, 'name': name} for name in (raw, calib)]
     assert [item['name'] for item in core_permission.filter_dids(items, random_account, 'list_dids', session=db_session, operation=DidOperationType.DELETE)] == [calib]
