@@ -77,7 +77,7 @@ def list_dids(
                                limit=limit, offset=offset, long=long or recursive, recursive=recursive, session=session)
 
         internal_issuer = InternalAccount(issuer, vo=vo)
-        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_dids', session=session))
 
         for d in result:
             # the bare names of the short format are those of the listed scope
@@ -344,7 +344,7 @@ def list_new_dids(
 
     with db_session(DatabaseOperationType.READ) as session:
         dids = did.list_new_dids(did_type=did_type and DIDType[did_type.upper()], thread=thread, total_threads=total_threads, chunk_size=chunk_size, session=session)
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_new_dids', session=session)):
             if d['scope'].vo == vo:
                 yield gateway_update_return_dict(d, session=session)
 
@@ -393,7 +393,7 @@ def list_content(
             raise AccessDenied('Account %s cannot list content of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         dids = did.list_content(scope=internal_scope, name=name, session=session)
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_content', session=session)):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -422,7 +422,7 @@ def list_content_history(
 
         dids = did.list_content_history(scope=internal_scope, name=name, session=session)
 
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_content_history', session=session)):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -455,7 +455,7 @@ def bulk_list_files(
             did_['scope'] = InternalScope(did_['scope'], vo=vo)
 
         files = did.bulk_list_files(dids=dids, long=long, session=session)
-        for file_ in role.filter_iterable_by_did_access(files, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for file_ in role.filter_iterable_by_did_access(files, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'bulk_list_files', session=session)):
             yield gateway_update_return_dict(file_, session=session)
 
 
@@ -487,7 +487,7 @@ def list_files(
 
         dids = did.list_files(scope=internal_scope, name=name, long=long, session=session)
 
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_files', session=session)):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -516,7 +516,7 @@ def scope_list(
         if not auth_result.allowed:
             raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope))
 
-        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'scope_list', session=session))
         dids = did.scope_list(internal_scope, name=name, recursive=recursive, session=session)
 
         for d in dids:
@@ -783,7 +783,7 @@ def get_dataset_by_guid(
     with db_session(DatabaseOperationType.READ) as session:
         dids = did.get_dataset_by_guid(guid=guid, session=session)
 
-        for d in role.filter_iterable_by_did_access(dids, account=internal_account, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_account, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_account, 'get_dataset_by_guid', session=session)):
             if d['scope'].vo != vo:
                 raise RucioException('GUID unavailable on VO {}'.format(vo))
             yield gateway_update_return_dict(d, session=session)
@@ -813,7 +813,7 @@ def list_parent_dids(
 
         dids = did.list_parent_dids(scope=internal_scope, name=name, session=session)
 
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_parent_dids', session=session)):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -908,7 +908,7 @@ def list_archive_content(
             raise AccessDenied('Account %s cannot list content of archive %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         dids = did.list_archive_content(scope=internal_scope, name=name, session=session)
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_archive_content', session=session)):
             yield gateway_update_return_dict(d, session=session)
 
 

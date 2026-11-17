@@ -49,7 +49,7 @@ def get_bad_replicas_summary(
     internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        if not role.is_rbac_enabled():
+        if not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_bad_replicas_summary', session=session):
             replicas = replica.get_bad_replicas_summary(rse_expression=rse_expression, from_date=from_date, to_date=to_date, filter_={'vo': vo}, session=session)
             return [gateway_update_return_dict(r, session=session) for r in replicas]
 
@@ -95,7 +95,7 @@ def list_bad_replicas_status(
 
         replicas = replica.list_bad_replicas_status(state=state, rse_id=rse_id, younger_than=younger_than,
                                                     older_than=older_than, limit=limit, list_pfns=False, vo=vo, session=session)
-        replicas = list(role.filter_iterable_by_did_access(replicas, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()))
+        replicas = list(role.filter_iterable_by_did_access(replicas, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_bad_replicas_status', session=session)))
         if list_pfns:
             # a PFN embeds the scope and name of the replica, so the PFNs are only resolved once the replicas are filtered
             return replica.list_bad_replicas_pfns(replicas, rse_id=rse_id, session=session)
@@ -248,7 +248,7 @@ def get_did_from_pfns(
 
     with db_session(DatabaseOperationType.READ) as session:
         rse_id = get_rse_id(rse=rse, vo=vo, session=session)
-        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_did_from_pfns', session=session))
         replicas = replica.get_did_from_pfns(pfns=pfns, rse_id=rse_id, vo=vo, session=session)
 
         for r in replicas:
@@ -324,7 +324,7 @@ def list_replicas(
 
         # the requested collections may contain files, and the files may have parents, in other scopes
         internal_issuer = InternalAccount(issuer, vo=vo)
-        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_replicas', session=session))
 
         for rep in replicas:
             if not can_access(rep['scope'], rep['name']):
@@ -590,7 +590,7 @@ def list_datasets_per_rse(issuer: str, rse: str, filters: Optional[dict[str, Any
         if 'scope' in filters:
             filters['scope'] = InternalScope(filters['scope'], vo=vo)
         datasets = replica.list_datasets_per_rse(rse_id, filters=filters, limit=limit, session=session)
-        for r in role.filter_iterable_by_did_access(datasets, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
+        for r in role.filter_iterable_by_did_access(datasets, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_datasets_per_rse', session=session)):
             yield gateway_update_return_dict(r, session=session)
 
 
@@ -684,7 +684,8 @@ def get_suspicious_files(
     with db_session(DatabaseOperationType.READ) as session:
         replicas = replica.get_suspicious_files(rse_expression=rse_expression, available_elsewhere=SuspiciousAvailability["ALL"].value,
                                                 younger_than=younger_than, nattempts=nattempts, filter_={'vo': vo}, session=session)
-        return [gateway_update_return_dict(r, session=session) for r in role.filter_iterable_by_did_access(replicas, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())]
+        skip_filtering = not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'get_suspicious_files', session=session)
+        return [gateway_update_return_dict(r, session=session) for r in role.filter_iterable_by_did_access(replicas, account=internal_issuer, session=session, skip_filtering=skip_filtering)]
 
 
 def set_tombstone(
