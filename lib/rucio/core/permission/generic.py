@@ -125,7 +125,9 @@ def has_permission(issuer: "InternalAccount", action: str, kwargs: dict[str, Any
             'delete_transfer_limit': perm_delete_transfer_limit,
             'add_opendata_did': perm_default,
             'update_opendata_did': perm_default,
-            'delete_opendata_did': perm_default}
+            'delete_opendata_did': perm_default,
+            'list_account_roles': perm_list_account_roles,
+            'list_role_permissions': perm_list_role_permissions}
 
     return perm.get(action, perm_default)(issuer=issuer, kwargs=kwargs, session=session)
 
@@ -1161,3 +1163,28 @@ def perm_delete_transfer_limit(issuer: "InternalAccount", kwargs: dict[str, Any]
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer) or _is_admin(issuer, session)
+
+
+def perm_list_account_roles(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the roles assigned to an account. An account can list its own roles.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer) or _is_admin(issuer, session) or kwargs['account'] == issuer
+
+
+def perm_list_role_permissions(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
+    """
+    Checks if an account can list the permissions of a role. An account can list the permissions of the roles it holds.
+
+    :param issuer: Account identifier which issues the command.
+    :param kwargs: List of arguments for the action.
+    :param session: The DB session to use
+    :returns: True if account is allowed, otherwise False
+    """
+    return _is_root(issuer) or _is_admin(issuer, session)\
+        or role_core.has_account_valid_role(account=issuer, role=kwargs['role'], session=session)
