@@ -1567,7 +1567,7 @@ def perm_read_data(issuer: "InternalAccount", kwargs: dict[str, Any], session: "
 # `rucio.core.permission.did_filter`: deciding every item through `has_permission` would query the database for each
 # of them. A callable decides an item as the permission functions decide it for a single DID or scope (root, admins,
 # the owner of the scope, the roles, see :func:`perm_read_data`), from the roles of the account
-# read once, see :class:`rucio.core.role.DidAccess`.
+# read once, see :class:`rucio.core.role.DidAccess` and :class:`rucio.core.role.MetadataAccess`.
 
 
 def is_listing_filtered(issuer: "InternalAccount", action: str, session: "Session") -> bool:
@@ -1592,7 +1592,8 @@ def scope_filter(issuer: "InternalAccount", action: str, session: "Session", ope
     pattern with the '*' name part which no name pattern of the role withdraws from some of its DIDs, see
     :meth:`rucio.core.role.DidAccess.role_grants`: this is meant for the items standing for the whole content of a
     scope, e.g. counts. With `any_did`, meant for listing the scopes themselves, a grant on some DIDs of the scope is
-    enough, as :func:`perm_read_data` decides it for a scope.
+    enough, and for READ a metadata permission making some of its DIDs visible, as :func:`perm_read_data` decides it
+    for a scope.
 
     :param issuer: Account identifier which issues the command.
     :param action: The filter of the listing, see :func:`is_listing_filtered`.
@@ -1607,6 +1608,7 @@ def scope_filter(issuer: "InternalAccount", action: str, session: "Session", ope
 
     privileged = _is_root(issuer) or _is_admin(issuer, session)
     did_access = role_core.DidAccess(issuer, session=session)
+    metadata = role_core.MetadataAccess(issuer, session=session, did_access=did_access) if any_did and operation == DidOperationType.READ else None
     owned_scopes: dict[InternalScope, bool] = {}
 
     def _can_access(scope: "Optional[InternalScope]") -> bool:
@@ -1618,25 +1620,27 @@ def scope_filter(issuer: "InternalAccount", action: str, session: "Session", ope
             owned_scopes[scope] = rucio.core.scope.is_scope_owner(scope=scope, account=issuer, session=session)
         if owned_scopes[scope]:
             return True
-        return any_did and did_access.grants_some_did(scope, operation)
+        return any_did and (did_access.grants_some_did(scope, operation) or (metadata is not None and metadata.is_visible_in_scope(scope)))
 
     return _can_access
 
 
-def did_filter(issuer: "InternalAccount", action: str, session: "Session",
-               operation: DidOperationType = DidOperationType.READ) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
+def did_filter(issuer: "InternalAccount", action: str, session: "Session", operation: DidOperationType = DidOperationType.READ,
+               reads_data: bool = False) -> "Callable[[Optional[InternalScope], Optional[str]], bool]":
     """
     Builds a callable telling whether an account may perform an operation on a DID, to filter a listing.
 
     Root, admins and the owner of the scope may, and so may an account a role grants the operation on the whole scope
     (see :func:`scope_filter`), or on the DID itself (see :func:`rucio.core.role.has_did_permission`), and, for DELETE, an
-    account deleting the DID as its owner (see :func:`_can_delete_as_owner`). The DIDs are decided one by one, so that a
-    long listing is not kept in memory.
+    account deleting the DID as its owner (see :func:`_can_delete_as_owner`). For READ, a DID a metadata permission makes visible is granted too, as by :func:`perm_read_data`,
+    unless `reads_data` tells that its data are read, e.g. the PFNs of its replicas, as by :func:`perm_list_replicas`.
+    The DIDs are decided one by one, so that a long listing is not kept in memory.
 
     :param issuer: Account identifier which issues the command.
     :param action: The filter of the listing, see :func:`is_listing_filtered`.
     :param session: The DB session to use
     :param operation: The operation to check.
+    :param reads_data: Whether the data of the DIDs are read, which a metadata permission making them visible does not grant.
     :returns: A callable taking a scope and a name, returning True if the account may access the DID: every DID if the
               listing is not filtered, otherwise never one whose scope is None or not an InternalScope, nor whose name
               is None unless the whole scope is granted.
@@ -1646,6 +1650,7 @@ def did_filter(issuer: "InternalAccount", action: str, session: "Session",
 
     privileged = _is_root(issuer) or _is_admin(issuer, session)
     did_access = role_core.DidAccess(issuer, session=session)
+    metadata = role_core.MetadataAccess(issuer, session=session, did_access=did_access) if operation == DidOperationType.READ and not reads_data else None
     owned_scopes: dict[InternalScope, bool] = {}
 
     def _can_access(scope: "Optional[InternalScope]", name: Optional[str]) -> bool:
@@ -1660,6 +1665,82 @@ def did_filter(issuer: "InternalAccount", action: str, session: "Session",
         if name is None:
             return False
         return did_access.grants(scope, name, operation)\
+            or (metadata is not None and metadata.is_visible(scope, name))\
             or (operation == DidOperationType.DELETE and _can_delete_as_owner(issuer, scope, name, session, did_access=did_access))
 
     return _can_access
+
+
+# The keys some DID listings use for a metadata key, e.g. `rucio.core.did.get_did` gives 'is_open' as 'open'.
+_METADATA_KEY_ALIASES = {'open': 'is_open'}
+
+
+class MetadataKeyFilter:
+    """
+    Tells which metadata keys of the DIDs it is given an account may read, and hides the others, see :func:`metadata_key_filter`.
+
+    Root, admins and the owner of the scope read every key, not the owner of the DID: owning it with WRITE on it grants
+    DELETE on it (see :func:`_can_delete_as_owner`), which reads no more keys than READ. So does an account whose
+    roles have no metadata permission matching the DID: its keys are read like the DID itself, which the caller
+    checked already. Otherwise each key is decided by :meth:`rucio.core.role.MetadataAccess.can_read_key`. The
+    keys naming the DID (`rucio.core.role.METADATA_IDENTITY_KEYS`) are always kept, since the DID itself is visible.
+    """
+
+    def __init__(self, issuer: "InternalAccount", session: "Session", filtered: bool) -> None:
+        self._issuer = issuer
+        self._session = session
+        self._did_access = None if not filtered or _is_root(issuer) or _is_admin(issuer, session) else role_core.DidAccess(issuer, session=session)
+        access = None if self._did_access is None else role_core.MetadataAccess(issuer, session=session, did_access=self._did_access)
+        # without metadata permissions, every key is read like the DID itself
+        self._access = access if access is not None and access.has_metadata_permissions else None
+        self._owned_scopes: dict[InternalScope, bool] = {}
+        self._reads_every_key: dict[tuple[InternalScope, str], bool] = {}
+
+    def _every_key(self, scope: "InternalScope", name: str) -> bool:
+        """Tells whether the account reads every key of a DID."""
+        if self._access is None:
+            return True
+        if (scope, name) not in self._reads_every_key:
+            if scope not in self._owned_scopes:
+                self._owned_scopes[scope] = rucio.core.scope.is_scope_owner(scope=scope, account=self._issuer, session=self._session)
+            self._reads_every_key[(scope, name)] = not self._access.decides_keys(scope, name)\
+                or self._owned_scopes[scope]
+        return self._reads_every_key[(scope, name)]
+
+    def is_readable(self, scope: "InternalScope", name: str, key: str) -> bool:
+        """Tells whether the account may read a metadata key of a DID it may see."""
+        key = _METADATA_KEY_ALIASES.get(key, key)
+        if key in role_core.METADATA_IDENTITY_KEYS or self._every_key(scope, name):
+            return True
+        return self._access.can_read_key(scope, name, key)  # type: ignore[union-attr]  # set, since not every key is read
+
+    def are_readable(self, scope: "InternalScope", name: str, keys: "Iterable[str]") -> bool:
+        """Tells whether the account may read every given metadata key of a DID it may see."""
+        return all(self.is_readable(scope, name, key) for key in keys)
+
+    def project(self, scope: "InternalScope", name: str, item: "Mapping[str, Any]") -> dict[str, Any]:
+        """Returns the keys of a DID the account may read, dropping the others."""
+        if self._every_key(scope, name):
+            return dict(item)
+        return {key: value for key, value in item.items() if self.is_readable(scope, name, key)}
+
+    def project_item(self, item: "Mapping[str, Any]", scope_keyword: str = "scope", name_keyword: str = "name") -> dict[str, Any]:
+        """Returns the keys of a DID given as an item of a listing, with its scope and name, the account may read."""
+        scope, name = item.get(scope_keyword), item.get(name_keyword)
+        if not isinstance(scope, InternalScope) or name is None:
+            return dict(item)
+        return self.project(scope, name, item)
+
+
+def metadata_key_filter(issuer: "InternalAccount", session: "Session") -> MetadataKeyFilter:
+    """
+    Builds the filter hiding from the DIDs an account sees the metadata keys it may not read, see :class:`MetadataKeyFilter`.
+
+    The DIDs themselves are filtered beforehand, see :func:`did_filter`: this only hides keys, and only with RBAC. The
+    roles of the account are read once, the owners of the scopes and DIDs once each, so that a listing is filtered
+    without querying the database for every key.
+
+    :param issuer: Account identifier which issues the command.
+    :param session: The DB session to use
+    """
+    return MetadataKeyFilter(issuer, session, filtered=_use_roles())
