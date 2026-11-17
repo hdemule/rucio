@@ -471,11 +471,11 @@ class TestDIDGateway:
         scope.add_scope(tmp_scope, 'jdoe', 'root', vo=vo)
         for i in range(0, 5):
             did.add_did(scope=tmp_scope, name='%s-%i' % (tmp_dsn, i), did_type='DATASET', issuer='root', vo=vo)
-        for i in did.list_new_dids('DATASET', vo=vo):
+        for i in did.list_new_dids(issuer='root', did_type='DATASET', vo=vo):
             assert i != {}
             assert i['did_type'] == DIDType.DATASET
             break
-        for i in did.list_new_dids(vo=vo):
+        for i in did.list_new_dids(issuer='root', vo=vo):
             assert i != {}
             break
 
