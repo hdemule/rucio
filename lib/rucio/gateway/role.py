@@ -1,0 +1,338 @@
+# Copyright European Organization for Nuclear Research (CERN) since 2012
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import TYPE_CHECKING, Any, Optional, Union
+
+from rucio.common.constants import DEFAULT_VO
+from rucio.common.exception import AccessDenied
+from rucio.common.types import InternalAccount
+from rucio.core import role as core_role
+from rucio.db.sqla.constants import DatabaseOperationType
+from rucio.db.sqla.session import db_session
+from rucio.gateway.permission import has_permission
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from datetime import datetime
+
+
+def list_roles(issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, Any]]:
+    with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_roles', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to list roles.' % issuer)
+
+        return core_role.list_roles(session=session)
+
+
+def add_role(
+        role: str,
+        issuer: str,
+        description: Optional[str] = None,
+        assignable: bool = True,
+        locked: bool = True,
+        vo: str = DEFAULT_VO) -> None:
+    """
+    Add a new role.
+
+    :param role: The name of the role to add.
+    :param issuer: The account issuing the command.
+    :param description: An optional description of the role. An empty description is stored as NULL.
+    :param assignable: Whether an identity provider may assign this role to, or take it away from, an account.
+    :param locked: Whether the role is locked, which prevents it from being altered or deleted without `force`.
+    :param vo: The VO of the issuing account.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='add_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to add role.' % issuer)
+
+        core_role.add_role(role=role, description=description, assignable=assignable, locked=locked, session=session)
+
+
+def update_role(
+        role: str,
+        issuer: str,
+        description: Optional[str] = None,
+        assignable: Optional[bool] = None,
+        locked: Optional[bool] = None,
+        force: bool = False,
+        vo: str = DEFAULT_VO) -> dict[str, Any]:
+    """
+    Update the metadata of an existing role, changing only the parameters explicitly given.
+
+    :param role: The role to update.
+    :param issuer: The account issuing the command.
+    :param description: The new description, or None to leave it untouched. An empty string clears it (stored as NULL).
+    :param assignable: The new assignable state, or None to leave it untouched.
+    :param locked: The new locked state, or None to leave it untouched.
+    :param force: Change the description or the assignable state even if the role is locked.
+    :param vo: The VO of the issuing account.
+    :returns: The role as it is stored after the update.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='update_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to update role %s.' % (issuer, role))
+
+        return core_role.update_role(role=role, description=description, assignable=assignable, locked=locked, force=force, session=session)
+
+
+def delete_role(role: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
+    """
+    Delete a role.
+
+    :param role: The role to delete.
+    :param issuer: The account issuing the command.
+    :param force: Also remove the role from every account it is assigned to and drop its permissions, and delete it even if it is locked.
+    :param vo: The VO of the issuing account.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to delete role.' % issuer)
+
+        core_role.delete_role(role=role, force=force, session=session)
+
+
+def list_account_roles(account: str, issuer: str, detail: bool = False, vo: str = DEFAULT_VO) -> dict[str, Any]:
+    with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_account_roles', kwargs={'account': account}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s cannot list roles for account %s. Additional permissions are required.' % (issuer, account))
+
+        internal_account = InternalAccount(account, vo=vo)
+        roles = core_role.list_account_roles(account=internal_account, session=session)
+        result: dict[str, Any] = {'roles': roles}
+        if detail:
+            result['permissions'] = [
+                {'role': role['role'], **permission}
+                for role in roles
+                for permission in core_role.list_role_permissions(role=role['role'], session=session)
+            ]
+        result['account'] = account
+        return result
+
+
+def list_role_accounts(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, Any]]:
+    """
+    List the accounts a role is assigned to, in the whole instance.
+
+    :param role: The role to list the accounts of.
+    :param issuer: The account issuing the command.
+    :param vo: The VO of the issuing account.
+    :returns: One entry per account, with its external name and the `activates_at` and `expires_at` of the assignment.
+    """
+    with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_role_accounts', kwargs={'role': role}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to list the accounts of role %s.' % (issuer, role))
+
+        return [
+            {**assignment, 'account': assignment['account'].external}
+            for assignment in core_role.list_role_accounts(role=role, session=session)
+        ]
+
+
+def add_account_role(
+        account: str,
+        role: str,
+        issuer: str,
+        activates_at: Optional[Union[str, "datetime"]] = None,
+        expires_at: Optional[Union[str, "datetime"]] = None,
+        force: bool = False,
+        vo: str = DEFAULT_VO) -> None:
+    """
+    Assign a role to an account.
+
+    :param account: The account to assign the role to.
+    :param role: The role to assign.
+    :param issuer: The account issuing the command.
+    :param expires_at: An optional date at which the assignment expires. None means that it does not expire.
+    :param force: Assign the role even if it is not assignable.
+    :param activates_at: An optional date from which the assignment grants the role. None means from now on.
+    :param vo: The VO of the issuing account.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='add_account_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to add role %s to account %s.' % (issuer, role, account))
+
+        core_role.add_account_role(account=InternalAccount(account, vo=vo), role=role, expires_at=expires_at, force=force, activates_at=activates_at, session=session)
+
+
+def delete_account_role(account: str, role: str, issuer: str, force: bool = False, vo: str = DEFAULT_VO) -> None:
+    """
+    Remove a role from an account.
+
+    :param account: The account to remove the role from.
+    :param role: The role to remove.
+    :param issuer: The account issuing the command.
+    :param force: Remove the role even if it is not assignable.
+    :param vo: The VO of the issuing account.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='delete_account_role', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to delete role %s from account %s.' % (issuer, role, account))
+        core_role.delete_account_role(account=InternalAccount(account, vo=vo), role=role, force=force, session=session)
+
+
+def set_account_role_expires_at(account: str, role: str, expires_at: Optional[Union[str, "datetime"]], issuer: str, vo: str = DEFAULT_VO) -> Optional["datetime"]:
+    """
+    Overwrite the expiry date of a role assigned to an account.
+
+    :param account: The account the role is assigned to.
+    :param role: The role to set the `expires_at` of.
+    :param expires_at: The new date. None clears it, so that the assignment does not expire.
+    :param issuer: The account issuing the command.
+    :param vo: The VO of the issuing account.
+    :returns: The date as it was stored, or None if it was cleared.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='set_account_role_expires_at', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to set the expires_at of role %s for account %s.' % (issuer, role, account))
+
+        return core_role.set_account_role_expires_at(account=InternalAccount(account, vo=vo), role=role, expires_at=expires_at, session=session)
+
+
+def set_account_role_activates_at(account: str, role: str, activates_at: Optional[Union[str, "datetime"]], issuer: str, vo: str = DEFAULT_VO) -> "datetime":
+    """
+    Overwrite the activation date of a role assigned to an account.
+
+    :param account: The account the role is assigned to.
+    :param role: The role to set the `activates_at` of.
+    :param activates_at: The new date. None sets it to now, so that the assignment is active right away.
+    :param issuer: The account issuing the command.
+    :param vo: The VO of the issuing account.
+    :returns: The date as it was stored.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='set_account_role_activates_at', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to set the activates_at of role %s for account %s.' % (issuer, role, account))
+
+        return core_role.set_account_role_activates_at(account=InternalAccount(account, vo=vo), role=role, activates_at=activates_at, session=session)
+
+
+def set_account_role_dates(
+        account: str,
+        role: str,
+        issuer: str,
+        activates_at: Optional[Union[str, "datetime"]] = core_role.KEEP,
+        expires_at: Optional[Union[str, "datetime"]] = core_role.KEEP,
+        vo: str = DEFAULT_VO) -> dict[str, Optional["datetime"]]:
+    """
+    Overwrite the activation and/or expiry dates of a role assigned to an account, in one go.
+
+    The issuer needs the permission to set each date it changes.
+
+    :param account: The account the role is assigned to.
+    :param role: The role to set the dates of.
+    :param issuer: The account issuing the command.
+    :param activates_at: The new activation date, or `KEEP` to leave it as it is. None sets it to now.
+    :param expires_at: The new expiry date, or `KEEP` to leave it as it is. None clears it.
+    :param vo: The VO of the issuing account.
+    :returns: The `activates_at` and `expires_at` of the assignment, as they were stored.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        for name, value in (('activates_at', activates_at), ('expires_at', expires_at)):
+            if value is core_role.KEEP:
+                continue
+            auth_result = has_permission(issuer=issuer, vo=vo, action='set_account_role_%s' % name, kwargs={}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s does not have permission to set the %s of role %s for account %s.' % (issuer, name, role, account))
+
+        return core_role.set_account_role_dates(account=InternalAccount(account, vo=vo), role=role, activates_at=activates_at, expires_at=expires_at, session=session)
+
+
+def clean_expired_account_roles(issuer: str, dry_run: bool = False, vo: str = DEFAULT_VO) -> dict[str, Any]:
+    """
+    Remove the expired role assignments of every account.
+
+    :param issuer: The account issuing the command.
+    :param dry_run: Only report what would be removed, without writing to the database.
+    :param vo: The VO of the issuing account.
+    :returns: The report of the cleaning, see :func:`rucio.core.role.clean_expired_account_roles`.
+    """
+    operation = DatabaseOperationType.READ if dry_run else DatabaseOperationType.WRITE
+    with db_session(operation) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='clean_expired_account_roles', kwargs={}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to clean the expired role assignments.' % issuer)
+
+        return core_role.clean_expired_account_roles(dry_run=dry_run, session=session)
+
+
+def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, str]]:
+    with db_session(DatabaseOperationType.READ) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='list_role_permissions', kwargs={'role': role}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s cannot list permissions for role %s. Either the role does not exist or additional permissions are required.' % (issuer, role))
+        return core_role.list_role_permissions(role=role, session=session)
+
+
+def add_role_permission(
+        role: str,
+        permission_type: str,
+        parameters: "Mapping[str, Any]",
+        issuer: str,
+        force: bool = False,
+        vo: str = DEFAULT_VO) -> None:
+    """
+    Grant a role a permission of a type, see :func:`rucio.core.role.add_role_permission`.
+
+    :param role: The role to grant the permission to.
+    :param permission_type: The type of the permission: 'did'.
+    :param parameters: The target of the permission and its parameters: a 'did_pattern', on which only a trailing '*'
+                       wildcard is accepted, and the list of its 'operations', possibly empty, for a DID permission,
+                       which replaces what the role was granted on the pattern.
+    :param issuer: The account issuing the command.
+    :param force: Grant the permission even if the role is locked.
+    :param vo: The VO of the issuing account.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='add_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to add role permission for role %s.' % (issuer, role))
+
+        core_role.add_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, session=session)
+
+
+def delete_role_permission(
+        role: str,
+        permission_type: str,
+        parameters: "Mapping[str, Any]",
+        issuer: str,
+        force: bool = False,
+        vo: str = DEFAULT_VO) -> int:
+    """
+    Remove permissions of a type from a role, see :func:`rucio.core.role.delete_role_permission`.
+
+    :param role: The role to remove the permissions from.
+    :param permission_type: The type of the permissions: 'did'.
+    :param parameters: The target of the permissions and the parameters identifying them: a 'did_pattern' for a DID
+                       permission.
+    :param issuer: The account issuing the command.
+    :param force: Remove the permissions even if the role is locked.
+    :param vo: The VO of the issuing account.
+    :returns: The number of permissions removed.
+    """
+    with db_session(DatabaseOperationType.WRITE) as session:
+        auth_result = has_permission(issuer=issuer, vo=vo, action='delete_role_permission', kwargs={'role': role, 'permission_type': permission_type}, session=session)
+        if not auth_result.allowed:
+            raise AccessDenied('Account %s does not have permission to delete role permission for role %s.' % (issuer, role))
+
+        return core_role.delete_role_permission(role=role, permission_type=permission_type, parameters=parameters, force=force, session=session)
