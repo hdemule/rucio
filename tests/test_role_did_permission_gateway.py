@@ -76,6 +76,12 @@ def rbac(request, monkeypatch):
 
 
 @pytest.fixture
+def no_disabled_filters(monkeypatch):
+    """Disable no filter for the test, whatever the policy package of the instance disables."""
+    monkeypatch.setattr(core_role, 'is_filter_disabled', lambda account, filter_name, *, session: False)
+
+
+@pytest.fixture
 def scope_cleaner() -> Iterator[Callable[[InternalScope], None]]:
     """Register scopes made by the test: they are deleted afterwards, with every DID, replica, rule and lock in them."""
     scopes: list[InternalScope] = []
@@ -152,7 +158,7 @@ class World:
 
 
 @pytest.fixture
-def make_world(vo, random_account_factory, rse_cleaner, scope_cleaner, role_cleaner):
+def make_world(vo, no_disabled_filters, random_account_factory, rse_cleaner, scope_cleaner, role_cleaner):
     """
     Build an empty world: a scope owned by root, named 'rbac_*', the accounts given, the RSEs given (by suffix, e.g.
     'X_USERDISK'), with large account limits for the accounts on them.
