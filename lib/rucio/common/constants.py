@@ -44,6 +44,11 @@ RBAC_DISABLED_WARNING = ("Role-based access control is currently disabled in the
 "You can still manage roles but everything will work as in standard Rucio as long as you do not explicitly enable RBAC in the current instance configuration.")
 RBAC_WARNING_HEADER = 'X-Rucio-Warning'
 
+# RBAC: metadata keys whose update leads to the removal of the DID or of its replicas (e.g. `rucio did remove` sets
+# the lifetime). They alter the DID itself, so no metadata permission grants WRITE on them (see `rucio.core.role`):
+# setting them takes DELETE on the DID, or owning it, see `rucio.core.permission.generic`.
+RBAC_DELETE_METADATA_KEYS = frozenset({'lifetime', 'expired_at', 'eol_at', 'purge_replicas'})
+
 # RBAC: metadata keys held by Rucio itself: the identity, size, checksums and state of a DID, and its bookkeeping.
 # Setting them would rename a DID, falsify its size (and the account usage computed from it) or its checksums, or
 # change how Rucio handles it, so no role grants it: only root, admins and the owner of the scope may.
