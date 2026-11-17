@@ -46,6 +46,7 @@ from rucio.gateway.role import (
     list_role_permissions,
     list_roles,
     set_account_role_dates,
+    sync_account_roles,
     update_role,
 )
 from rucio.web.rest.flaskapi.authenticated_bp import AuthenticatedBlueprint
@@ -300,6 +301,72 @@ class AccountRoles(ErrorHandlingMethodView):
         # reported in Rucio's date format
         return Response(render_json(**roles), content_type='application/json')
 
+    def put(self, account: str) -> 'ResponseReturnValue':
+        """
+        ---
+        summary: Synchronise account roles
+        description: |
+          Synchronise the role assignments of an account with the roles supplied by an identity provider:
+          expired assignments and roles which are not supplied are removed, supplied roles are assigned
+          and their expiry dates updated. Roles which are not assignable are left untouched.
+          With `dry_run`, only report what would be done.
+        tags:
+          - Role
+        parameters:
+        - name: account
+          in: path
+          description: "The account identifier."
+          schema:
+            type: string
+          style: simple
+        requestBody:
+          content:
+            'application/json':
+              schema:
+                type: object
+                required:
+                - roles
+                properties:
+                  roles:
+                    description: "The roles supplied by the IdP: a list of role names and/or of {role, expires_at} objects, or an object mapping role name to expiry date."
+                    oneOf:
+                    - type: array
+                    - type: object
+                  dry_run:
+                    description: "Only report what the synchronisation would do."
+                    type: boolean
+                    default: false
+        responses:
+          200:
+            description: "The report of the synchronisation: what was (or would be) removed, added, updated, left unchanged, held back or ignored, the messages describing each step, and a summary."
+            content:
+              application/json:
+                schema:
+                  type: object
+          400:
+            description: "The roles are not in an accepted form."
+          401:
+            description: "Invalid Auth Token"
+          403:
+            description: "Not allowed to synchronise the roles of this account."
+          404:
+            description: "No account found."
+        """
+        parameters = json_parameters()
+        roles = param_get(parameters, 'roles')
+        dry_run = param_get_bool(parameters, 'dry_run', default=False)
+
+        try:
+            report = sync_account_roles(account=account, roles=roles, issuer=request.environ['issuer'], dry_run=dry_run, vo=request.environ['vo'])
+        except AccessDenied as error:
+            return generate_http_error_flask(403, error)
+        except InputValidationError as error:
+            return generate_http_error_flask(400, error)
+        except AccountNotFound as error:
+            return generate_http_error_flask(404, error)
+        # rendered through the API encoder, so that the dates are reported in Rucio's date format
+        return Response(render_json(**report), content_type='application/json')
+
 
 class ExpiredAccountRoles(ErrorHandlingMethodView):
     def delete(self) -> 'ResponseReturnValue':
@@ -368,7 +435,7 @@ def blueprint() -> AuthenticatedBlueprint:
     # a static path, matched before `/accounts/<account>`: a GET or PUT for an account named 'expired' still reaches the account view
     bp.add_url_rule("/accounts/expired", view_func=ExpiredAccountRoles.as_view("expired_account_roles"), methods=[HTTPMethod.DELETE.value])
     account_roles_view = AccountRoles.as_view("account_roles")
-    bp.add_url_rule("/accounts/<account>", view_func=account_roles_view, methods=[HTTPMethod.GET.value])
+    bp.add_url_rule("/accounts/<account>", view_func=account_roles_view, methods=[HTTPMethod.GET.value, HTTPMethod.PUT.value])
     bp.after_request(response_headers)
     bp.after_request(warn_if_rbac_disabled)
     return bp
