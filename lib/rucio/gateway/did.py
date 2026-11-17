@@ -21,7 +21,7 @@ from rucio.common.exception import AccessDenied, InvalidObject, RucioException
 from rucio.common.schema import validate_schema
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import gateway_update_return_dict
-from rucio.core import did, naming_convention
+from rucio.core import did, naming_convention, role
 from rucio.core import meta_conventions as meta_convention_core
 from rucio.core.rse import get_rse_id
 from rucio.db.sqla.constants import DatabaseOperationType, DIDType
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 
 def list_dids(
+    issuer: str,
     scope: str,
     filters: 'Iterable[dict[Any, Any]]',
     did_type: str = 'collection',
@@ -65,11 +66,29 @@ def list_dids(
             or_group['scope'] = InternalScope(or_group['scope'], vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_dids', kwargs={'scope': scope}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list data identifiers in scope %s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope))
+
+        # A recursive listing descends into the content of the collections, which may live in other scopes.
+        # The short format only yields bare names, so a recursive listing is always done in the long format
+        # to be able to filter it per DID, and brought back to bare names afterwards if needed.
         result = did.list_dids(scope=internal_scope, filters=filters, did_type=did_type, ignore_case=ignore_case,
-                               limit=limit, offset=offset, long=long, recursive=recursive, session=session)
+                               limit=limit, offset=offset, long=long or recursive, recursive=recursive, session=session)
+
+        internal_issuer = InternalAccount(issuer, vo=vo)
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
 
         for d in result:
-            yield gateway_update_return_dict(d, session=session)
+            # the bare names of the short format are those of the listed scope
+            did_scope, did_name = (d['scope'], d['name']) if isinstance(d, dict) else (internal_scope, d)
+            if not can_access(did_scope, did_name):
+                continue
+            if recursive and not long:
+                yield d['name']
+            else:
+                yield gateway_update_return_dict(d, session=session)
 
 
 def add_did(
@@ -305,6 +324,7 @@ def detach_dids(
 
 
 def list_new_dids(
+    issuer: str,
     did_type: Optional[str] = None,
     thread: Optional[int] = None,
     total_threads: Optional[int] = None,
@@ -314,20 +334,20 @@ def list_new_dids(
     """
     List recent identifiers.
 
+    :param issuer: The issuer account.
     :param did_type : The DID type.
     :param thread: The assigned thread for this necromancer.
     :param total_threads: The total number of threads of all necromancers.
     :param chunk_size: Number of requests to return per yield.
     :param vo: The VO to act on.
     """
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
         dids = did.list_new_dids(did_type=did_type and DIDType[did_type.upper()], thread=thread, total_threads=total_threads, chunk_size=chunk_size, session=session)
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             if d['scope'].vo == vo:
-                d = gateway_update_return_dict(d, session=session)
-
-        yield from dids
+                yield gateway_update_return_dict(d, session=session)
 
 
 def set_new_dids(
@@ -351,6 +371,7 @@ def set_new_dids(
 
 
 def list_content(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -358,20 +379,28 @@ def list_content(
     """
     List data identifier contents.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param vo: The VO to act on.
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_content', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list content of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         dids = did.list_content(scope=internal_scope, name=name, session=session)
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
 def list_content_history(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -379,21 +408,29 @@ def list_content_history(
     """
     List data identifier contents history.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param vo: The VO to act on.
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_content_history', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list content history of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         dids = did.list_content_history(scope=internal_scope, name=name, session=session)
 
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
 def bulk_list_files(
+    issuer: str,
     dids: 'Iterable[dict[str, Any]]',
     long: bool = False,
     vo: str = DEFAULT_VO,
@@ -405,16 +442,29 @@ def bulk_list_files(
     :param long:       A boolean to choose if more metadata are returned or not.
     :param vo:         The VO to act on.
     """
-
-    for did_ in dids:
-        did_['scope'] = InternalScope(did_['scope'], vo=vo)
+    dids = list(dids)  # Convert to list to allow multiple iterations
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
-        for file_ in did.bulk_list_files(dids=dids, long=long, session=session):
+        for did_ in dids:
+            if role.is_rbac_enabled():
+                auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': did_['scope'], 'name': did_['name']}, session=session)
+                if not auth_result.allowed:
+                    raise AccessDenied(
+                        'Account %s cannot retrieve file content of data identifier %s:%s. '
+                        'Either the requested scope does not exist or the account lacks required permissions.'
+                        % (issuer, did_['scope'], did_['name'])
+                    )
+
+            did_['scope'] = InternalScope(did_['scope'], vo=vo)
+
+        files = did.bulk_list_files(dids=dids, long=long, session=session)
+        for file_ in role.filter_iterable_by_did_access(files, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(file_, session=session)
 
 
 def list_files(
+    issuer: str,
     scope: str,
     name: str,
     long: bool,
@@ -423,6 +473,7 @@ def list_files(
     """
     List data identifier file contents.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param long:       A boolean to choose if GUID is returned or not.
@@ -430,15 +481,23 @@ def list_files(
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list files of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         dids = did.list_files(scope=internal_scope, name=name, long=long, session=session)
 
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
 def scope_list(
+    issuer: str,
     scope: str,
     name: Optional[str] = None,
     recursive: bool = False,
@@ -447,6 +506,7 @@ def scope_list(
     """
     List data identifiers in a scope.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param recursive: boolean, True or False.
@@ -454,11 +514,22 @@ def scope_list(
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='scope_list', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list data identifiers in scope %s. The requested scope either does not exist or is outside the account\'s authorized scopes.' % (issuer, scope))
+
+        can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
         dids = did.scope_list(internal_scope, name=name, recursive=recursive, session=session)
 
         for d in dids:
+            # the content of a DID may be unreadable, and so may the parent it was reached through
+            if not can_access(d['scope'], d['name']) or (d['parent'] is not None and not can_access(d['parent']['scope'], d['parent']['name'])):
+                continue
+
             ret_did = deepcopy(d)
             ret_did['scope'] = ret_did['scope'].external
             if ret_did['parent'] is not None:
@@ -466,10 +537,11 @@ def scope_list(
             yield ret_did
 
 
-def get_did(scope: str, name: str, dynamic_depth: Optional[DIDType] = None, vo: str = DEFAULT_VO) -> "dict[str, Any]":
+def get_did(issuer: str, scope: str, name: str, dynamic_depth: Optional[DIDType] = None, vo: str = DEFAULT_VO) -> "dict[str, Any]":
     """
     Retrieve a single data DID.
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param dynamic_depth: the DID type to use as source for estimation of this DIDs length/bytes.
@@ -482,6 +554,11 @@ def get_did(scope: str, name: str, dynamic_depth: Optional[DIDType] = None, vo: 
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_did', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot retrieve information about data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         d = did.get_did(scope=internal_scope, name=name, dynamic_depth=dynamic_depth, session=session)
         return gateway_update_return_dict(d, session=session)
 
@@ -506,7 +583,7 @@ def set_metadata(
     :param recursive: Option to propagate the metadata update to content.
     :param vo: The VO to act on.
     """
-    kwargs = {'scope': scope, 'name': name, 'key': key, 'value': value, 'issuer': issuer}
+    kwargs = {'scope': scope, 'name': name, 'key': key, 'value': value, 'issuer': issuer, 'recursive': recursive}
 
     if key in RESERVED_KEYS:
         raise AccessDenied('Account %s can not change this metadata value to data identifier %s:%s' % (issuer, scope, name))
@@ -514,7 +591,7 @@ def set_metadata(
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='set_metadata', kwargs=kwargs, session=session)
         if not auth_result.allowed:
-            raise AccessDenied('Account %s can not add metadata to data identifier %s:%s. %s' % (issuer, scope, name, auth_result.message))
+            raise AccessDenied('Account %s can not add metadata to data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         internal_scope = InternalScope(scope, vo=vo)
         return did.set_metadata(scope=internal_scope, name=name, key=key, value=value, recursive=recursive, session=session)
@@ -538,7 +615,7 @@ def set_metadata_bulk(
     :param recursive: Option to propagate the metadata update to content.
     :param vo: The VO to act on.
     """
-    kwargs = {'scope': scope, 'name': name, 'meta': meta, 'issuer': issuer}
+    kwargs = {'scope': scope, 'name': name, 'meta': meta, 'issuer': issuer, 'recursive': recursive}
 
     for key in meta:
         if key in RESERVED_KEYS:
@@ -570,7 +647,7 @@ def set_dids_metadata_bulk(
 
     with db_session(DatabaseOperationType.WRITE) as session:
         for entry in dids:
-            kwargs = {'scope': entry['scope'], 'name': entry['name'], 'meta': entry['meta'], 'issuer': issuer}
+            kwargs = {'scope': entry['scope'], 'name': entry['name'], 'meta': entry['meta'], 'issuer': issuer, 'recursive': recursive}
             auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='set_metadata_bulk', kwargs=kwargs, session=session)
             if not auth_result.allowed:
                 raise AccessDenied('Account %s can not add metadata to data identifier %s:%s. %s' % (issuer, entry['scope'], entry['name'], auth_result.message))
@@ -584,6 +661,7 @@ def set_dids_metadata_bulk(
 
 
 def get_metadata(
+    issuer: str,
     scope: str,
     name: str,
     plugin: str = 'DID_COLUMN',
@@ -601,11 +679,17 @@ def get_metadata(
     internal_scope = InternalScope(scope, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_metadata', kwargs={'scope': scope, 'name': name, 'plugin': plugin}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot retrieve metadata about data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         d = did.get_metadata(scope=internal_scope, name=name, plugin=plugin, session=session)
         return gateway_update_return_dict(d, session=session)
 
 
 def get_metadata_bulk(
+    issuer: str,
     dids: 'Iterable[dict[str, Any]]',
     inherit: bool = False,
     plugin: str = 'DID_COLUMN',
@@ -618,18 +702,29 @@ def get_metadata_bulk(
     :param plugin:             The metadata plugin to query, 'ALL' for all available plugins
     :param vo:                 The VO to act on.
     """
-
+    dids = list(dids)
     validate_schema(name='dids', obj=dids, vo=vo)
-    for entry in dids:
-        entry['scope'] = InternalScope(entry['scope'], vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        for entry in dids:
+            if role.is_rbac_enabled():
+                auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_metadata', kwargs={'scope': entry['scope'], 'name': entry['name'], 'plugin': plugin}, session=session)
+                if not auth_result.allowed:
+                    raise AccessDenied(
+                        'Account %s cannot retrieve metadata about data identifier %s:%s. '
+                        'Either the requested scope does not exist or the account lacks required permissions.'
+                        % (issuer, entry['scope'], entry['name'])
+                    )
+
+            entry['scope'] = InternalScope(entry['scope'], vo=vo)
+
         meta = did.get_metadata_bulk(dids, inherit=inherit, plugin=plugin, session=session)
         for met in meta:
             yield gateway_update_return_dict(met, session=session)
 
 
 def delete_metadata(
+    issuer: str,
     scope: str,
     name: str,
     key: str,
@@ -638,6 +733,7 @@ def delete_metadata(
     """
     Delete a key from the metadata column
 
+    :param issuer: The issuer account.
     :param scope: the scope of DID
     :param name: the name of the DID
     :param key: the key to be deleted
@@ -646,6 +742,11 @@ def delete_metadata(
 
     internal_scope = InternalScope(scope, vo=vo)
     with db_session(DatabaseOperationType.WRITE) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='delete_metadata', kwargs={'scope': scope, 'name': name, 'key': key}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot delete metadata of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         return did.delete_metadata(scope=internal_scope, name=name, key=key, session=session)
 
 
@@ -667,7 +768,7 @@ def set_status(
     """
 
     with db_session(DatabaseOperationType.WRITE) as session:
-        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='set_status', kwargs={'scope': scope, 'name': name, 'issuer': issuer}, session=session)
+        auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='set_status', kwargs={'scope': scope, 'name': name, 'issuer': issuer, **kwargs}, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s can not set status on data identifier %s:%s. %s' % (issuer, scope, name, auth_result.message))
 
@@ -678,6 +779,7 @@ def set_status(
 
 def get_dataset_by_guid(
     guid: str,
+    issuer: str,
     vo: str = DEFAULT_VO,
 ) -> 'Iterator[dict[str, Any]]':
     """
@@ -687,16 +789,18 @@ def get_dataset_by_guid(
 
     :returns: A DID
     """
+    internal_account = InternalAccount(issuer, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
         dids = did.get_dataset_by_guid(guid=guid, session=session)
 
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_account, session=session, skip_filtering=not role.is_rbac_enabled()):
             if d['scope'].vo != vo:
                 raise RucioException('GUID unavailable on VO {}'.format(vo))
             yield gateway_update_return_dict(d, session=session)
 
 
 def list_parent_dids(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -710,11 +814,17 @@ def list_parent_dids(
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_parent_dids', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list parent data identifiers of %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         dids = did.list_parent_dids(scope=internal_scope, name=name, session=session)
 
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -739,12 +849,18 @@ def create_did_sample(
     :param issuer: The issuer account.
     :param vo: The VO to act on.
     """
-    kwargs = {'issuer': issuer, 'scope': output_scope}
+    kwargs = {'issuer': issuer, 'scope': output_scope, 'name': output_name}
 
     with db_session(DatabaseOperationType.WRITE) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='create_did_sample', kwargs=kwargs, session=session)
         if not auth_result.allowed:
             raise AccessDenied('Account %s can not bulk add data identifier. %s' % (issuer, auth_result.message))
+
+        # the sample is made of the files of the input collection, so they must be readable
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_files', kwargs={'scope': input_scope, 'name': input_name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot create a sample of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, input_scope, input_name))
 
         input_internal_scope = InternalScope(input_scope, vo=vo)
         output_internal_scope = InternalScope(output_scope, vo=vo)
@@ -781,6 +897,7 @@ def resurrect(
 
 
 def list_archive_content(
+    issuer: str,
     scope: str,
     name: str,
     vo: str = DEFAULT_VO,
@@ -788,20 +905,28 @@ def list_archive_content(
     """
     List archive contents.
 
+    :param issuer: The issuer account.
     :param scope: The archive scope name.
     :param name: The archive data identifier name.
     :param vo: The VO to act on.
     """
 
     internal_scope = InternalScope(scope, vo=vo)
+    internal_issuer = InternalAccount(issuer, vo=vo)
 
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_archive_content', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list content of archive %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         dids = did.list_archive_content(scope=internal_scope, name=name, session=session)
-        for d in dids:
+        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
 def add_did_to_followed(
+    issuer: str,
     scope: str,
     name: str,
     account: str,
@@ -810,6 +935,7 @@ def add_did_to_followed(
     """
     Mark a DID as followed by the given account
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     :param account: The account owner.
@@ -817,10 +943,16 @@ def add_did_to_followed(
     internal_scope = InternalScope(scope, vo=vo)
     internal_account = InternalAccount(account, vo=vo)
     with db_session(DatabaseOperationType.WRITE) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='add_did_to_followed', kwargs={'scope': scope, 'name': name, 'account': account}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot follow data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         return did.add_did_to_followed(scope=internal_scope, name=name, account=internal_account, session=session)
 
 
 def add_dids_to_followed(
+    issuer: str,
     dids: 'Iterable[Mapping[str, Any]]',
     account: str,
     vo: str = DEFAULT_VO
@@ -828,15 +960,24 @@ def add_dids_to_followed(
     """
     Bulk mark datasets as followed
 
+    :param issuer: The issuer account.
     :param dids: A list of DIDs.
     :param account: The account owner.
     """
+    dids = list(dids)  # Convert to list to allow multiple iterations
     internal_account = InternalAccount(account, vo=vo)
     with db_session(DatabaseOperationType.WRITE) as session:
+        for entry in dids:
+            if role.is_rbac_enabled():
+                auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='add_did_to_followed', kwargs={'scope': str(entry['scope']), 'name': entry['name'], 'account': account}, session=session)
+                if not auth_result.allowed:
+                    raise AccessDenied('Account %s cannot follow data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, entry['scope'], entry['name']))
+
         return did.add_dids_to_followed(dids=dids, account=internal_account, session=session)
 
 
 def get_users_following_did(
+    issuer: str,
     name: str,
     scope: str,
     vo: str = DEFAULT_VO
@@ -844,11 +985,17 @@ def get_users_following_did(
     """
     Return list of users following a DID
 
+    :param issuer: The issuer account.
     :param scope: The scope name.
     :param name: The data identifier name.
     """
     internal_scope = InternalScope(scope, vo=vo)
     with db_session(DatabaseOperationType.READ) as session:
+        if role.is_rbac_enabled():
+            auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='get_users_following_did', kwargs={'scope': scope, 'name': name}, session=session)
+            if not auth_result.allowed:
+                raise AccessDenied('Account %s cannot list the followers of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
+
         users = did.get_users_following_did(name=name, scope=internal_scope, session=session)
         for user in users:
             user['user'] = user['user'].external
