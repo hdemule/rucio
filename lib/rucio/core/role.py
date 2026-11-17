@@ -27,18 +27,20 @@ The module is organised as follows:
 - Permission checks: tell what the roles of an account grant, e.g. :func:`has_did_permission`. The permission
   policy combines it with root and admin privileges and ownership, also to filter listings, see
   :mod:`rucio.core.permission.generic`.
+- Synchronisation: of the roles with the policy package, and of an account's roles with an IdP.
 - Cleaning: remove the expired role assignments of every account.
 """
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, TypeVar, Union, cast
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from rucio.common.config import config_get_bool
-from rucio.common.constants import ADMIN_ROLE, RESERVED_ROLES
+from rucio.common.constants import ADMIN_ROLE, DEFAULT_VO, RESERVED_ROLES
 from rucio.common.exception import (
     AccountNotFound,
     Duplicate,
@@ -52,17 +54,19 @@ from rucio.common.exception import (
     RoleReserved,
 )
 from rucio.common.schema import get_schema_value
+from rucio.common.types import InternalAccount
 from rucio.common.utils import DATE_FORMAT, str_to_date
+from rucio.core import permission
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import DidOperationType, RolePermissionOperationType, RolePermissionType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterator
 
     from sqlalchemy.orm import Session
     from sqlalchemy.sql.elements import ColumnElement
 
-    from rucio.common.types import InternalAccount, InternalScope
+    from rucio.common.types import InternalScope
 
 # Marks a date of a role assignment which is to be left as it is, see :func:`set_account_role_dates`.
 KEEP: Any = object()
@@ -173,6 +177,14 @@ def _ensure_role_exists(role: str, session: "Session") -> None:
         raise RoleNotFound("Role '%s' does not exist." % role)
 
 
+def _ensure_account_exists(account: "InternalAccount", session: "Session") -> None:
+    """
+    :raises AccountNotFound: If the account does not exist.
+    """
+    if session.execute(select(models.Account.account).where(models.Account.account == account)).scalar_one_or_none() is None:
+        raise AccountNotFound("Account '%s' does not exist." % account)
+
+
 def _ensure_unlocked(role: str, force: bool, session: "Session", action: str = "altered") -> None:
     """
     Refuse to touch a locked role, unless forced. Does nothing for a role which does not exist.
@@ -224,7 +236,7 @@ def add_role(role: str, description: Optional[str] = None, assignable: bool = Tr
     :param role: The name of the role to add.
     :param description: An optional description of the role. An empty description is stored as NULL.
     :param assignable: Whether an identity provider may assign this role to, or take it away from, an account; if not, only Rucio itself alters who holds it.
-    :param locked: Whether the role is locked, which prevents it from being altered or deleted without `force`.
+    :param locked: Whether the role is locked, which prevents a policy package from altering or deleting it.
     :param session: The database session.
     :raises RoleReserved: If the role is reserved, see `RESERVED_ROLES`.
     """
@@ -1163,6 +1175,643 @@ def has_any_scope_prefix_access(account: "InternalAccount", scope: "InternalScop
 
 
 # ----------------------------------------------------------------------------------------------
+# Synchronisation reports
+# ----------------------------------------------------------------------------------------------
+
+def _format_table(headers: list[str], rows: list[list[Any]], indent: str = "  ") -> list[str]:
+    """Render a small left-aligned table as lines, or a placeholder if there is nothing to show."""
+    if not rows:
+        return ["%s(none)" % indent]
+
+    cells = [["" if cell is None else str(cell) for cell in row] for row in rows]
+    widths = [max([len(header)] + [len(row[index]) for row in cells]) for index, header in enumerate(headers)]
+    lines = [
+        indent + " | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)),
+        indent + "-+-".join("-" * width for width in widths),
+    ]
+    lines.extend(indent + " | ".join(row[index].ljust(widths[index]) for index in range(len(headers))) for row in cells)
+    return lines
+
+
+def _print_table(headers: list[str], rows: list[list[Any]], indent: str = "  ") -> None:
+    """Print a small left-aligned table, or a placeholder if there is nothing to show."""
+    for line in _format_table(headers, rows, indent):
+        print(line)
+
+
+def _format_expires_at(expires_at: Optional[datetime]) -> str:
+    """Render the expiry date of a role assignment, 'never' if it does not expire."""
+    return "never" if expires_at is None else str(expires_at)
+
+
+# ----------------------------------------------------------------------------------------------
+# Synchronisation with the policy package
+# ----------------------------------------------------------------------------------------------
+
+def sync_roles_from_policy_package_dry_run(*, session: "Session") -> None:
+    """
+    Synchronizes the internal roles with the roles defined by the policy package.
+
+    The policy package is the source of truth for the description of the roles it defines, not
+    for their permissions or their account assignments, which are managed from within Rucio. A
+    role the policy package defines is created, as an unlocked role (`assignable` True and
+    `locked` False), if it does not exist yet, or has its description brought
+    in line with the policy package if it exists and is not locked. A locked role
+    (`locked` True) is never touched by the policy package, whether or not
+    the policy package defines it: such a role is managed entirely from within Rucio, see
+    :func:`sync_account_roles_from_idp`. A reserved role is never touched either, see `RESERVED_ROLES`.
+
+    This is a dry run: it reports what the synchronisation would do and leaves the database
+    untouched.
+
+    :param session: The database session.
+    """
+    print("Syncing roles... (dry run, nothing is written to the database)")
+
+    # Step 1: Retrieve Roles from the policy package
+    roles = permission.get_roles()
+
+    print()
+    print("Step 1: Retrieve Roles from the policy package")
+    _print_table(["ROLE", "DESCRIPTION"], [[role, definition.get("description") or ""] for role, definition in sorted(roles.items())])
+
+    # Step 2: Retrieve all roles currently known to Rucio
+    current = {entry["role"]: entry for entry in list_roles(session=session)}
+
+    print()
+    print("Step 2: Retrieve all roles known to Rucio")
+    _print_table(
+        ["ROLE", "DESCRIPTION", "LOCKED"],
+        [[role, entry["description"] or "", "yes" if entry["locked"] else "no"] for role, entry in sorted(current.items())],
+    )
+
+    print()
+    print("Step 3: What the synchronisation would do")
+    created, updated, unchanged, skipped_locked, skipped_reserved, deleted = 0, 0, 0, 0, 0, 0
+
+    for role in sorted(roles):
+        description = _normalize_description(roles[role].get("description"))
+
+        if is_reserved_role(role):
+            skipped_reserved += 1
+            print("  Role '%s' is reserved, so it would be left untouched." % role)
+            continue
+
+        if role not in current:
+            created += 1
+            print("  Role '%s' does not exist yet, so it would be created with description %r." % (role, description))
+            continue
+
+        if current[role]["locked"]:
+            skipped_locked += 1
+            print("  Role '%s' is locked, so it would be left untouched." % role)
+            continue
+
+        if current[role]["description"] != description:
+            updated += 1
+            print("  Role '%s': description would change from %r to %r." % (role, current[role]["description"], description))
+        else:
+            unchanged += 1
+            print("  Role '%s' is already in line with the policy package." % role)
+
+    # a role which is not locked and which the policy package does not define goes, including
+    # one that was created by hand through the CLI; a locked role is out of the policy
+    # package's reach entirely, so it is left untouched even if the policy package does not define it
+    for role in sorted(set(current) - set(roles)):
+        if is_reserved_role(role):
+            skipped_reserved += 1
+            print("  Role '%s' is not defined by the policy package but is reserved, so it would be left untouched." % role)
+        elif current[role]["locked"]:
+            skipped_locked += 1
+            print("  Role '%s' is not defined by the policy package but is locked, so it would be left untouched." % role)
+        else:
+            deleted += 1
+            print("  Role '%s' is not defined by the policy package, so it would be deleted." % role)
+
+    print()
+    print("Summary: would create %d role(s), update %d, delete %d, leave %d unchanged, leave %d locked and %d reserved role(s) untouched."
+          % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved))
+
+
+def sync_roles_from_policy_package(*, session: "Session") -> None:
+    """
+    Synchronize the internal roles with the roles defined by the policy package.
+
+    The policy package is the source of truth for the description of the roles it defines, not
+    for their permissions or their account assignments, which are managed from within Rucio. A
+    role the policy package defines is created, as an unlocked role (`assignable` True and
+    `locked` False), if it does not exist yet, or has its description brought
+    in line with the policy package if it exists and is not locked. A locked role
+    (`locked` True) is never touched here, whether or not the policy
+    package defines it: such a role is managed entirely from within Rucio, see
+    :func:`sync_account_roles_from_idp`. Neither is a reserved role, see `RESERVED_ROLES`.
+    A role which is not locked and which the policy
+    package does not define is deleted, together with its permissions and account assignments.
+
+    The whole synchronisation is a single transaction, so either all of it is applied or none of
+    it is. See :func:`sync_roles_from_policy_package_dry_run` to report the changes instead of
+    applying them.
+
+    :param session: The database session.
+    """
+    print("Syncing the roles with the policy package...")
+
+    # Step 1: Retrieve Roles from the policy package
+    roles = permission.get_roles()
+
+    # Step 2: Retrieve all roles currently known to Rucio
+    current = {entry["role"]: entry for entry in list_roles(session=session)}
+
+    created, updated, unchanged, skipped_locked, skipped_reserved, deleted = 0, 0, 0, 0, 0, 0
+    revoked, unassigned = 0, 0
+
+    try:
+        # Step 3: Create the roles of the policy package and bring the existing, unlocked
+        # ones in line with it. A locked or reserved role is left untouched.
+        for role in sorted(roles):
+            description = _normalize_description(roles[role].get("description"))
+
+            if is_reserved_role(role):
+                skipped_reserved += 1
+                print("  Role '%s' is reserved, so it is left untouched." % role)
+                continue
+
+            if role not in current:
+                session.add(models.Roles(role=role, description=description, assignable=True, locked=False))
+                created += 1
+                print("  Role '%s' created with description %r." % (role, description))
+                continue
+
+            if current[role]["locked"]:
+                skipped_locked += 1
+                print("  Role '%s' is locked, so it is left untouched." % role)
+                continue
+
+            if current[role]["description"] != description:
+                session.execute(update(models.Roles).where(models.Roles.role == role).values(description=description))
+                updated += 1
+                print("  Role '%s': description changed from %r to %r." % (role, current[role]["description"], description))
+            else:
+                unchanged += 1
+
+        # Step 4: Delete the roles the policy package does not define any more, including the
+        # ones that were created by hand through the CLI, unless they are locked, which
+        # takes them entirely out of the policy package's reach. Neither foreign key to `roles`
+        # can be relied on to cascade, so each deleted role takes its permissions and its account
+        # assignments along explicitly.
+        for role in sorted(set(current) - set(roles)):
+            if is_reserved_role(role):
+                skipped_reserved += 1
+                print("  Role '%s' is not defined by the policy package but is reserved, so it is left untouched." % role)
+                continue
+
+            if current[role]["locked"]:
+                skipped_locked += 1
+                print("  Role '%s' is not defined by the policy package but is locked, so it is left untouched." % role)
+                continue
+
+            role_unassigned = _remove_accounts_from_role(role, session=session)
+            deleted += 1
+            unassigned += role_unassigned
+            print("  Role '%s' is not defined by the policy package, so it was deleted with its %d account assignment(s)."
+                  % (role, role_unassigned))
+
+        session.commit()
+    except Exception:
+        session.rollback()
+        print("  The synchronisation failed, so nothing reported above was applied.")
+        raise
+
+    print()
+    print("Summary: created %d role(s), updated %d, deleted %d, left %d unchanged, left %d locked and %d reserved role(s) untouched; removed %d permission(s) and %d account assignment(s) with the deleted roles."
+          % (created, updated, deleted, unchanged, skipped_locked, skipped_reserved, revoked, unassigned))
+
+
+# ----------------------------------------------------------------------------------------------
+# Synchronisation with an IdP
+# ----------------------------------------------------------------------------------------------
+
+def _parse_idp_roles(roles: Any) -> dict[str, Optional[datetime]]:
+    """
+    Normalise the roles supplied by an IdP into a mapping of role name to expiry date.
+
+    Accepted forms are a mapping of role name to expiry date, or an iterable of role names
+    and/or dictionaries carrying a 'role' (or 'name') and an optional 'expires_at'. An
+    expiry date of None means that the assignment does not expire.
+
+    :param roles: The roles as supplied by the IdP.
+    :returns: The expiry date of each role the account should hold.
+    :raises InputValidationError: If the roles are not in one of the accepted forms.
+    """
+    if roles is None:
+        return {}
+
+    if isinstance(roles, Mapping):
+        return {str(role): _normalize_date(expires_at, "expires_at") for role, expires_at in roles.items()}
+
+    if isinstance(roles, (str, bytes)) or not isinstance(roles, Iterable):
+        raise InputValidationError("The roles supplied by the IdP must be a mapping or a list, got '%s'." % type(roles).__name__)
+
+    parsed: dict[str, Optional[datetime]] = {}
+    for entry in roles:
+        if isinstance(entry, str):
+            parsed[entry.strip()] = None
+            continue
+
+        if not isinstance(entry, Mapping):
+            raise InputValidationError("The role %r supplied by the IdP is neither a name nor a mapping." % (entry,))
+
+        role = entry.get("role", entry.get("name"))
+        if not isinstance(role, str) or not role.strip():
+            raise InputValidationError("The role %r supplied by the IdP has no name." % (entry,))
+
+        parsed[role.strip()] = _normalize_date(entry.get("expires_at"), "expires_at")
+
+    return parsed
+
+
+def _not_assignable(role: str, known_roles: dict[str, Any]) -> bool:
+    """
+    Tell whether a role is not assignable. False for a role which does not exist.
+
+    The assignments of such a role may only be altered from within Rucio: an identity
+    provider can neither have it assigned to an account nor taken away from one.
+    """
+    entry = known_roles.get(role)
+    return bool(entry) and not entry["assignable"]
+
+
+def _format_assignable(role: str, known_roles: dict[str, Any]) -> str:
+    """Render whether a role is assignable, '-' if the role does not exist."""
+    if role not in known_roles:
+        return "-"
+    return "no" if _not_assignable(role, known_roles) else "yes"
+
+
+def _new_sync_report(
+        account: "InternalAccount",
+        dry_run: bool,
+        now: datetime,
+        desired: dict[str, Optional[datetime]],
+        current: dict[str, Optional[datetime]],
+        activations: dict[str, datetime],
+        known_roles: dict[str, Any]) -> dict[str, Any]:
+    """
+    Start the report of a synchronisation of an account's roles with an IdP.
+
+    The report is what :func:`sync_account_roles_from_idp` and its dry run return:
+
+    - `account`, `dry_run`, `synced_at`: which account was synchronised, whether anything was
+      written, and the time against which expiry dates were compared.
+    - `supplied`: the roles supplied by the IdP, with their expiry date, whether Rucio knows them
+      and whether they are assignable (None for a role Rucio does not know).
+    - `current`: the roles the account held before the synchronisation, with their activation date.
+    - `removed_expired`, `removed_unsupplied`, `added`, `updated`, `unchanged`: what was (or, in a
+      dry run, would be) done to the assignments of the account.
+    - `held_back`: the roles whose assignment was left alone because they are not assignable,
+      each with the reason.
+    - `ignored_expired`: the roles the IdP supplies with an expiry date which has already passed, or
+      which is not after the activation date of the account's assignment.
+    - `unknown`: the roles the IdP supplies which do not exist in Rucio.
+    - `messages`: the human-readable account of the synchronisation, line by line.
+    - `summary`: a one-line summary of the synchronisation.
+    """
+    def _assignable(role: str) -> Optional[bool]:
+        return None if role not in known_roles else not _not_assignable(role, known_roles)
+
+    return {
+        "account": account.external,
+        "dry_run": dry_run,
+        "synced_at": now,
+        "supplied": [
+            {"role": role, "expires_at": expires_at, "known": role in known_roles, "assignable": _assignable(role)}
+            for role, expires_at in sorted(desired.items())
+        ],
+        "current": [
+            {"role": role, "activates_at": activations[role], "expires_at": expires_at, "assignable": _assignable(role)}
+            for role, expires_at in sorted(current.items())
+        ],
+        "removed_expired": [],
+        "removed_unsupplied": [],
+        "added": [],
+        "updated": [],
+        "unchanged": [],
+        "held_back": [],
+        "ignored_expired": [],
+        "unknown": [],
+        "messages": [],
+        "summary": "",
+    }
+
+
+def _hold_back(report: dict[str, Any], known_roles: dict[str, Any], role: str, message: str) -> bool:
+    """
+    Tell whether a role not being assignable keeps a change from being applied, and record
+    it in the report the first time, so that the same role is not mentioned once per step.
+    """
+    if not _not_assignable(role, known_roles):
+        return False
+    if all(entry["role"] != role for entry in report["held_back"]):
+        report["held_back"].append({"role": role, "reason": message.strip()})
+        report["messages"].append(message)
+    return True
+
+
+def _sync_summary(report: dict[str, Any]) -> str:
+    """Summarise a synchronisation of an account's roles with an IdP in one line."""
+    removed = len(report["removed_expired"]) + len(report["removed_unsupplied"])
+    if report["dry_run"]:
+        template = ("Summary: would remove %d assignment(s) (%d expired, %d no longer supplied), add %d, change the expiry date of %d, leave %d unchanged; "
+                    "%d role(s) held back because they are not assignable; %d role(s) supplied by the IdP with an already expired date, or one not after the activation date, ignored; %d role(s) supplied by the IdP are unknown to Rucio.")
+    else:
+        template = ("Summary: removed %d assignment(s) (%d expired, %d no longer supplied), added %d, changed the expiry date of %d, left %d unchanged; "
+                    "%d role(s) held back because they are not assignable; %d role(s) supplied by the IdP with an already expired date, or one not after the activation date, ignored; %d role(s) supplied by the IdP are unknown to Rucio.")
+    return template % (
+        removed, len(report["removed_expired"]), len(report["removed_unsupplied"]), len(report["added"]), len(report["updated"]),
+        len(report["unchanged"]), len(report["held_back"]), len(report["ignored_expired"]), len(report["unknown"]),
+    )
+
+
+def sync_account_roles_from_idp_dry_run(account: Union[str, "InternalAccount"], roles: Any, vo: str = DEFAULT_VO, *, session: "Session") -> dict[str, Any]:
+    """
+    Synchronize an account's role assignments with roles supplied by an IdP.
+
+    A role which is not assignable is off limits to the identity provider: it is neither
+    assigned to nor removed from an account here, and its expiry date is left as it is. Only
+    Rucio itself can alter who holds such a role.
+
+    Assignments of the account which have expired are removed. A role the IdP supplies with an
+    expiry date which has already passed is ignored, whether the account holds it or not: it is
+    neither assigned nor has its expiry date overwritten with a date in the past. Likewise, the
+    expiry date of an assignment is not overwritten with a date which is not after its activation
+    date. A role the IdP has assigned is active from the synchronisation on.
+
+    This is a dry run: it reports what the synchronisation would do and leaves the database
+    untouched.
+
+    :param account: The account whose role assignments would be synchronised, as an
+                    InternalAccount or as a plain account name.
+    :param roles: The roles supplied by the IdP, in any of the forms :func:`_parse_idp_roles` accepts.
+    :param vo: The VO the account belongs to, used when the account is given by name.
+    :param session: The database session.
+    :returns: The report of what the synchronisation would do, see :func:`_new_sync_report`.
+    :raises AccountNotFound: If the account does not exist.
+    :raises InputValidationError: If the roles supplied by the IdP are not in one of the accepted forms.
+    """
+    # ! Check if the account retrieval should be done here or in a specialized cron job.
+    # ! If so, just change this function to sync one account with its roles
+
+    # an account name is accepted as well, so that a tool or a daemon does not have to build
+    # an InternalAccount of its own
+    if isinstance(account, str):
+        account = InternalAccount(account, vo=vo)
+    _ensure_account_exists(account, session)
+
+    desired = _parse_idp_roles(roles)
+    known_roles = {entry["role"]: entry for entry in list_roles(session=session)}
+    # Step 1: Retrieve the roles assigned to the account (AccountRoleAssociation)
+    account_roles = list_account_roles(account, session=session)
+    current = {entry["role"]: entry["expires_at"] for entry in account_roles}
+    activations = {entry["role"]: entry["activates_at"] for entry in account_roles}
+    # the dates are stored as naive UTC datetimes, so compare them against a naive UTC now
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    report = _new_sync_report(account, True, now, desired, current, activations, known_roles)
+    say = report["messages"].append
+
+    say("Syncing the roles of account '%s'... (dry run, nothing is written to the database)" % account)
+    say("")
+    say("Roles supplied by the IdP")
+    report["messages"].extend(_format_table(
+        ["ROLE", "EXPIRES AT", "KNOWN TO RUCIO", "ASSIGNABLE"],
+        [
+            [role, _format_expires_at(expires_at), "yes" if role in known_roles else "no", _format_assignable(role, known_roles)]
+            for role, expires_at in sorted(desired.items())
+        ],
+    ))
+
+    say("")
+    say("Step 1: Retrieve the roles assigned to the account")
+    report["messages"].extend(_format_table(
+        ["ROLE", "ACTIVATES AT", "EXPIRES AT", "ASSIGNABLE"],
+        [
+            [role, str(activations[role]), _format_expires_at(expires_at), _format_assignable(role, known_roles)]
+            for role, expires_at in sorted(current.items())
+        ],
+    ))
+
+    # Step 2: Cleaning:
+    # A role which is not assignable is skipped at every step below, since an identity
+    # provider must not alter who holds it.
+    say("")
+    say("Step 2: Cleaning, as of %s" % now)
+
+    # 2.1 Remove expired roles from the account (AccountRoleAssociation) (expires_at < now)
+    expired: set[str] = set()
+    for role, expires_at in sorted(current.items()):
+        if expires_at is None or expires_at >= now:
+            continue
+        if _hold_back(report, known_roles, role, "  2.1 Role '%s' expired at %s but is not assignable, so the assignment would be left untouched." % (role, expires_at)):
+            continue
+        expired.add(role)
+        report["removed_expired"].append({"role": role, "expires_at": expires_at})
+        say("  2.1 Role '%s' expired at %s, so the assignment would be removed." % (role, expires_at))
+
+    # what is left after 2.1 is what the remaining steps compare against
+    remaining = {role: expires_at for role, expires_at in current.items() if role not in expired}
+
+    # 2.2 Remove roles from the account that are not in the list of roles from the IDP (AccountRoleAssociation)
+    for role in sorted(set(remaining) - set(desired)):
+        if _hold_back(report, known_roles, role, "  2.2 Role '%s' is not supplied by the IdP but is not assignable, so the assignment would be kept." % role):
+            continue
+        report["removed_unsupplied"].append({"role": role, "expires_at": remaining[role]})
+        say("  2.2 Role '%s' is not supplied by the IdP, so the assignment would be removed." % role)
+
+    # A role the IdP supplies with an expiry date which has already passed is ignored in 2.3 and 2.4:
+    # assigning it, or moving an existing assignment to that date, would only produce an assignment
+    # which is expired from the start and removed again by 2.1 on the next synchronisation. The role
+    # still counts as supplied in 2.2, so an existing assignment which is still valid is kept.
+    # A new assignment activates now, so its expiry date must be strictly after now.
+    def _supplied_expired(role: str) -> bool:
+        """Tell whether the IdP supplies the role with an expiry date which has already passed."""
+        expires_at = desired[role]
+        return expires_at is not None and expires_at <= now
+
+    def _supplied_before_activation(role: str) -> bool:
+        """Tell whether the IdP supplies the role with an expiry date which is not after the activation date of the account's assignment."""
+        expires_at = desired[role]
+        return expires_at is not None and expires_at <= activations[role]
+
+    # 2.3 Add roles to the account that are in the list of roles from the IDP but not in the account's current roles (AccountRoleAssociation)
+    for role in sorted(set(desired) - set(remaining)):
+        if role not in known_roles:
+            report["unknown"].append(role)
+            say("  2.3 Role '%s' is supplied by the IdP but does not exist in Rucio, so it cannot be assigned." % role)
+            continue
+        if _hold_back(report, known_roles, role, "  2.3 Role '%s' is not assignable, so the IdP cannot have it assigned to the account." % role):
+            continue
+        if _supplied_expired(role):
+            report["ignored_expired"].append({"role": role, "expires_at": desired[role]})
+            say("  2.3 Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so it would not be assigned." % (role, desired[role]))
+            continue
+        report["added"].append({"role": role, "expires_at": desired[role]})
+        say("  2.3 Role '%s' would be assigned, expiring %s." % (role, _format_expires_at(desired[role])))
+
+    # 2.4 Update the expires_at of the roles that are in both the account's current roles and the list of roles from the IDP (AccountRoleAssociation)
+    for role in sorted(set(desired) & set(remaining)):
+        if desired[role] == remaining[role]:
+            report["unchanged"].append({"role": role, "expires_at": remaining[role]})
+            continue
+        if _hold_back(report, known_roles, role, "  2.4 Role '%s' is not assignable, so its expiry date of %s would be kept instead of %s."
+                      % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role]))):
+            continue
+        if _supplied_expired(role):
+            report["ignored_expired"].append({"role": role, "expires_at": desired[role]})
+            say("  2.4 Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so the current expiry date of %s would be kept."
+                % (role, desired[role], _format_expires_at(remaining[role])))
+            continue
+        if _supplied_before_activation(role):
+            report["ignored_expired"].append({"role": role, "expires_at": desired[role]})
+            say("  2.4 Role '%s' is supplied by the IdP with an expiry date of %s which is not after the activation date of %s, so the current expiry date of %s would be kept."
+                % (role, desired[role], activations[role], _format_expires_at(remaining[role])))
+            continue
+        report["updated"].append({"role": role, "previous_expires_at": remaining[role], "expires_at": desired[role]})
+        say("  2.4 Role '%s' would have its expiry date changed from %s to %s."
+            % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role])))
+
+    report["summary"] = _sync_summary(report)
+    say("")
+    say(report["summary"])
+    return report
+
+
+def sync_account_roles_from_idp(account: Union[str, "InternalAccount"], roles: Any, vo: str = DEFAULT_VO, *, session: "Session") -> dict[str, Any]:
+    """
+    Synchronize an account's role assignments with roles supplied by an IdP.
+
+    A role which is not assignable is off limits to the identity provider: it is neither
+    assigned to nor removed from an account here, and its expiry date is left as it is. Only
+    Rucio itself can alter who holds such a role.
+
+    Assignments of the account which have expired are removed. A role the IdP supplies with an
+    expiry date which has already passed is ignored, whether the account holds it or not: it is
+    neither assigned nor has its expiry date overwritten with a date in the past. Likewise, the
+    expiry date of an assignment is not overwritten with a date which is not after its activation
+    date. A role the IdP has assigned is active from the synchronisation on.
+
+    The whole synchronisation is a single transaction, so either all of it is applied or none of
+    it is. See :func:`sync_account_roles_from_idp_dry_run` to report the changes instead of
+    applying them.
+
+    :param account: The account whose role assignments are synchronised, as an
+                    InternalAccount or as a plain account name.
+    :param roles: The roles supplied by the IdP, in any of the forms :func:`_parse_idp_roles` accepts.
+    :param vo: The VO the account belongs to, used when the account is given by name.
+    :param session: The database session.
+    :returns: The report of what the synchronisation did, see :func:`_new_sync_report`.
+    :raises AccountNotFound: If the account does not exist.
+    :raises InputValidationError: If the roles supplied by the IdP are not in one of the accepted forms.
+    """
+    if isinstance(account, str):
+        account = InternalAccount(account, vo=vo)
+    _ensure_account_exists(account, session)
+
+    desired = _parse_idp_roles(roles)
+    known_roles = {entry["role"]: entry for entry in list_roles(session=session)}
+    account_roles = list_account_roles(account, session=session)
+    current = {entry["role"]: entry["expires_at"] for entry in account_roles}
+    activations = {entry["role"]: entry["activates_at"] for entry in account_roles}
+
+    # the dates are stored as naive UTC datetimes, so compare them against a naive UTC now
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    report = _new_sync_report(account, False, now, desired, current, activations, known_roles)
+    say = report["messages"].append
+    say("Syncing the roles of account '%s'..." % account)
+
+    def _delete_assignment(role: str) -> None:
+        session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.account == account, models.AccountRoleAssociation.role == role))
+
+    try:
+        # Step 1: Remove the expired roles from the account (expires_at < now)
+        expired: set[str] = set()
+        for role, expires_at in sorted(current.items()):
+            if expires_at is None or expires_at >= now:
+                continue
+            if _hold_back(report, known_roles, role, "  Role '%s' expired at %s but is not assignable, so the assignment is left untouched." % (role, expires_at)):
+                continue
+            _delete_assignment(role)
+            expired.add(role)
+            report["removed_expired"].append({"role": role, "expires_at": expires_at})
+            say("  Role '%s' expired at %s, so the assignment was removed." % (role, expires_at))
+
+        remaining = {role: expires_at for role, expires_at in current.items() if role not in expired}
+
+        # Step 2: Remove the roles which the IdP does not supply
+        for role in sorted(set(remaining) - set(desired)):
+            if _hold_back(report, known_roles, role, "  Role '%s' is not supplied by the IdP but is not assignable, so the assignment is kept." % role):
+                continue
+            _delete_assignment(role)
+            report["removed_unsupplied"].append({"role": role, "expires_at": remaining[role]})
+            say("  Role '%s' is not supplied by the IdP, so the assignment was removed." % role)
+
+        # Step 3: Assign the roles which the IdP supplies and the account does not hold
+        for role in sorted(set(desired) - set(remaining)):
+            expires_at = desired[role]
+            if role not in known_roles:
+                report["unknown"].append(role)
+                say("  Role '%s' is supplied by the IdP but does not exist in Rucio, so it cannot be assigned." % role)
+                continue
+            if _hold_back(report, known_roles, role, "  Role '%s' is not assignable, so the IdP cannot have it assigned to the account." % role):
+                continue
+            # the new assignment activates now, so its expiry date must be strictly after now
+            if expires_at is not None and expires_at <= now:
+                report["ignored_expired"].append({"role": role, "expires_at": expires_at})
+                say("  Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so it was not assigned." % (role, expires_at))
+                continue
+            session.add(models.AccountRoleAssociation(account=account, role=role, activates_at=now, expires_at=expires_at))
+            report["added"].append({"role": role, "expires_at": expires_at})
+            say("  Role '%s' assigned, expiring %s." % (role, _format_expires_at(expires_at)))
+
+        # Step 4: Update the expiry date of the roles which both the IdP supplies and the account holds
+        for role in sorted(set(desired) & set(remaining)):
+            if desired[role] == remaining[role]:
+                report["unchanged"].append({"role": role, "expires_at": remaining[role]})
+                continue
+            if _hold_back(report, known_roles, role, "  Role '%s' is not assignable, so its expiry date of %s is kept instead of %s."
+                          % (role, _format_expires_at(remaining[role]), _format_expires_at(desired[role]))):
+                continue
+            expires_at = desired[role]
+            if expires_at is not None and expires_at <= now:
+                report["ignored_expired"].append({"role": role, "expires_at": expires_at})
+                say("  Role '%s' is supplied by the IdP with an expiry date of %s which has already passed, so the current expiry date of %s is kept."
+                    % (role, expires_at, _format_expires_at(remaining[role])))
+                continue
+            if expires_at is not None and expires_at <= activations[role]:
+                report["ignored_expired"].append({"role": role, "expires_at": expires_at})
+                say("  Role '%s' is supplied by the IdP with an expiry date of %s which is not after the activation date of %s, so the current expiry date of %s is kept."
+                    % (role, expires_at, activations[role], _format_expires_at(remaining[role])))
+                continue
+            session.execute(
+                update(models.AccountRoleAssociation)
+                .where(models.AccountRoleAssociation.account == account, models.AccountRoleAssociation.role == role)
+                .values(expires_at=expires_at)
+            )
+            report["updated"].append({"role": role, "previous_expires_at": remaining[role], "expires_at": expires_at})
+            say("  Role '%s' had its expiry date changed from %s to %s." % (role, _format_expires_at(remaining[role]), _format_expires_at(expires_at)))
+
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+    report["summary"] = _sync_summary(report)
+    say("")
+    say(report["summary"])
+    return report
+
+
+# ----------------------------------------------------------------------------------------------
 # Cleaning of expired assignments
 # ----------------------------------------------------------------------------------------------
 
@@ -1171,8 +1820,8 @@ def clean_expired_account_roles(dry_run: bool = False, *, session: "Session") ->
     Remove the expired role assignments of every account.
 
     An expired assignment grants nothing, but it stays in the database until the assignment is
-    removed, which may never happen. This removes all of them at once, whatever the role, since it
-    is Rucio itself that does it.
+    removed or the account is synchronised with its IdP again, which may never happen. This removes
+    all of them at once, whatever the role, since it is Rucio itself, and not an IdP, that does it.
 
     :param dry_run: Only report what would be removed, without writing to the database.
     :param session: The database session.
