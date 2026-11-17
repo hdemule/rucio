@@ -64,8 +64,9 @@ def _db(function: Callable[..., Any], *args, **kwargs) -> Any:
 
 @pytest.fixture
 def rbac_enabled(monkeypatch):
-    """Enable RBAC for the test only."""
+    """Enable RBAC for the test only, without any filter disabled by the policy package of the instance."""
     monkeypatch.setattr(core_role, 'is_rbac_enabled', lambda: True)
+    monkeypatch.setattr(core_role, 'is_filter_disabled', lambda account, filter_name, *, session: False)
 
 
 @pytest.fixture
