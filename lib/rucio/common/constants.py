@@ -30,6 +30,14 @@ RESERVED_KEYS = ['scope', 'name', 'account', 'did_type', 'is_open', 'monotonic',
 
 DEFAULT_VO = 'def'
 
+# Roles managed by Rucio itself, mapped to their description: they can only be created by
+# `rucio.core.role.setup_reserved_roles`, always locked and not assignable, and then never be
+# deleted nor altered, except for their assignable state.
+ADMIN_ROLE = 'admin'
+RESERVED_ROLES = {
+    ADMIN_ROLE: 'Rucio administrator.',
+}
+
 DEFAULT_ACTIVITY = 'User Subscriptions'
 
 KEY_TYPES = ['ALL', 'COLLECTION', 'FILE', 'DERIVED']

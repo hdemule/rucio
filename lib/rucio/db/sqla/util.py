@@ -33,7 +33,7 @@ from sqlalchemy.sql.expression import select, text
 from rucio import alembicrevision
 from rucio.common.cache import MemcacheRegion
 from rucio.common.config import config_get, config_get_list
-from rucio.common.constants import DEFAULT_VO
+from rucio.common.constants import DEFAULT_VO, RESERVED_ROLES
 from rucio.common.schema import get_schema_value
 from rucio.common.types import InternalAccount, LoggerFunction
 from rucio.common.utils import generate_uuid
@@ -71,6 +71,12 @@ def build_database() -> None:
             print('Cannot create schema, please validate manually if schema creation is needed, continuing:', e)
 
     models.register_models(engine)
+
+    # The reserved roles come with the schema, as they do with the migration adding the RBAC tables
+    session_scoped = get_session()
+    session_scoped.add_all([models.Roles(role=role, description=description, assignable=False, locked=True)
+                            for role, description in RESERVED_ROLES.items()])
+    session_scoped.commit()
 
     # Put the database under version control
     alembic_cfg = Config(config_get('alembic', 'cfg'))
