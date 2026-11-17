@@ -31,6 +31,24 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 
+# the filters of `list_dids` naming a key other than their own, see `rucio.core.did_meta_plugins.filter_engine`
+_FILTER_KEY_ALIASES = {'created_after': 'created_at', 'created_before': 'created_at'}
+
+
+def _filtered_metadata_keys(filters: 'Iterable[dict[Any, Any]]') -> set[str]:
+    """
+    The metadata keys the filters of `list_dids` look at, without their operator suffix (e.g. 'length' for 'length.gt').
+
+    :param filters: The filters, as OR groups of key-value pairs, see `rucio.core.did_meta_plugins.filter_engine.FilterEngine`.
+    """
+    keys = set()
+    for or_group in filters:
+        for key in or_group:
+            key = str(key).split('.')[0]
+            keys.add(_FILTER_KEY_ALIASES.get(key, key))
+    return keys
+
+
 def list_dids(
     issuer: str,
     scope: str,
@@ -64,6 +82,8 @@ def list_dids(
             or_group['account'] = InternalAccount(or_group['account'], vo=vo)
         if 'scope' in or_group:
             or_group['scope'] = InternalScope(or_group['scope'], vo=vo)
+    # read before the core turns some of them into others, e.g. 'created_after' into 'created_at.gte'
+    filtered_keys = _filtered_metadata_keys(filters)
 
     with db_session(DatabaseOperationType.READ) as session:
         auth_result = rucio.gateway.permission.has_permission(issuer=issuer, vo=vo, action='list_dids', kwargs={'scope': scope}, session=session)
@@ -78,16 +98,20 @@ def list_dids(
 
         internal_issuer = InternalAccount(issuer, vo=vo)
         can_access = role.did_access_checker(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_dids', session=session))
+        key_filter = role.metadata_key_filter(account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled())
 
         for d in result:
             # the bare names of the short format are those of the listed scope
             did_scope, did_name = (d['scope'], d['name']) if isinstance(d, dict) else (internal_scope, d)
             if not can_access(did_scope, did_name):
                 continue
+            # a DID matching filters on a key the account may not read would tell the value of that key
+            if filtered_keys and not key_filter.are_readable(did_scope, did_name, filtered_keys):
+                continue
             if recursive and not long:
                 yield d['name']
             else:
-                yield gateway_update_return_dict(d, session=session)
+                yield gateway_update_return_dict(key_filter.project(did_scope, did_name, d) if isinstance(d, dict) else d, session=session)
 
 
 def add_did(
@@ -393,7 +417,8 @@ def list_content(
             raise AccessDenied('Account %s cannot list content of data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         dids = did.list_content(scope=internal_scope, name=name, session=session)
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_content', session=session)):
+        dids = role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_content', session=session))
+        for d in role.filter_iterable_by_metadata_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -422,7 +447,8 @@ def list_content_history(
 
         dids = did.list_content_history(scope=internal_scope, name=name, session=session)
 
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_content_history', session=session)):
+        dids = role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_content_history', session=session))
+        for d in role.filter_iterable_by_metadata_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -455,7 +481,8 @@ def bulk_list_files(
             did_['scope'] = InternalScope(did_['scope'], vo=vo)
 
         files = did.bulk_list_files(dids=dids, long=long, session=session)
-        for file_ in role.filter_iterable_by_did_access(files, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'bulk_list_files', session=session)):
+        files = role.filter_iterable_by_did_access(files, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'bulk_list_files', session=session))
+        for file_ in role.filter_iterable_by_metadata_access(files, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(file_, session=session)
 
 
@@ -487,7 +514,8 @@ def list_files(
 
         dids = did.list_files(scope=internal_scope, name=name, long=long, session=session)
 
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_files', session=session)):
+        dids = role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_files', session=session))
+        for d in role.filter_iterable_by_metadata_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
@@ -553,7 +581,8 @@ def get_did(issuer: str, scope: str, name: str, dynamic_depth: Optional[DIDType]
             raise AccessDenied('Account %s cannot retrieve information about data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         d = did.get_did(scope=internal_scope, name=name, dynamic_depth=dynamic_depth, session=session)
-        return gateway_update_return_dict(d, session=session)
+        key_filter = role.metadata_key_filter(account=InternalAccount(issuer, vo=vo), session=session, skip_filtering=not role.is_rbac_enabled())
+        return gateway_update_return_dict(key_filter.project(internal_scope, name, d), session=session)
 
 
 def set_metadata(
@@ -677,7 +706,8 @@ def get_metadata(
             raise AccessDenied('Account %s cannot retrieve metadata about data identifier %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         d = did.get_metadata(scope=internal_scope, name=name, plugin=plugin, session=session)
-        return gateway_update_return_dict(d, session=session)
+        key_filter = role.metadata_key_filter(account=InternalAccount(issuer, vo=vo), session=session, skip_filtering=not role.is_rbac_enabled())
+        return gateway_update_return_dict(key_filter.project(internal_scope, name, d), session=session)
 
 
 def get_metadata_bulk(
@@ -710,7 +740,7 @@ def get_metadata_bulk(
             entry['scope'] = InternalScope(entry['scope'], vo=vo)
 
         meta = did.get_metadata_bulk(dids, inherit=inherit, plugin=plugin, session=session)
-        for met in meta:
+        for met in role.filter_iterable_by_metadata_access(meta, account=InternalAccount(issuer, vo=vo), session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(met, session=session)
 
 
@@ -908,7 +938,8 @@ def list_archive_content(
             raise AccessDenied('Account %s cannot list content of archive %s:%s. Either the requested scope does not exist or the account lacks required permissions.' % (issuer, scope, name))
 
         dids = did.list_archive_content(scope=internal_scope, name=name, session=session)
-        for d in role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_archive_content', session=session)):
+        dids = role.filter_iterable_by_did_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled() or role.is_filter_disabled(internal_issuer, 'list_archive_content', session=session))
+        for d in role.filter_iterable_by_metadata_access(dids, account=internal_issuer, session=session, skip_filtering=not role.is_rbac_enabled()):
             yield gateway_update_return_dict(d, session=session)
 
 
