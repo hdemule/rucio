@@ -1,0 +1,433 @@
+# Copyright European Organization for Nuclear Research (CERN) since 2012
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from json import loads
+from typing import TYPE_CHECKING, Any, Optional, Union
+from urllib.parse import quote_plus
+
+from requests.status_codes import codes
+
+from rucio.client.baseclient import BaseClient, choice
+from rucio.common.constants import ISSUER_ACCOUNT_ALIAS, RBAC_WARNING_HEADER, HTTPMethod
+from rucio.common.utils import build_url, render_json
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from datetime import datetime
+
+
+class RoleClient(BaseClient):
+    ROLES_BASEURL = "roles"
+
+    def _send_request(self, *args, **kwargs):
+        """
+        Send a request to the server, see :meth:`BaseClient._send_request`, and log the warning it may return, e.g. when RBAC is disabled.
+
+        Each warning is logged once per client, so that a command sending several requests does not repeat it.
+        """
+        response = super()._send_request(*args, **kwargs)
+        warning = response.headers.get(RBAC_WARNING_HEADER) if response is not None else None
+        if warning:
+            logged = self.__dict__.setdefault('_logged_warnings', set())
+            if warning not in logged:
+                logged.add(warning)
+                self.logger.warning(warning)
+        return response
+
+    def get_rbac_status(self) -> bool:
+        """
+        Tell whether role-based access control is enabled on the server. If it is not, the server warning is logged as for any role request.
+
+        Returns
+        -------
+            True if RBAC is enabled.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/status")
+        response = self._send_request(url, method=HTTPMethod.GET)
+
+        if response.status_code == codes.ok:
+            return loads(response.text)['enabled']
+
+        exc_cls, exc_msg = self._get_exception(
+            headers=response.headers,
+            status_code=response.status_code,
+            data=response.content,
+        )
+        raise exc_cls(exc_msg)
+
+    def list_roles(self) -> list[dict[str, Any]]:
+        """
+        List all roles.
+
+        Returns
+        -------
+            A list of dictionaries, one per role, with the keys `role`, `description`,
+            `assignable`, `locked` and `reserved`. `description` is None for roles
+            without a description.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/")
+        response = self._send_request(url, method=HTTPMethod.GET)
+
+        if response.status_code == codes.ok:
+            return loads(response.text)
+
+        exc_cls, exc_msg = self._get_exception(
+            headers=response.headers,
+            status_code=response.status_code,
+            data=response.content,
+        )
+        raise exc_cls(exc_msg)
+
+    def add_role(
+            self,
+            role: str,
+            description: Optional[str] = None,
+            assignable: bool = True,
+            locked: bool = False) -> None:
+        """
+        Add a new role.
+
+        Parameters
+        ----------
+        role :
+            The name of the role to add.
+        description :
+            An optional description of the role. An empty description is stored as NULL.
+        assignable :
+            Whether an identity provider may assign this role to, or take it away from, an account.
+        locked :
+            Whether the role is locked, which prevents it from being altered or deleted without `force`.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
+        data = render_json(description=description, assignable=assignable, locked=locked)
+        response = self._send_request(url, method=HTTPMethod.POST, data=data)
+
+        if response.status_code == codes.created:
+            return
+
+        exc_cls, exc_msg = self._get_exception(
+            headers=response.headers,
+            status_code=response.status_code,
+            data=response.content,
+        )
+        raise exc_cls(exc_msg)
+
+    def update_role(
+            self,
+            role: str,
+            description: Optional[str] = None,
+            assignable: Optional[bool] = None,
+            locked: Optional[bool] = None,
+            force: bool = False) -> None:
+        """
+        Update an existing role. Only the parameters explicitly given are changed.
+
+        Parameters
+        ----------
+        role :
+            The role to update.
+        description :
+            The new description, or None to leave it untouched. An empty string clears it.
+        assignable :
+            The new assignable state, or None to leave it untouched.
+        locked :
+            The new locked state, or None to leave it untouched.
+        force :
+            Change the description or the assignable state even if the role is locked.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
+        data = render_json(description=description, assignable=assignable, locked=locked, force=force)
+        response = self._send_request(url, method=HTTPMethod.PUT, data=data)
+
+        if response.status_code == codes.ok:
+            return
+
+        exc_cls, exc_msg = self._get_exception(
+            headers=response.headers,
+            status_code=response.status_code,
+            data=response.content,
+        )
+        raise exc_cls(exc_msg)
+
+    def delete_role(self, role: str, force: bool = False) -> None:
+        """
+        Delete a role.
+
+        Parameters
+        ----------
+        role :
+            The role to delete.
+        force :
+            Also remove the role from every account it is assigned to and drop its permissions,
+            instead of refusing to delete a role which is still in use, and delete it even if it is locked.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}")
+        data = render_json(force=force) if force else None
+        response = self._send_request(url, method=HTTPMethod.DELETE, data=data)
+
+        if response.status_code == codes.ok:
+            return
+
+        exc_cls, exc_msg = self._get_exception(
+            headers=response.headers,
+            status_code=response.status_code,
+            data=response.content,
+        )
+        raise exc_cls(exc_msg)
+
+    def list_role_permissions(self, role: str) -> list[dict[str, Any]]:
+        """
+        List the permissions of a role, of every type.
+
+        Returns
+        -------
+            A list of dictionaries, one per permission, with its `type` and, in the shape it is granted with
+            (see `add_role_permission`): a `did_pattern` and its list of `operations`, possibly empty, for a 'did' permission.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions")
+        response = self._send_request(url, method=HTTPMethod.GET)
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def list_role_accounts(self, role: str) -> list[dict[str, Any]]:
+        """
+        List the accounts a role is assigned to.
+
+        Parameters
+        ----------
+        role :
+            The role to list the accounts of.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One entry per account, with its `account` name and the `activates_at` and `expires_at` of the assignment
+            (`expires_at` is None if it does not expire).
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/accounts")
+        response = self._send_request(url, method=HTTPMethod.GET)
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def list_account_roles(self, account: Optional[str] = None, use_issuer_account: bool = False, detail: bool = False) -> dict[str, Any]:
+        # the server replaces the alias with the issuer's account
+        account = ISSUER_ACCOUNT_ALIAS if use_issuer_account else account
+        if not account:
+            raise ValueError('Either an account or use_issuer_account must be given.')
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/accounts/{quote_plus(account)}")
+        response = self._send_request(url, method=HTTPMethod.GET, params={'detail': str(detail).lower()})
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def add_account_role(
+            self,
+            account: str,
+            role: str,
+            expires_at: Optional[Union[str, "datetime"]] = None,
+            force: bool = False,
+            activates_at: Optional[Union[str, "datetime"]] = None) -> None:
+        """
+        Assign a role to an account.
+
+        Parameters
+        ----------
+        account :
+            The account to assign the role to.
+        role :
+            The role to assign.
+        expires_at :
+            An optional date at which the assignment expires. None means that it does not expire.
+        force :
+            Assign the role even if it is not assignable.
+        activates_at :
+            An optional date from which the assignment grants the role. None means from now on.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/accounts/{quote_plus(account)}")
+        data = render_json(expires_at=expires_at, activates_at=activates_at, force=force) if expires_at is not None or activates_at is not None or force else None
+        response = self._send_request(url, method=HTTPMethod.POST, data=data)
+        if response.status_code != codes.created:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
+    def set_account_role_expires_at(self, account: str, role: str, expires_at: Optional[Union[str, "datetime"]]) -> None:
+        """
+        Overwrite the expiry date of a role assigned to an account.
+
+        Parameters
+        ----------
+        account :
+            The account the role is assigned to.
+        role :
+            The role to set the `expires_at` of.
+        expires_at :
+            The new date. None clears it, so that the assignment does not expire.
+        """
+        self._put_account_role_dates(account, role, expires_at=expires_at)
+
+    def set_account_role_activates_at(self, account: str, role: str, activates_at: Optional[Union[str, "datetime"]]) -> None:
+        """
+        Overwrite the activation date of a role assigned to an account.
+
+        Parameters
+        ----------
+        account :
+            The account the role is assigned to.
+        role :
+            The role to set the `activates_at` of.
+        activates_at :
+            The new date. None sets it to now, so that the assignment is active right away.
+        """
+        self._put_account_role_dates(account, role, activates_at=activates_at)
+
+    def set_account_role_dates(
+            self,
+            account: str,
+            role: str,
+            activates_at: Optional[Union[str, "datetime"]],
+            expires_at: Optional[Union[str, "datetime"]]) -> None:
+        """
+        Overwrite both the activation and the expiry dates of a role assigned to an account, in one go.
+
+        Use it to move the whole period of an assignment, which setting one date after the other may refuse.
+
+        Parameters
+        ----------
+        account :
+            The account the role is assigned to.
+        role :
+            The role to set the dates of.
+        activates_at :
+            The new activation date. None sets it to now.
+        expires_at :
+            The new expiry date. None clears it, so that the assignment does not expire.
+        """
+        self._put_account_role_dates(account, role, activates_at=activates_at, expires_at=expires_at)
+
+    def _put_account_role_dates(self, account: str, role: str, **dates: Optional[Union[str, "datetime"]]) -> None:
+        """Send the dates of a role assignment to overwrite. Only the dates given are changed on the server."""
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/accounts/{quote_plus(account)}")
+        response = self._send_request(url, method=HTTPMethod.PUT, data=render_json(**dates))
+        if response.status_code != codes.ok:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
+    def delete_account_role(self, account: str, role: str, force: bool = False) -> None:
+        """
+        Remove a role from an account.
+
+        Parameters
+        ----------
+        account :
+            The account to remove the role from.
+        role :
+            The role to remove.
+        force :
+            Remove the role even if it is not assignable.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/{quote_plus(role)}/accounts/{quote_plus(account)}")
+        data = render_json(force=force) if force else None
+        response = self._send_request(url, method=HTTPMethod.DELETE, data=data)
+        if response.status_code != codes.ok:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
+    def clean_expired_account_roles(self, dry_run: bool = False) -> dict[str, Any]:
+        """
+        Remove the expired role assignments of every account of the VO, whatever the role.
+
+        Parameters
+        ----------
+        dry_run :
+            Only report what would be removed, without changing anything.
+
+        Returns
+        -------
+            The report of the cleaning: the expired assignments which were (or would be) removed, each with
+            its account, role and expiry date, and a one-line summary.
+        """
+        url = build_url(choice(self.list_hosts), path=f"{self.ROLES_BASEURL}/accounts/expired")
+        response = self._send_request(url, method=HTTPMethod.DELETE, data=render_json(dry_run=dry_run))
+        if response.status_code == codes.ok:
+            return response.json()
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def add_role_permission(self, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool = False) -> None:
+        """
+        Grant a role a permission of a type.
+
+        Parameters
+        ----------
+        role :
+            The role to grant the permission to.
+        permission_type :
+            The type of the permission: 'did'.
+        parameters :
+            The target of the permission and its parameters, e.g.:
+
+            - {'did_pattern': 'data:raw*', 'operations': ['read', 'write']} for a 'did' permission, the pattern being made
+              of a scope part and a name part: every DID of the scopes matching a scope pattern ('data*:*', '*:*'), of a
+              scope ('data:*'), of a scope matching a name pattern ('data:raw*'), or a single DID ('data:raw1'). Only a
+              trailing '*' wildcard is accepted, a pattern without name part ('data', 'data*') standing for the whole
+              scope(s). The operations are 'read', 'write' and 'delete', and replace what the role has on the pattern;
+              'write' includes 'read' and 'delete' includes 'write' and 'read', and they are stored so, e.g. ['write']
+              as ['read', 'write'].
+              Within a role, the most specific pattern matching a DID decides, so an empty list withdraws the DIDs
+              the pattern matches from a less specific pattern of the role.
+        force :
+            Grant the permission even if the role is locked.
+        """
+        response = self._send_permission_request(HTTPMethod.POST, role, permission_type, parameters, force)
+        if response.status_code != codes.created:
+            exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+            raise exc_cls(exc_msg)
+
+    def delete_role_permission(self, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool = False) -> int:
+        """
+        Remove permissions of a type from a role.
+
+        Parameters
+        ----------
+        role :
+            The role to remove the permissions from.
+        permission_type :
+            The type of the permissions: 'did'.
+        parameters :
+            The target of the permissions and the parameters identifying them, e.g.:
+
+            - {'did_pattern': 'data*:*'} for a 'did' permission, given as it is listed: every operation on it is removed.
+        force :
+            Remove the permissions even if the role is locked.
+
+        Returns
+        -------
+            The number of permissions removed.
+        """
+        response = self._send_permission_request(HTTPMethod.DELETE, role, permission_type, parameters, force)
+        if response.status_code == codes.ok:
+            return response.json()['removed']
+        exc_cls, exc_msg = self._get_exception(headers=response.headers, status_code=response.status_code, data=response.content)
+        raise exc_cls(exc_msg)
+
+    def _send_permission_request(self, method: HTTPMethod, role: str, permission_type: str, parameters: "Mapping[str, Any]", force: bool):
+        """Send a request on the permissions of a type of a role, naming the permission in the body."""
+        path = f"{self.ROLES_BASEURL}/{quote_plus(role)}/permissions/{quote_plus(permission_type)}"
+        data = render_json(**parameters, **({'force': force} if force else {}))
+        return self._send_request(build_url(choice(self.list_hosts), path=path), method=method, data=data)
