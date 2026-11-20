@@ -159,10 +159,12 @@ class RolePermission(ErrorHandlingMethodView):
     meaning no cap. Granting a limit which exists already overwrites it. Removing limits takes which
     of the 'local' and 'global' ones to remove, as booleans, both being removed if none is given.
 
-    Granting a DID permission sets exactly its `operations` on the `did_pattern`, replacing what the role had on it.
-    They may be empty (`---`): within the role, the most specific pattern matching a DID decides, so such a
-    permission withdraws the DIDs it matches from a less specific pattern of the role. Removing a DID permission
-    takes only the `did_pattern`, and removes nothing (404) if the role has no permission on it.
+    Granting a DID permission sets exactly its `operations` on the `did_pattern`, replacing what the role had on it,
+    completed with those they include: "write" includes "read", and "delete" includes "write" and "read", so
+    ["write"] is stored and listed as ["read", "write"]. They may be empty (`---`): within the role, the most
+    specific pattern matching a DID decides, so such a permission withdraws the DIDs it matches from a less specific
+    pattern of the role. Removing a DID permission takes only the `did_pattern`, and removes nothing (404) if the
+    role has no permission on it.
 
     The `keys` of a metadata permission are a list or a comma-separated string, '*' standing for every key and
     no keys for none: such a permission only makes the matching DIDs visible, and only takes `["read"]`. Its
