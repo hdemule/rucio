@@ -113,6 +113,24 @@ def test_did_permission_replaces_its_operations(role_factory, db_session):
         core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operations': 'read'}, session=db_session)
 
 
+@pytest.mark.parametrize(('operations', 'stored'), [
+    ('', []),
+    ('r', ['read']),
+    ('w', ['read', 'write']),
+    ('rw', ['read', 'write']),
+    ('d', ['read', 'write', 'delete']),
+    ('wd', ['read', 'write', 'delete']),
+    ('rd', ['read', 'write', 'delete']),
+    ('rwd', ['read', 'write', 'delete']),
+])
+def test_did_operations_include_the_lower_ones(role_factory, db_session, operations, stored):
+    """ROLE DID PERMISSION (CORE): WRITE includes READ, DELETE includes WRITE and READ: a DID permission is stored with the operations its operations include."""
+    role = role_factory()
+    parameters = {'did_pattern': 'data:raw*', 'operations': [LETTERS[letter] for letter in operations]}
+    core_role.add_role_permission(role, RolePermissionType.DID, parameters, session=db_session)
+    assert core_role.list_role_permissions(role, session=db_session) == [{'type': 'did', 'did_pattern': 'data:raw*', 'operations': stored}]
+
+
 def test_did_permission_request_on_name_pattern(random_account, role_factory, db_session):
     """ROLE DID PERMISSION (CORE): A permission on a name pattern grants the DIDs it matches, not the whole scope."""
     role = role_factory(random_account)
@@ -259,13 +277,14 @@ def test_altering_existing_dids(random_account, grant, catalogue, generic, db_se
 
 def test_attaching(random_account, grant, catalogue, generic, db_session):
     """ROLE DID PERMISSION (CORE): Adding content into a collection takes WRITE on it, and READ on the attached DIDs (WRITE on the new files registered with it)."""
-    collection, readable, unreadable, new_file = ('%s_%s' % (grant.prefix, suffix) for suffix in ('ds', 'f1', 'f2', 'f3'))
+    collection, readable, unreadable, new_file, read_only_file = ('%s_%s' % (grant.prefix, suffix) for suffix in ('ds', 'f1', 'f2', 'f3', 'f4'))
     catalogue.add(collection, owner='someone else')
     catalogue.add(readable, owner='someone else')
     catalogue.add(unreadable, owner='someone else')
     grant('rbac_other:%(prefix)s_ds', 'w')
     grant('rbac_other:%(prefix)s_f1', 'r')
     grant('rbac_other:%(prefix)s_f3', 'w')
+    grant('rbac_other:%(prefix)s_f4', 'r')
 
     def attaches(name: str, registered: bool = False) -> bool:
         attachment = {'dids': [{'scope': 'rbac_other', 'name': name}], **({'rse_id': 'some-rse'} if registered else {})}
@@ -274,7 +293,7 @@ def test_attaching(random_account, grant, catalogue, generic, db_session):
     assert attaches(readable)
     assert not attaches(unreadable)
     assert attaches(new_file, registered=True)
-    assert not attaches(new_file)
+    assert not attaches(read_only_file, registered=True)
 
 
 def test_detaching(random_account, grant, catalogue, generic, db_session):
@@ -430,13 +449,13 @@ def _granted(account, name: Optional[str], db_session) -> str:
 @pytest.mark.parametrize(('rows', 'name', 'expected'), [
     ([('mock:%(prefix)s*', 'rw'), ('mock:%(prefix)s_raw*', 'r')], '%s_raw1', 'r--'),
     ([('mock:%(prefix)s*', 'rw'), ('mock:%(prefix)s_raw*', 'r')], '%s_calib1', 'rw-'),
-    ([('mock:%(prefix)s*', 'r'), ('mock:%(prefix)s_raw*', 'w')], '%s_raw1', '-w-'),
-    ([('mock:%(prefix)s_raw*', 'rw'), ('mock:%(prefix)s_raw1', 'd')], '%s_raw1', '--d'),
+    ([('mock:%(prefix)s*', 'r'), ('mock:%(prefix)s_raw*', 'w')], '%s_raw1', 'rw-'),
+    ([('mock:%(prefix)s_raw*', 'r'), ('mock:%(prefix)s_raw1', 'w')], '%s_raw1', 'rw-'),
     ([('mock:%(prefix)s_ra*', 'd'), ('mock:%(prefix)s_raw*', 'r')], '%s_raw1', 'r--'),
     ([('mock:*', 'rwd'), ('mock:%(prefix)s_tmp*', '')], '%s_tmp1', '---'),
     ([('mock:*', 'rwd'), ('mock:%(prefix)s_tmp*', '')], '%s_raw1', 'rwd'),
-    ([('mo*:*', 'r'), ('mock:*', 'w')], '%s_raw1', '-w-'),
-], ids=['narrower grants less', 'wider pattern elsewhere', 'narrower withdraws READ', 'single DID beats a name pattern', 'longer prefix wins',
+    ([('mo*:*', 'rwd'), ('mock:*', 'w')], '%s_raw1', 'rw-'),
+], ids=['narrower grants less', 'wider pattern elsewhere', 'narrower grants more', 'single DID beats a name pattern', 'longer prefix wins',
         'none withdraws everything', 'none only where it matches', 'scope beats scope pattern'])
 def test_most_specific_pattern_decides(random_account, grant, db_session, rows, name, expected):
     """ROLE DID PERMISSION (CORE): Within a role, the most specific DID pattern matching a DID decides every operation the role grants on it."""
