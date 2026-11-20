@@ -202,7 +202,7 @@ def world(make_world) -> World:
     The world of the examples of the DID permissions, in a scope 'S' owned by root:
 
     - alice: 'S:*' r; 'S:alice.*' rw; 'S:shared_ds' rw; 'S:file1' rd
-    - bob: 'S:bob.*' w (no READ anywhere)
+    - bob: 'S:bob.*' w, stored rw (READ on his DIDs only)
     - carol: 'S:calib*' r
     - DIDs owned by root: file1, calib1, shared_ds (holding alice.f1), root_ds; by alice: alice.f1, alice.up, alice.ds
       (holding alice.f1); by bob: bob.f1, bob.ds; by carol: carol_file
@@ -293,7 +293,7 @@ DID_CASES = (
          lambda w: gw_did.add_did(w.scope, 'alice.new', 'DATASET', issuer=w.alice, vo=w.vo), True),
     Case('alice cannot create a DID decided by a pattern granting r only',
          lambda w: gw_did.add_did(w.scope, 'other.new', 'DATASET', issuer=w.alice, vo=w.vo), False),
-    Case('bob creates a DID with w only, creating needs no READ',
+    Case('bob creates a DID on a pattern granting w',
          lambda w: gw_did.add_did(w.scope, 'bob.new', 'DATASET', issuer=w.bob, vo=w.vo), True),
     Case('carol cannot create a DID with r only',
          lambda w: gw_did.add_did(w.scope, 'calib2', 'DATASET', issuer=w.carol, vo=w.vo), False),
@@ -309,7 +309,7 @@ DID_CASES = (
          lambda w: gw_did.add_did(w.scope, 'alice.new', 'DATASET', issuer=w.alice, meta={'bytes': 1}, vo=w.vo), False),
     Case('alice creates a DID with a lifetime: she will own it, with WRITE on it',
          lambda w: gw_did.add_did(w.scope, 'alice.new', 'DATASET', issuer=w.alice, lifetime=3600, vo=w.vo), True),
-    Case('bob creates a DID with a lifetime: he will own it, with WRITE on it, even without READ',
+    Case('bob creates a DID with a lifetime: he will own it, with WRITE on it',
          lambda w: gw_did.add_did(w.scope, 'bob.new', 'DATASET', issuer=w.bob, lifetime=3600, vo=w.vo), True),
     Case('bob creates a DID with a lifetime in its metadata',
          lambda w: gw_did.add_did(w.scope, 'bob.new', 'DATASET', issuer=w.bob, meta={'lifetime': 3600}, vo=w.vo), True),
@@ -348,7 +348,7 @@ DID_CASES = (
          lambda w: gw_did.attach_dids(w.scope, 'alice.ds', {'rse': w.rse('X_USERDISK'), 'dids': [w.file('alice.nf')]}, issuer=w.alice, vo=w.vo), True),
     Case('alice cannot attach and register a new file she may not create',
          lambda w: gw_did.attach_dids(w.scope, 'alice.ds', {'rse': w.rse('X_USERDISK'), 'dids': [w.file('zz')]}, issuer=w.alice, vo=w.vo), False),
-    Case('bob attaches his file into his dataset, owning both with WRITE on them, even without READ',
+    Case('bob attaches his file into his dataset, owning both with WRITE on them',
          lambda w: gw_did.attach_dids(w.scope, 'bob.ds', {'dids': [w.did('bob.f1')]}, issuer=w.bob, vo=w.vo), True),
     Case('bob cannot attach a file he does not read into his dataset',
          lambda w: gw_did.attach_dids(w.scope, 'bob.ds', {'dids': [w.did('file1')]}, issuer=w.bob, vo=w.vo), False),
@@ -429,12 +429,12 @@ READ_CASES = (
     Case('carol cannot read the metadata of a DID no pattern of hers matches', lambda w: gw_did.get_metadata(w.carol, w.scope, 'file1', vo=w.vo), False),
     Case('carol cannot read her own DID without READ nor WRITE on it, even reading some DIDs of the scope',
          lambda w: gw_did.get_metadata(w.carol, w.scope, 'carol_file', vo=w.vo), False),
-    Case('bob reads his own DID, with WRITE on it, even without READ', lambda w: gw_did.get_metadata(w.bob, w.scope, 'bob.f1', vo=w.vo), True),
+    Case('bob reads his own DID, WRITE on it including READ', lambda w: gw_did.get_metadata(w.bob, w.scope, 'bob.f1', vo=w.vo), True),
     Case('carol gets a DID her pattern matches', lambda w: gw_did.get_did(w.carol, w.scope, 'calib1', vo=w.vo), True),
     Case('carol cannot list the content of a dataset she does not read', lambda w: gw_did.list_content(w.carol, w.scope, 'shared_ds', vo=w.vo), False),
     Case('carol cannot list the files of a dataset she does not read', lambda w: gw_did.list_files(w.carol, w.scope, 'shared_ds', long=False, vo=w.vo), False),
     Case('carol cannot list the parents of a DID she does not read', lambda w: gw_did.list_parent_dids(w.carol, w.scope, 'file1', vo=w.vo), False),
-    Case('bob cannot list the DIDs of a scope he reads nothing in', lambda w: gw_did.list_dids(w.bob, w.scope, [{'name': '*'}], 'all', vo=w.vo), False),
+    Case('bob lists the DIDs of a scope he reads some DIDs in, WRITE including READ', lambda w: gw_did.list_dids(w.bob, w.scope, [{'name': '*'}], 'all', vo=w.vo), True),
     Case('carol cannot list the replicas (data) of a DID she does not read', lambda w: gw_replica.list_replicas([w.did('file1')], issuer=w.carol, vo=w.vo), False),
     Case('carol lists the replicas of a DID she reads', lambda w: gw_replica.list_replicas([w.did('calib1')], issuer=w.carol, vo=w.vo), True),
     Case('carol cannot get the rules of a DID she does not read', lambda w: gw_rule.list_associated_replication_rules_for_file(w.carol, w.scope, 'file1', vo=w.vo), False),
@@ -462,6 +462,10 @@ def test_listings_are_filtered_per_did(world):
     listed = _names(gw_did.list_dids(world.alice, world.scope, [{'name': '*'}], 'all', vo=world.vo))
     assert listed == {'file1', 'calib1', 'shared_ds', 'root_ds', 'alice.f1', 'alice.up', 'alice.ds', 'bob.f1', 'bob.ds', 'carol_file'}
 
+    # WRITE includes READ: bob lists his own DIDs, whatever other grants he holds
+    listed = _names(gw_did.list_dids(world.bob, world.scope, [{'name': '*'}], 'all', vo=world.vo))
+    assert listed == {'bob.f1', 'bob.ds'}
+
     # the content of a readable collection is filtered per child
     gw_did.attach_dids(world.scope, 'root_ds', {'dids': [world.did('calib1'), world.did('carol_file'), world.did('file1')]}, issuer='root', vo=world.vo)
     world.grant('carol', 'S:root_ds', 'r')
@@ -478,8 +482,8 @@ def test_scopes_are_listed_when_some_did_is_readable(world, make_world):
     other = make_world(accounts=(), rses=())
     assert world.scope in gw_scope.list_scopes(world.carol, vo=world.vo)
     assert other.scope not in gw_scope.list_scopes(world.carol, vo=world.vo)
-    # bob only writes into the scope
-    assert world.scope not in gw_scope.list_scopes(world.bob, vo=world.vo)
+    # bob writes into the scope, WRITE including READ
+    assert world.scope in gw_scope.list_scopes(world.bob, vo=world.vo)
 
 
 def test_root_and_admins_are_not_limited(world):
@@ -534,7 +538,7 @@ RULE_CASES = (
     Case('alice adds a rule on a DID she reads', lambda w: _add_rule(w, w.alice, 'file1'), True),
     Case('carol cannot add a rule on a DID she does not read', lambda w: _add_rule(w, w.carol, 'file1'), False),
     Case('carol adds a rule on a DID she reads', lambda w: _add_rule(w, w.carol, 'calib1'), True),
-    Case('bob adds a rule on his own DID, with WRITE on it, even without READ', lambda w: _add_rule(w, w.bob, 'bob.f1'), True),
+    Case('bob adds a rule on his own DID, with WRITE on it', lambda w: _add_rule(w, w.bob, 'bob.f1'), True),
     Case('carol cannot add a rule on her own DID without READ nor WRITE on it', lambda w: _add_rule(w, w.carol, 'carol_file'), False),
     Case('alice cannot add a locked rule', lambda w: _add_rule(w, w.alice, 'file1', locked=True), False),
     Case('alice cannot add a rule for another account', lambda w: _add_rule(w, w.alice, 'file1', account=w.bob), False),
@@ -622,11 +626,11 @@ def bare_world(make_world) -> World:
     ([('S:*', 'r'), ('S:file*', 'r')], {'file1': 'r--', 'calib1': 'r--'}),
     ([('S*:*', 'r'), ('S:*', 'rw')], {'file1': 'rw-', 'calib1': 'rw-'}),
     ([('S:*', 'rw'), ('S:file*', 'r')], {'file1': 'r--', 'calib1': 'rw-'}),
-    ([('S:*', 'r'), ('S:file*', 'w')], {'file1': '-w-', 'calib1': 'r--'}),
-    ([('S:file1', 'r'), ('S:*', 'd')], {'file1': 'r--', 'calib1': '--d'}),
+    ([('S:*', 'r'), ('S:file*', 'w')], {'file1': 'rw-', 'calib1': 'r--'}),
+    ([('S:file1', 'r'), ('S:*', 'd')], {'file1': 'r--', 'calib1': 'rwd'}),
     ([('S:fi*', 'd'), ('S:file*', 'r')], {'file1': 'r--', 'calib1': '---'}),
     ([('S:*', 'rwd'), ('S:file*', '')], {'file1': '---', 'calib1': 'rwd'}),
-    ([('S:file*', 'w')], {'file1': '-w-', 'calib1': '---'}),
+    ([('S:file*', 'w')], {'file1': 'rw-', 'calib1': '---'}),
     ([('S:*', 'rwd'), ('S:raw*', 'r')], {'raw1': 'r--', 'file1': 'rwd'}),
     ([('S:*', 'rwd'), ('S:secret*', '')], {'secret1': '---', 'file1': 'rwd'}),
     # the order the rows are added in does not matter
@@ -642,10 +646,10 @@ def test_most_specific_pattern_decides_within_a_role(bare_world, grants, expecte
 
 @pytest.mark.parametrize(('grants', 'expected'), [
     ([[('S:file1', 'r')], [('S:file1', 'w')]], 'rw-'),
-    ([[('S:*', 'r')], [('S:file1', 'd')]], 'r-d'),
+    ([[('S:*', 'r')], [('S:file1', 'd')]], 'rwd'),
     ([[('S:*', 'r')], [('S:*', 'r')]], 'r--'),
     ([[('S:*', 'rwd')], [('S:*', '')]], 'rwd'),
-    ([[('S:*', 'r'), ('S:file*', '')], [('S:file1', 'w')]], '-w-'),
+    ([[('S:*', 'r'), ('S:file*', '')], [('S:file1', 'w')]], 'rw-'),
 ], ids=lambda value: str(value))
 def test_roles_add_up(bare_world, grants, expected):
     """ROLE DID PERMISSION (CORE): Across the roles of an account the operations add up: a role granting nothing never withdraws what another grants."""
@@ -661,12 +665,12 @@ def test_inactive_assignments_grant_nothing(bare_world):
     now = datetime.utcnow()
     bare_world.grant('alice', 'S:*', 'rw', activates_at=now - timedelta(days=2), expires_at=now - timedelta(days=1))
     bare_world.grant('alice', 'S:file*', 'w')
-    assert _access(bare_world, 'alice', 'file1') == '-w-'
+    assert _access(bare_world, 'alice', 'file1') == 'rw-'
     with pytest.raises(AccessDenied):
         gw_did.get_metadata(bare_world.alice, bare_world.scope, 'mine', vo=bare_world.vo)
 
     bare_world.grant('alice', 'S:file1', 'd', activates_at=now + timedelta(days=1))
-    assert _access(bare_world, 'alice', 'file1') == '-w-'
+    assert _access(bare_world, 'alice', 'file1') == 'rw-'
 
 
 def test_whole_scope_and_scope_prefix(bare_world, make_world):
@@ -718,22 +722,22 @@ def test_ownership(bare_world, grants, administers):
     _check(lambda: gw_did.set_metadata(bare_world.scope, 'mine', 'project', 'rbac', issuer=bare_world.alice, vo=bare_world.vo), administers)
 
 
-def test_independent_operations(bare_world):
-    """ROLE DID PERMISSION (GATEWAY): DELETE does not imply READ nor WRITE, and WRITE does not imply READ."""
+def test_operations_include_the_lower_ones(bare_world):
+    """ROLE DID PERMISSION (GATEWAY): DELETE includes WRITE and READ, and WRITE includes READ: no role writes into or alters DIDs it does not see."""
     role = bare_world.grant('alice', 'S:file1', 'd')
     bare_world.grant('alice', 'S:ds1', 'w', role=role)
-    # DELETE alters the DID without seeing it
+    assert _access(bare_world, 'alice', 'file1') == 'rwd'
+    assert _access(bare_world, 'alice', 'ds1') == 'rw-'
+    # DELETE alters the DID, and sees it
     gw_did.set_metadata(bare_world.scope, 'file1', 'project', 'rbac', issuer=bare_world.alice, vo=bare_world.vo)
-    with pytest.raises(AccessDenied):
-        gw_did.get_metadata(bare_world.alice, bare_world.scope, 'file1', vo=bare_world.vo)
-    # WRITE on a collection lets it be written into, not read nor altered
-    with pytest.raises(AccessDenied):
-        gw_did.get_metadata(bare_world.alice, bare_world.scope, 'ds1', vo=bare_world.vo)
+    gw_did.get_metadata(bare_world.alice, bare_world.scope, 'file1', vo=bare_world.vo)
+    # WRITE on a collection lets it be read and written into, not altered
+    gw_did.get_metadata(bare_world.alice, bare_world.scope, 'ds1', vo=bare_world.vo)
     with pytest.raises(AccessDenied):
         gw_did.set_metadata(bare_world.scope, 'ds1', 'project', 'rbac', issuer=bare_world.alice, vo=bare_world.vo)
-    # an attached DID must be readable: file1 is not
-    with pytest.raises(AccessDenied):
-        gw_did.attach_dids(bare_world.scope, 'ds1', {'dids': [bare_world.did('file1')]}, issuer=bare_world.alice, vo=bare_world.vo)
+    gw_did.attach_dids(bare_world.scope, 'ds1', {'dids': [bare_world.did('file1')]}, issuer=bare_world.alice, vo=bare_world.vo)
+    assert _names(gw_did.list_content(bare_world.alice, bare_world.scope, 'ds1', vo=bare_world.vo)) == {'file1'}
+    assert _names(gw_did.list_dids(bare_world.alice, bare_world.scope, [{'name': '*'}], 'all', vo=bare_world.vo)) == {'file1', 'ds1'}
 
 
 def test_unknown_did_is_not_revealed(bare_world):
