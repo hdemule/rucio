@@ -428,8 +428,8 @@ class RoleClient(BaseClient):
               'metadata' permission on the keys of the DIDs the pattern matches, overriding what the 'did' permissions
               of the role grant on them. The keys are a list or a comma-separated string, '*' standing for every key;
               without keys, the permission is on no key, only makes the DIDs visible and takes ['read']. The operations
-              are 'read' and 'write' (adding, modifying or deleting a key), an empty list withdrawing what the 'did'
-              permissions grant on the keys. The operations a role already has on a key are replaced. The keys held by
+              are 'read' and 'write' (adding, modifying or deleting a key), 'write' including 'read' and being stored
+              so, an empty list withdrawing what the 'did' permissions grant on the keys. The operations a role already has on a key are replaced. The keys held by
               Rucio and those leading to the deletion of a DID (e.g. 'bytes', 'lifetime') cannot be granted 'write';
             - {'rse_expression': 'CERN-EOS-DISK', 'local': 1000} or {'rse_expression': 'tier=1', 'global': 5000} for a
               'limit', with either its local or its global bytes, `ROLE_QUOTA_NOCAP` (-1) meaning no cap. A local limit

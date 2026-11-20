@@ -1403,7 +1403,7 @@ def permission_metadata() -> None:
 
     \b
     r  see the key and its value, and list the DIDs (without their data)
-    w  add, modify or delete the key
+    w  r, and add, modify or delete the key
     On the keys it names, it overrides the DID permissions of the role: e.g. DID 'r' on
     'data:*' and metadata 'none' on 'provenance' of 'data:*' hide that key."""
 
@@ -1426,6 +1426,7 @@ def metadata_add(ctx: click.Context, role_name: str, did_pattern: str, operation
                    'data:raw*'            the DIDs of data whose name starts with raw
                    'data:raw1'            the DID data:raw1
     OPERATIONS   r, w in any order, e.g. 'rw', or 'none' (listed '--') to hide the keys.
+                 w also grants r: 'w' is stored as 'rw'.
     KEY          keys, spaced or comma-separated, e.g. 'quality,datatype'; '*' for every
                  key (quote it); no KEY to only list the DIDs (OPERATIONS 'r').
     The keys held by Rucio (bytes, checksums, lifetime, ...) can only get 'r'."""
@@ -1442,7 +1443,10 @@ def metadata_add(ctx: click.Context, role_name: str, did_pattern: str, operation
     with _lock_hint(role_name):
         ctx.obj.client.add_role_permission(role_name, 'metadata', parameters, force=force)
 
-    new = format_metadata_operations(op.value for op in operations)
+    # the server completes the operations with those they include, 'w' with 'r'
+    given = format_metadata_operations(op.value for op in operations)
+    new = _assigned_metadata_operations(ctx, role_name, did_pattern).get(meta_keys[0] if meta_keys else None, given)
+    _echo_completed_operations(given, new, f"{describe_metadata_keys(meta_keys or [None])} of {did_pattern}")
     changed: dict[str, list[Optional[str]]] = {}
     for key in meta_keys or [None]:
         if key in assigned and assigned[key] != new:
@@ -1453,8 +1457,6 @@ def metadata_add(ctx: click.Context, role_name: str, did_pattern: str, operation
         click.echo(f"Set {new} on {describe_metadata_keys(meta_keys)} of {did_pattern} for role '{role_name}'.")
     else:
         click.echo(f"Set {new} on no key of {did_pattern} for role '{role_name}': the DIDs it matches are visible.")
-    if new == '-w':
-        click.echo(f"Note: without r, the DIDs matching {did_pattern} are not made visible: the keys can be written but not read.")
 
 
 @permission_metadata.command("remove")
