@@ -1286,14 +1286,22 @@ def _assigned_did_operations(ctx: click.Context, role_name: str) -> dict[str, st
     }
 
 
+def _echo_completed_operations(given: str, stored: str, target: str) -> None:
+    """Tell the operations stored when the server completed those given with the ones they include, e.g. 'w' with 'r'."""
+    if stored != given:
+        added = [letter for letter in stored if letter != '-' and letter not in given]
+        highest = [letter for letter in given if letter != '-'][-1]
+        click.echo(f"{highest} implies {' and '.join(added)}: stored {stored} on {target}.")
+
+
 @permission.group("did")
 def permission_did() -> None:
     """Manage the operations a role grants on DIDs.
 
     \b
     r  see and read the DIDs, their data and metadata
-    w  create DIDs, add content
-    d  alter and delete existing DIDs
+    w  r, and create DIDs, add content, manage your own DIDs
+    d  rw, and alter and delete existing DIDs
     Within a role, the most specific pattern matching a DID decides it: e.g. 'rwd' on
     'data:*' and 'r' on 'data:raw*' keep the raw DIDs read-only."""
 
@@ -1315,7 +1323,8 @@ def did_add(ctx: click.Context, role_name: str, did_pattern: str, operations: li
                    'data:raw*'            the DIDs of data whose name starts with raw
                    'data:raw1'            the DID data:raw1
     OPERATIONS   r, w, d in any order, e.g. 'rw', or 'none' (listed '---') to grant
-                 nothing on these DIDs, i.e. hide them from a wider pattern."""
+                 nothing on these DIDs, i.e. hide them from a wider pattern. w also
+                 grants r, and d also grants w and r: 'w' is stored as 'rw-'."""
     did_pattern = _normalize_did_pattern(did_pattern)
     new = format_operations(op.value for op in operations)
     assigned = _assigned_did_operations(ctx, role_name)
@@ -1326,6 +1335,9 @@ def did_add(ctx: click.Context, role_name: str, did_pattern: str, operations: li
     with _lock_hint(role_name):
         ctx.obj.client.add_role_permission(role_name, 'did', {'did_pattern': did_pattern, 'operations': [op.value for op in operations]}, force=force)
 
+    # the server completes the operations with those they include, e.g. 'w' with 'r'
+    given, new = new, _assigned_did_operations(ctx, role_name).get(did_pattern, new)
+    _echo_completed_operations(given, new, did_pattern)
     if did_pattern in assigned and assigned[did_pattern] != new:
         click.echo(f"Replaced {assigned[did_pattern]} by {new} on {did_pattern}.")
     click.echo(f"Set {new} on {did_pattern} for role '{role_name}'.")
