@@ -9,12 +9,14 @@ policy's business. A policy package which denies the actions it does not know ha
 - **Overlaps:** how permissions and roles combine when they cover the same DID, key or RSE is in `ROLE_OVERLAPS.md`.
 
 ```bash
-rucio role permission did add ROLE DID_PATTERN OPERATIONS   # OPERATIONS: any of r, w, d, or none
+rucio role permission did add ROLE DID_PATTERN OPERATIONS   # OPERATIONS: r, w (stored rw-), d (stored rwd), or none
 rucio role permission did remove ROLE DID_PATTERN
 ```
 
-- **Adding sets exactly OPERATIONS** on the pattern, replacing what the role had on it. `none` stores a row
-  granting nothing, listed `---`, which matters because of the specificity rule below.
+- **Adding sets exactly OPERATIONS** on the pattern, replacing what the role had on it, **completed with the
+  operations they include** (section 1): `w` is stored `rw-`, `d` and `wd` are stored `rwd`, and the CLI says so
+  (`w implies r: stored rw- on atlas:raw*`). What `rucio role permission did list` shows is exactly what applies.
+  `none` stores a row granting nothing, listed `---`, which matters because of the specificity rule below.
 - **`---` grants nothing at all**, exactly like no row: the DIDs it matches are not listed, read, downloaded nor
   written through that role, and none of their metadata is shown. Its only effect is to override a wider pattern of
   the same role. To let DIDs be **browsed** (listed with their scope, name and type, without data nor metadata),
@@ -36,7 +38,7 @@ A pattern is always stored and listed with a scope part and a name part.
 
 - `*` is accepted only at the end of a part. A wildcard scope part only takes the `*` name part: `atlas*:file*`, `*:file1` and `*atlas:*` are invalid.
 - A pattern is matched against the DID itself only. **There is no inheritance, by design:** a DID lives in its scope, whatever the collections it is attached to, so `atlas:ds1` does not cover the files inside `ds1`, and each DID is checked on its own.
-- **Reading:** an account reads the DIDs on which a role grants `r` (through the pattern deciding them), plus the DIDs it owns and may write (`w` on them, section 4). Example: `r` on `atlas:calib*` reads `atlas:calib1`, but neither `atlas:file1` nor its own `atlas:x`; `w` on `atlas:x` lets it read `atlas:x` too.
+- **Reading:** an account reads the DIDs on which a role grants `r` (through the pattern deciding them), `w` and `d` including it. Example: `r` on `atlas:calib*` reads `atlas:calib1`, but neither `atlas:file1` nor its own `atlas:x`; `w` on `atlas:x` (stored `rw-`) lets it read and administer `atlas:x` too (section 4).
 - **Some `r` in a scope:** a role grants `r` on some DIDs of a scope if the pattern deciding the whole scope (`atlas:*`, else the longest `atlas*:*`) grants `r`, or one of its name patterns in the scope (`atlas:calib*`, `atlas:file1`) does. `r` on `atlas*:*` with `none` on `atlas:*` gives no `r` in `atlas`.
 - **Whole-scope items:** only the patterns with the `*` name part grant a whole scope, and only if no name pattern of the same role withdraws the operation from some DIDs of the scope. `atlas:file*` never grants the whole scope `atlas`, and `r` on `atlas:*` with `none` on `atlas:secret*` does not grant it either. This only matters where an item stands for the whole scope rather than for DIDs (section 3).
 - **Within a role, the most specific pattern decides:** for each DID, the row of the role whose pattern matches it
@@ -45,10 +47,18 @@ A pattern is always stored and listed with a scope part and a name part.
   scope prefix (`atlas*:*`), a longer prefix being more specific. Examples:
   - `rwd` on `atlas:*` and `r` on `atlas:raw*`: the raw DIDs are read-only, the others `rwd`;
   - `rwd` on `atlas:*` and `none` on `atlas:tmp*`: the role grants nothing on the temporary DIDs;
-  - `r` on `atlas:*` and `w` on `atlas:raw*`: the raw DIDs are `-w-`, **not readable**. To keep `r`, grant `rw` on `atlas:raw*`.
+  - `r` on `atlas:*` and `w` on `atlas:raw*`: the raw DIDs are `rw-` (`w` being stored `rw-`), the others `r--`.
 - **Across roles, everything adds up:** an operation is granted on a DID if one role grants it. A `---` only
   withdraws DIDs within its own role, it never hides what another role grants.
-- **Independent operations:** `d` does not imply `w`, and `w` does not imply `r`.
+- **Hierarchical operations:** `w` includes `r`, and `d` includes `w` and `r`. A DID permission grants one of four
+  levels: none (`---`), read (`r--`), write (`rw-`) or delete (`rwd`). The operations are completed when the
+  permission is stored, not when it is checked (`_complete_operations` in `lib/rucio/core/role.py`), so the
+  permission checks only look at what is stored.
+  - An account always sees what it may write into or alter: an owner who administers a DID (`w` on it) reads it, and
+    has some `r` in its scope, so `list_dids` and `list_scopes` consistently show its own DIDs.
+  - **No blind roles:** a write-only role (a "drop box" where DIDs are created or attached without seeing the
+    content) or a delete-only role cannot be granted. Whoever may attach into a collection may also list its content.
+  - The metadata permissions follow the same rule: `w` on a key includes `r` (section 7).
 
 ## 2. Who is never limited by roles
 
@@ -67,13 +77,13 @@ A pattern is always stored and listed with a scope part and a name part.
 | Read checks naming a DID: `get_did`, `get_metadata`, `list_content`, `list_files`, `list_parent_dids`, the locks, the dataset replicas (per RSE) and the rules of a DID or of a rule (its DID), ... | `r` on the DID, or owning it; or a metadata permission making it visible (section 7) |
 | Reading the data of a DID: `list_replicas` (the PFNs, hence downloading), its current transfer requests (the past ones: root/admin only) | `r` on the DID, or owning it; a metadata permission is **not** enough |
 | Listings of a scope, naming no DID: `list_dids`, `scope_list` | some `r` in the scope (section 1); the results are then filtered per DID |
-| Listings (results filtered by RBAC): DIDs, content, parents, replicas, locks, rules, ... | each item needs `r` on its DID, or owning it (with `w` on it) |
+| Listings (results filtered by RBAC): DIDs, content, parents, replicas, locks, rules, ... | each item needs `r` on its DID (included in `w` and `d`) |
 | Listings of scopes: `list_scopes`, `get_scopes`, ... | some `r` in the scope |
 | Items standing for a whole scope: the counts of the bad replicas summary | `r` on the whole scope (`*` name part), withdrawn by no name pattern of that role (section 1) |
 | The metadata keys of a DID | every key, unless a metadata permission of the role decides otherwise for some keys (section 7) |
 | Prerequisite for: adding a rule, being attached, registering a replica of an existing file (section 5) | `r` on the DID, or owning it |
 
-### `w`: write (creating, and adding content)
+### `w`: write (creating, and adding content), including `r`
 
 | Action | Requires |
 |---|---|
@@ -86,7 +96,7 @@ A pattern is always stored and listed with a scope part and a name part.
 `w` does **not** let you write on an existing DID of another account. That needs `d`.
 On your own DIDs, `w` makes you their owner (section 4): you may then alter and remove them.
 
-### `d`: overwrite and delete (altering existing DIDs)
+### `d`: overwrite and delete (altering existing DIDs), including `w` and `r`
 
 Each of these requires `d` on the DID, or owning it (with `w` on it):
 
@@ -103,7 +113,7 @@ Each of these requires `d` on the DID, or owning it (with `w` on it):
 - **Who owns:** a DID is owned by its `account`, its creator by default.
 - **When ownership counts:** the owner acts as **admin of that DID** only while a role grants the owner `w` on that DID (through the pattern deciding it, section 1). `w` is what lets an account create DIDs and alter or remove its own ones, so withdrawing `w` on a DID also withdraws what owning it grants.
 - **Ownership is withdrawn by a pattern:** with `w` on `atlas:*` and `r` (or `none`) on `atlas:file1`, owned, the owner does not administer `atlas:file1`.
-- **Without `w` on it, ownership grants nothing,** not even seeing the DID. Example: an account with only `r` on `atlas:calib*` cannot see its own `atlas:x`; with `-w-` on `atlas:x`, it sees and administers it.
+- **Without `w` on it, ownership grants nothing,** not even seeing the DID. Example: an account with only `r` on `atlas:calib*` cannot see its own `atlas:x`; with `w` on `atlas:x` (stored `rw-`), it sees and administers it.
 - **What ownership never gives:**
   - the protected keys (section 6);
   - recursive metadata;
@@ -142,16 +152,18 @@ A role grants at most what owning a scope grants in standard Rucio: what the gen
 ## 7. Metadata permissions
 
 ```bash
-rucio role permission metadata add ROLE DID_PATTERN OPERATIONS [KEY...]   # OPERATIONS: r, w, rw, or none
+rucio role permission metadata add ROLE DID_PATTERN OPERATIONS [KEY...]   # OPERATIONS: r, w (stored rw), or none
 rucio role permission metadata remove ROLE DID_PATTERN [KEY...]
 ```
 
 A metadata permission grants `r` (see the key and its value) and `w` (add, modify or delete it) on metadata keys
-of the DIDs its pattern matches. Its patterns are those of the DID permissions (section 1), matched the same way,
+of the DIDs its pattern matches. As for the DID permissions, `w` includes `r`: `w` is stored `rw`, and the CLI says
+so (`w implies r: stored rw on quality of atlas:*`). No key is therefore written without being read, nor on a DID
+the account cannot see. Its patterns are those of the DID permissions (section 1), matched the same way,
 without inheritance, the most specific one deciding within a role.
 
 - **Keys:** one row per key. `*` covers every key; no key at all gives a row that only makes the DIDs visible,
-  so it must be `r`: `w`, `rw` and `none` on no key are refused. Adding replaces the operations a role had on a
+  so it must be `r`: `w` (stored `rw`), `rw` and `none` on no key are refused. Adding replaces the operations a role had on a
   key; `none` (listed `--`) is stored too.
 - **Levels of access** to a DID, for an account that owns nothing:
 
@@ -173,8 +185,8 @@ without inheritance, the most specific one deciding within a role.
 - **Across roles, everything adds up:** a key is readable or writable if one role makes it so. A `--` only
   withdraws a key from the DID permissions of its own role: it never hides what another role shows.
 - **Visibility:** a row with `r`, whatever its key, makes the DIDs its pattern matches visible: they are listed,
-  their scope too, and read as with `r` (section 3), but only with the keys the rows grant. A row with only `w`
-  writes blindly, like `-w-`.
+  their scope too, and read as with `r` (section 3), but only with the keys the rows grant. Since `w` includes
+  `r`, every row granting an operation does so: a row granting `w` on a key makes its DIDs visible too.
 - **What a metadata permission never grants:**
   - the data of a DID: its replicas with their PFNs, downloading it, its transfer requests;
   - `r` as a prerequisite: adding a rule, being attached, registering a replica; nor ownership, which takes DID `w` (section 4);
@@ -198,20 +210,18 @@ DID permission on `physics`:
 
 Results from running the real checks of `generic.py` over the world below. Each row gives the result and its reason.
 
-**World (scope `atlas`, owned by root):** alice's narrower patterns repeat the `r` of `atlas:*`, since within a
-role the most specific pattern decides alone: `w` alone on `atlas:alice.*` would make her DIDs unreadable through
-that pattern.
+**World (scope `atlas`, owned by root):** the grants are given as stored, `w` alone being stored `rw-`.
 
 | Account | Grants |
 |---|---|
 | alice | `atlas:*` r; `atlas:alice.*` rw; `atlas:shared_ds` rw; `atlas:file1` rd |
-| bob | `atlas:bob.*` w (no `r` anywhere) |
+| bob | `atlas:bob.*` rw (granted `w`: `r` on his DIDs only) |
 | carol | `atlas:calib*` r |
 
 - **DIDs and owners:**
   - root: `file1`, `calib1`, `shared_ds`, `root_ds`;
   - alice: `alice.f1`, `alice.ds`, `alice.up`;
-  - bob: `bob.f1`;
+  - bob: `bob.f1`, `bob.ds`;
   - carol: `carol_file`.
 - **Replicas** on `X_USERDISK`:
   - `file1` A, locked by root;
@@ -230,14 +240,14 @@ that pattern.
 |---|---|---|---|
 | alice | `add_did atlas:alice.new` | ✅ | `rw` on `atlas:alice.*` |
 | alice | `add_did atlas:other.new` | ❌ | `atlas:*` decides the name: `r` only |
-| bob | `add_did atlas:bob.new` | ✅ | `w` on `atlas:bob.*`; creating needs no `r` |
+| bob | `add_did atlas:bob.new` | ✅ | `rw` on `atlas:bob.*` |
 | carol | `add_did atlas:calib2` | ❌ | `r` only |
 | alice | `add_did atlas:alice.new`, account bob (also via `add_dids`) | ❌ | creating for another account |
 | root | `add_did`, account bob | ✅ | scope owner, as upstream |
 | alice | `add_did` with meta `project` | ✅ | ordinary key |
 | alice | `add_did` with meta `bytes` | ❌ | protected key |
 | alice | `add_did` with meta `lifetime` | ✅ | will own the new DID, with `w` on it |
-| bob | `add_did` with meta `lifetime` | ✅ | will own it, with `w` on it, even without `r` |
+| bob | `add_did` with meta `lifetime` | ✅ | will own it, with `w` on it |
 | alice | `add_did` with a rule of her own | ✅ | will own the new DID |
 | bob | `add_did` with a rule of his own | ✅ | will own the new DID |
 | alice | `add_did` with a rule for bob | ❌ | rule for another account |
@@ -276,12 +286,13 @@ that pattern.
 | carol | `get_metadata atlas:calib1` | ✅ | `r` on `atlas:calib*` |
 | carol | `get_metadata atlas:file1` | ❌ | not covered |
 | carol | `get_metadata` on her `atlas:carol_file` | ❌ | owner without `r` nor `w` on it |
-| bob | `get_metadata` on his `atlas:bob.f1` | ✅ | owner, with `w` on it |
+| bob | `get_metadata` on his `atlas:bob.f1` | ✅ | `rw` on `atlas:bob.*` |
 | carol | `get_did atlas:calib1` | ✅ | `r` on `atlas:calib*` |
 | carol | `list_dids atlas:*`, all types | ✅ | lists `calib1` only: she may not write her `carol_file` |
 | carol | `list_content` of `shared_ds` | ❌ | cannot read the collection itself |
 | carol | `list_scopes` | ✅ | lists `atlas`, where she reads some DIDs |
-| bob | `list_dids atlas:*` | ❌ | no `r` in `atlas` (he still reads his own `bob.f1` by name) |
+| bob | `list_dids atlas:*` | ✅ | lists `bob.f1`, `bob.ds`: `rw` on `atlas:bob.*`, whatever other grants he holds |
+| bob | `list_scopes` | ✅ | lists `atlas`, where he reads his own DIDs |
 
 ### Rules
 
@@ -315,7 +326,7 @@ One role held by alice, on the DIDs `file1`, `calib1`, `secret1` of `atlas` (roo
 | Role | Result | Why |
 |---|---|---|
 | `rw` on `atlas:*`, `r` on `atlas:file*` | `file1` `r--`, `calib1` `rw-` | the name pattern decides `file1` |
-| `r` on `atlas:*`, `w` on `atlas:file*` | `file1` `-w-` | `r` is withdrawn too: give `rw` on `atlas:file*` to keep it |
+| `r` on `atlas:*`, `w` on `atlas:file*` | `file1` `rw-`, `calib1` `r--` | `w` is stored `rw-`: the name pattern keeps `r` |
 | `rwd` on `atlas:*`, `r` on `atlas:raw*` | alters `file1`, creates `atlas:other_new`; cannot alter a raw DID, nor create `atlas:raw_new` | the raw DIDs are read-only |
 | `rwd` on `atlas:*`, `none` on `atlas:secret*` | `secret1` `---`, `file1` `rwd` | |
 | `r` on `atlas:*`, `none` on `atlas:secret*` | `list_dids` lists `file1`, `calib1`, not `secret1`; the bad replicas summary of `atlas` refused | some `r` in the scope, but not on the whole scope |
@@ -329,7 +340,7 @@ By design, change here if needed:
 - **No inheritance:** `w` on `atlas:ds1` does not cover new files uploaded into it (`rucio upload --dataset`), and `d` on it does not cover its files: grant the files a pattern of their own, e.g. a name prefix.
 - **Uploads finish through the registration:** marking a replica available is left to root and admins, so `rucio upload` needs `--register-after-upload` for a non-admin, as with the generic policy of standard Rucio.
 - **Rules and replicas are cleaned by root and admins:** no role lets an account delete its rules or replicas, as with the generic policy of standard Rucio; a policy package may grant it.
-- **Listings may look up owners:** each listed DID the account may write but not read costs one lookup of its owner, to know whether it owns it. Accounts with `r` on the whole scope cost nothing more.
+- **Listings may look up owners:** filtering a listing on `d` (e.g. the DIDs an account may alter) costs one lookup of the owner of each DID the account may write but not alter, to know whether it owns it. A listing on `r` looks up no owner, `w` including `r`.
 - **Rules check the ruled DID only:** a rule on a readable collection copies all its content, including files attached by others that the rule's account cannot read.
 - **Attach into a file:** carol passes the permission check to attach into her `carol_file`, but the core refuses attaching into a file.
 - **Scope owners keep standard Rucio's power,** e.g. recursive metadata propagated into content of other scopes.

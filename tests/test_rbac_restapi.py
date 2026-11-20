@@ -1092,8 +1092,8 @@ class TestOWNERSHIP:
 def bob_reads_file_a(vo, rbac_data):
     """
     Bob, who reads nothing otherwise, reads alice's file `file_a` through a name pattern, and owns a dataset in the
-    scope 'alice': the DID the pattern matches and the owned dataset are what he may read in the scope. Yields the
-    'scope:name' of the dataset.
+    scope 'alice' on which no role grants him anything: owning a DID only counts with `w` on it, so `file_a` is all
+    he may read in the scope. Yields the 'scope:name' of the dataset.
     """
     role_name = 'tmp_read_%s' % uuid4().hex[:12]
     permission = _did_permission('read', rbac_data.file_a)
@@ -1110,33 +1110,34 @@ def bob_reads_file_a(vo, rbac_data):
             yield owned
         finally:
             _delete(_account_roles_path('bob', role_name), 'root')
-            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=permission)
+            _delete(_role_path(role_name, 'permissions', 'did'), 'root', json=_did_pattern(rbac_data.file_a))
             assert _delete(_role_path(role_name), 'root').status_code == OK
     finally:
-        # bob reads the DIDs he owns in the scope: a dataset left behind would be listed by the next test using the fixture
+        # a dataset left behind would be met by the next test using the fixture
         with db_session(DatabaseOperationType.WRITE) as session:
             did_core.delete_dids([owned_did], account=InternalAccount('root', vo=vo), session=session)
 
 
 class TestNAMEPATTERN:
-    """RBAC(USER): READ on a name pattern reads the DIDs it matches and the DIDs the account owns in the scope, nothing else"""
+    """RBAC(USER): READ on a name pattern reads the DIDs it matches, nothing else: not even the DIDs the account owns without `w` on them"""
 
     def test_get_did(self, rbac_data, bob_reads_file_a):
         assert _get(_did_path(rbac_data.file_a), 'bob').status_code == OK
-        assert _get(_did_path(bob_reads_file_a), 'bob').status_code == OK
+        assert _get(_did_path(bob_reads_file_a), 'bob').status_code == FORBIDDEN
         assert _get(_did_path(rbac_data.dataset_a), 'bob').status_code == FORBIDDEN
 
     def test_list_dids(self, rbac_data, bob_reads_file_a):
+        """The listing is allowed (some READ in the scope) and filtered per DID: the owned dataset is left out"""
         path = '/dids/alice/dids/search'
-        expected = {rbac_data.file_a, bob_reads_file_a}
+        expected = {rbac_data.file_a}
         _assert_visible(_get(path, 'bob', params={'name': '*', 'type': 'all', 'long': True}), expected)
         # the short format only yields names
         _assert_visible(_get(path, 'bob', params={'name': '*', 'type': 'all'}), {_name(did) for did in expected}, key=set)
 
     def test_list_content(self, rbac_data, bob_reads_file_a):
-        """The content of a collection is only listed to who reads the collection"""
+        """Listing the content of a collection is refused to who does not read the collection, even its owner without `w` on it"""
         assert _get(_did_path(rbac_data.dataset_a, 'dids'), 'bob').status_code == FORBIDDEN
-        _assert_visible(_get(_did_path(bob_reads_file_a, 'dids'), 'bob'), set())
+        assert _get(_did_path(bob_reads_file_a, 'dids'), 'bob').status_code == FORBIDDEN
 
     def test_list_parent_dids(self, rbac_data, bob_reads_file_a):
         """The parents of a readable file are filtered per DID: bob reads neither dataset holding `file_a`"""

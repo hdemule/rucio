@@ -1,6 +1,6 @@
 # Proposal: hierarchical DID operations (`d` ⊃ `w` ⊃ `r`)
 
-Status: proposal, not implemented. See `DID_PERMISSIONS.md` for what is implemented today.
+Status: implemented, see `DID_PERMISSIONS.md` (section 1) and `ROLE_OVERLAPS.md` (section 1.2).
 
 ## Summary
 
@@ -42,8 +42,7 @@ Take an account that owns `atlas:file` and has only `-w-` on it.
 
   Anyone who may attach into a collection may also list its content.
 - **`d` also grants creation** (`w`) on its patterns.
-- **Metadata permissions are unchanged.** They keep their own independent `r` and `w` per key, including a blind
-  `-w` on a key.
+- **Metadata permissions** were made hierarchical too (`w` ⊃ `r`), see `HIERARCHICAL_METADATA_OPERATIONS.md`.
 - **Unchanged:** ownership, the admin-only actions, `test_no_role_grants_what_is_left_to_admins`, and the rule that
   RBAC is decided only by the permission policy, never by the gateway.
 - **No migration.** RBAC is not released, so only dev databases may hold old rows, and a one-off update can complete

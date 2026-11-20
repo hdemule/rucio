@@ -34,7 +34,8 @@ Common to everything:
 
 The examples use the account **alice**, holding the roles A and B, on the scope **atlas**, owned by root,
 whose DIDs `file1`, `file2`, `calib1` and the collection `ds1` are owned by root, and `mine` by alice.
-A DID permission is written `r`, `w`, `d` (`---` for none) and a metadata permission `r`, `w`, `rw`, `--`.
+A DID permission is written as granted, `r`, `w`, `d` (`---` for none), and is stored with the operations it
+includes: `w` as `rw-`, `d` as `rwd` (section 1.2). A metadata permission is written `r`, `w`, `rw`, `--`.
 
 ---
 
@@ -51,24 +52,31 @@ than a wider one. The order the rows were added in does not matter.
 | `r` on `atlas:*`, `r` on `atlas:file*` | `r--` | `r--` | redundant rows |
 | `r` on `atlas*:*`, `rw` on `atlas:*` | `rw-` | `rw-` | `atlas:*` is more specific than `atlas*:*` |
 | `rw` on `atlas:*`, `r` on `atlas:file*` | `r--` | `rw-` | the name pattern decides `file1`: a read-only area within a writable scope |
-| `r` on `atlas:*`, `w` on `atlas:file*` | `-w-` | `r--` | the rows do **not** add up: `r` is withdrawn from `file1` too. Grant `rw` on `atlas:file*` to keep it |
-| `r` on `atlas:file1`, `d` on `atlas:*` | `r--` | `--d` | an exact name beats the whole scope |
+| `r` on `atlas:*`, `w` on `atlas:file*` | `rw-` | `r--` | the name pattern decides `file1`, `w` being stored `rw-` |
+| `r` on `atlas:file1`, `d` on `atlas:*` | `r--` | `rwd` | an exact name beats the whole scope |
 | `d` on `atlas:fi*`, `r` on `atlas:file*` | `r--` | nothing | the longer prefix decides |
 | `rwd` on `atlas:*`, `---` on `atlas:file*` | `---` | `rwd` | a row granting nothing withdraws the DIDs it matches: not even listed, as with no row |
-| `w` on `atlas:file*` | `-w-` | nothing | a name pattern only covers the names it matches |
+| `w` on `atlas:file*` | `rw-` | nothing | a name pattern only covers the names it matches |
 
 The CLI warns when a new row withdraws operations a wider row of the same role grants, e.g. `atlas:file* (r--) is
 more specific than atlas:* (rw-) [...]: w withdrawn from them`, and tells which row decides again when one is removed.
 
-### 1.2 The operations are independent
+### 1.2 The operations are levels
 
-| Role A | Result on `atlas:file1` | Why |
+`w` includes `r`, and `d` includes `w` and `r`: a DID permission grants none (`---`), read (`r--`), write (`rw-`)
+or delete (`rwd`). The operations are completed when the permission is stored, so what `rucio role permission did
+list` shows is exactly what applies, and the CLI says when it completes them (`w implies r: stored rw- on
+atlas:file*`).
+
+| Role A | Stored | Result on `atlas:file1` |
 |---|---|---|
-| `d` only | can set its metadata and detach its content, **without seeing it** | `d` does not imply `r` |
-| `w` only | can attach into it (as a collection) and create DIDs whose name matches, without seeing them | `w` does not imply `r` |
-| `d` only, then "add a rule" | refused | a rule needs `r` on its DID |
-| `r` only, then "set metadata" | refused | altering an existing DID needs `d` (or owning it, with `w` on it) |
-| `rd` | can see and alter it, but not attach into it (as a collection) | `d` does not imply `w` |
+| `r` | `r--` | can see and read it; "set metadata" refused: altering an existing DID needs `d` (or owning it, with `w` on it) |
+| `w` | `rw-` | can also attach into it (as a collection) and create DIDs whose name matches, and sees them |
+| `d`, `wd` or `rd` | `rwd` | can also set its metadata and detach any of its content, and add a rule on it |
+
+There are therefore **no blind roles**: no role writes into or alters DIDs without seeing them, e.g. a "drop box"
+where accounts attach content they cannot list. The metadata permissions follow the same rule: `w` on a key
+includes `r` (section 3).
 
 ### 1.3 Name patterns and whole scopes
 
@@ -89,7 +97,7 @@ pattern deciding it (section 1.1). Withdrawing WRITE on a DID withdraws what own
 
 | Role A | `atlas:mine` (owned by alice) | Why |
 |---|---|---|
-| `w` on `atlas:mine` | readable, and alterable: metadata, detaching, deletion keys | WRITE on the DID |
+| `w` on `atlas:mine` | readable, and alterable: metadata, detaching, deletion keys | WRITE on the DID, which includes READ |
 | `w` on `atlas:*` | same | the whole-scope pattern decides `mine` |
 | `w` on `atlas:*`, `---` on `atlas:mine` | **nothing** | the deciding pattern withdraws WRITE: ownership is withdrawn too |
 | `r` on `atlas:mine` | readable only, not alterable | READ is not WRITE: owner without WRITE |
@@ -118,14 +126,14 @@ what its active roles grant. A `---` in one role never hides what another role g
 | Role A | Role B | Result | Why |
 |---|---|---|---|
 | `r` on `atlas:file1` | `w` on `atlas:file1` | `rw` on `file1` | union |
-| `r` on `atlas:*` | `d` on `atlas:file1` | reads everything, alters `file1` only | union |
+| `r` on `atlas:*` | `d` on `atlas:file1` | reads everything, writes and alters `file1` only | union |
 | `r` on `atlas:*` | `r` on `atlas:*` | `r` | redundant |
 | `rwd` on `atlas:*` | nothing on `atlas` | `rwd` | B cannot restrict A: there is no deny |
 | `rwd` on `atlas:*` | `---` on `atlas:*` | `rwd` | a `---` only withdraws within its own role |
-| `r` on `atlas:*`, `---` on `atlas:file*` | `w` on `atlas:file1` | `-w-` on `file1` | A grants nothing on `file1`, B grants `w` |
+| `r` on `atlas:*`, `---` on `atlas:file*` | `w` on `atlas:file1` | `rw-` on `file1` | A grants nothing on `file1`, B grants `w`, stored `rw-` |
 | `r` on `atlas:calib*` | `w` on `atlas:mine*` | alice creates `atlas:mine2` and administers it afterwards | ownership needs WRITE on the DID, from *any* role |
 | `r` on `atlas:*` | `w` on `atlas:new*` | can create `atlas:new1` with `lifetime` in its metadata, and a rule on it | she will own it, with WRITE on it from B |
-| `rw` on `atlas:*` (expired) | `w` on `atlas:file*` | `-w-` on `file1`; `mine` neither readable nor administered | an expired assignment grants nothing, B gives no WRITE on `mine` |
+| `rw` on `atlas:*` (expired) | `w` on `atlas:file*` | `rw-` on `file1`; `mine` neither readable nor administered | an expired assignment grants nothing, B gives no WRITE on `mine` |
 | `r` on `atlas:*` (activates tomorrow) | none | nothing until tomorrow | same |
 
 ---
@@ -178,7 +186,7 @@ being more specific. The deciding row's operations are exact: `--` grants nothin
 | `--` (or `w`) on no key | refused when granting it | a permission on no key only makes DIDs visible, so it is `r` |
 | `--` on `*` | nothing at all, not even listed | `--` never makes a DID visible; use DID `---` to hide DIDs within a role |
 | `rw` on `quality` | visible, `quality` readable and writable | |
-| `-w` on `quality` | **not visible**, `quality` writable blindly | like DID `-w-` |
+| `w` on `quality` | stored `rw`: visible, `quality` readable and writable | `w` includes `r`: no key is written blindly |
 | `--` on `quality` | nothing at all | `--` alone grants nothing |
 
 ### 3.5 Keys Rucio holds, and keys leading to a deletion
@@ -215,8 +223,8 @@ shows.
 | metadata `r` on `quality` | metadata `w` on `quality` | `rw` | `--` | the operations of the roles add up |
 | metadata `r` on `quality` of `atlas:*` | metadata `--` on `quality` of `atlas:file1` | `r` | `--` | specificity only applies within a role |
 | metadata `rw` on `*` | metadata `r` on `quality` | `rw` | `rw` | within A, `*` decides `quality`; B adds nothing |
-| metadata `-w` on `quality` | nothing | `-w`, DID not visible | | |
-| metadata `-w` on `quality` | DID `r` | `rw`, DID visible | `r` | |
+| metadata `w` on `quality` | nothing | `rw`, DID visible | | `w` is stored `rw` |
+| DID `r`, metadata `w` on `quality` | nothing | `rw` | `r` | within A, the row naming `quality` decides it, and keeps `r` |
 
 **Listings with filters:** `rucio did list --filter 'quality=gold'` only lists a DID if `quality` is readable
 on it, under the union of all roles. With A: DID `r`, metadata `--` on `quality` and nothing else, `file1`
@@ -241,7 +249,7 @@ give, whatever the other roles hold:
 | DID `r` | metadata `--` on `quality` | visible, every key readable, data readable | B restricts nothing |
 | metadata `r` on `quality` | DID `r` on `atlas:file1` | `file1`: every key, data; `file2`: visible, `quality` only, no data | each DID on its own |
 | metadata `r` on `*` of `atlas:*` | nothing | every DID of `atlas` visible with every key, no data, no download | metadata READ is not data |
-| metadata `r` on `*` of `atlas:*` | DID `w` on `atlas:*` | can create DIDs and use her own ones (rules, attaching them), but neither add rules on nor attach the DIDs of others | prerequisites need DID READ, or owning the DID (DID WRITE on it, from B) |
+| metadata `r` on `*` of `atlas:*` | DID `w` on `atlas:alice.*` | can create `alice.*` DIDs and use them (rules, attaching them), but neither add rules on nor attach the other DIDs | prerequisites need DID READ, which B's `w` includes on `alice.*` only |
 | metadata `r` on `atlas:*` | — | alice **is not** admin of her `atlas:mine` | ownership needs DID WRITE on it |
 | metadata `r` on `atlas:*` | DID `w` on `atlas:mine` | alice administers her `atlas:mine` | B gives WRITE on it |
 | metadata `rw` on `quality` | DID `d` on `atlas:file1` | `quality` writable; every other non-protected key writable through B | B's DID DELETE |
