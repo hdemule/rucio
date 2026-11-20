@@ -208,6 +208,14 @@ def test_invalid_metadata_permissions_are_refused(world, keys, operations):
         world.grant_meta('alice', 'S:*', keys, operations)
 
 
+@pytest.mark.parametrize(('operations', 'stored'), [('', []), ('r', ['read']), ('w', ['read', 'write']), ('rw', ['read', 'write'])])
+def test_metadata_write_includes_read(world, operations, stored):
+    """ROLE METADATA PERMISSION (CORE): WRITE includes READ: a metadata permission is stored with the operations its operations include."""
+    role = world.grant_meta('alice', 'S:*', ('project',), operations)
+    permissions = _db(core_role.list_role_permissions, role)
+    assert [permission['operations'] for permission in permissions if permission['type'] == 'metadata'] == [stored]
+
+
 def test_reading_protected_and_deletion_keys_can_be_granted(world):
     """ROLE METADATA PERMISSION (GATEWAY): READ may be granted on a protected key, which then shows it, while WRITE on it never is."""
     world.grant_meta('alice', 'S:*', ('bytes', 'lifetime'), 'r')
@@ -286,10 +294,10 @@ def test_hiding_keys_alone_grants_nothing(world):
     assert _listed(world, world.alice) is None
 
 
-def test_writing_blindly(world):
-    """ROLE METADATA PERMISSION (GATEWAY): 'w' alone on a key writes it without seeing the DID, like DID '-w-'."""
+def test_writing_a_key_shows_it(world):
+    """ROLE METADATA PERMISSION (GATEWAY): 'w' on a key includes 'r': the DID is visible with that key, which is written, and no key is written blindly."""
     world.grant_meta('alice', 'S:*', ('project',), 'w')
-    assert _shown(world, world.alice, 'file1') is None
+    assert _shown(world, world.alice, 'file1') == {'project'}
     assert _writes(world, world.alice, 'file1', 'project')
     assert core_did.get_metadata(world.internal_scope, 'file1')['project'] == 'new'
     assert not _writes(world, world.alice, 'file1', 'campaign')
@@ -318,6 +326,9 @@ def test_writing_blindly(world):
     ([('did', 'S:*', 'r'), ('meta', 'S:file1', ('project',), '')],
      {('file1', 'project'): '--', ('file1', 'campaign'): 'r-', ('file2', 'project'): 'r-'}),
     ([('did', 'S:*', 'r'), ('meta', 'S:*', ('project',), 'rw')],
+     {('file1', 'project'): 'rw', ('file1', 'campaign'): 'r-'}),
+    # 'w' includes 'r': a row writing the key never hides it
+    ([('did', 'S:*', 'r'), ('meta', 'S:*', ('project',), 'w')],
      {('file1', 'project'): 'rw', ('file1', 'campaign'): 'r-'}),
     ([('did', 'S:*', 'rwd'), ('meta', 'S:*', ('project',), 'r')],
      {('file1', 'project'): 'r-', ('file1', 'campaign'): 'rw'}),
