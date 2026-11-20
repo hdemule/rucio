@@ -671,6 +671,17 @@ def _normalize_operations(operations: Any, operation_type: type[OperationT], per
     return frozenset(_normalize_operation(operation, operation_type, permission_type) for operation in operations)
 
 
+def _complete_operations(operations: "Iterable[OperationT]", included: "Mapping[OperationT, frozenset[OperationT]]") -> frozenset[OperationT]:
+    """
+    Add to the operations of a permission those they include, e.g. READ to WRITE: none stays none.
+
+    :param operations: The operations given, members of the operation type of the permission type.
+    :param included: The operations each operation of the type includes, e.g. `_INCLUDED_DID_OPERATIONS`.
+    """
+    operations = frozenset(operations)
+    return operations.union(*(included[operation] for operation in operations))
+
+
 def _describe_operations(operations: "Iterable[RolePermissionOperationType]", operation_type: "type[RolePermissionOperationType]") -> str:
     """Render the operations of a permission as the letters of the CLI, a dash for each operation not granted, e.g. 'r-d' or '---'."""
     operations = set(operations)
@@ -753,6 +764,10 @@ def _permission_handler(permission_type: Optional[Union[RolePermissionType, str]
 # A DID permission grants READ, WRITE and DELETE on the DIDs a DID pattern matches, see :func:`_validate_did_pattern`.
 # A pattern matches the DID itself only: there is no inheritance from the collections a DID is attached to.
 #
+# The operations are levels, each including the ones below it: WRITE includes READ, and DELETE includes WRITE and
+# READ, so a permission grants none ('---'), READ ('r--'), WRITE ('rw-') or DELETE ('rwd'). They are completed when
+# the permission is granted, see :func:`_complete_operations`: what is stored, and listed, is what applies.
+#
 # Within a role, the most specific pattern decides: for a DID, the row of the role whose pattern matches it and is
 # the most specific (see :func:`_did_pattern_specificity`) gives every operation the role grants on it, the other
 # rows matching it are not looked at. A row granting no operation therefore withdraws the DIDs it matches from a
@@ -816,6 +831,14 @@ def _validate_did_pattern(did_pattern: str) -> str:
         raise InputValidationError("DID pattern '%s' is too long for a scope or a name." % did_pattern)
 
     return scope_pattern + DID_SEPARATOR + name_pattern
+
+
+# the operations each DID operation includes, see the comment of the DID permissions above
+_INCLUDED_DID_OPERATIONS: dict[DidOperationType, frozenset[DidOperationType]] = {
+    DidOperationType.READ: frozenset(),
+    DidOperationType.WRITE: frozenset({DidOperationType.READ}),
+    DidOperationType.DELETE: frozenset({DidOperationType.WRITE, DidOperationType.READ}),
+}
 
 
 def _prefix_pattern_matches(value: str, pattern: str) -> bool:
@@ -956,9 +979,10 @@ class DidPermissionHandler(PermissionTypeHandler):
     Operations on DIDs, granted on DID patterns, see :func:`_validate_did_pattern` and :class:`DidAccess`.
 
     A permission is given as its 'did_pattern' and its 'operations': the list of the operations of `DidOperationType`
-    it grants ('read', 'write' and 'delete'), possibly empty. It is stored as one row per role and pattern, with one
-    boolean column per operation. Granting it sets exactly these operations on its pattern, replacing what it had,
-    and one granting none is kept: within its role, it withdraws from the DIDs it matches what a less specific
+    it grants ('read', 'write' and 'delete'), possibly empty, completed with those they include ('write' adds 'read',
+    'delete' adds 'write' and 'read'). It is stored as one row per role and pattern, with one boolean column per
+    operation. Granting it sets exactly these operations on its pattern, replacing what it had, and one granting none
+    is kept: within its role, it withdraws from the DIDs it matches what a less specific
     pattern grants. Removing it deletes the row. Only what the roles grant is looked at: who may act without a role
     (root, admins, the owner of a scope, ...) is the business of the permission policy, see
     :mod:`rucio.core.permission.generic`.
@@ -992,7 +1016,7 @@ class DidPermissionHandler(PermissionTypeHandler):
             return {}
         if parameters.get(OPERATIONS) is None:
             raise InputValidationError("'%s' must be given for a '%s' permission, an empty list to grant none." % (OPERATIONS, self.permission_type.value))
-        return {OPERATIONS: _normalize_operations(parameters[OPERATIONS], DidOperationType, self.permission_type)}
+        return {OPERATIONS: _complete_operations(_normalize_operations(parameters[OPERATIONS], DidOperationType, self.permission_type), _INCLUDED_DID_OPERATIONS)}
 
     def describe(self, target: Any, parameters: "Mapping[str, Any]") -> str:
         operations = parameters.get(OPERATIONS)
