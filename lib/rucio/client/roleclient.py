@@ -419,7 +419,9 @@ class RoleClient(BaseClient):
               of a scope part and a name part: every DID of the scopes matching a scope pattern ('data*:*', '*:*'), of a
               scope ('data:*'), of a scope matching a name pattern ('data:raw*'), or a single DID ('data:raw1'). Only a
               trailing '*' wildcard is accepted, a pattern without name part ('data', 'data*') standing for the whole
-              scope(s). The operations are 'read', 'write' and 'delete', and replace what the role has on the pattern.
+              scope(s). The operations are 'read', 'write' and 'delete', and replace what the role has on the pattern;
+              'write' includes 'read' and 'delete' includes 'write' and 'read', and they are stored so, e.g. ['write']
+              as ['read', 'write'].
               Within a role, the most specific pattern matching a DID decides, so an empty list withdraws the DIDs
               the pattern matches from a less specific pattern of the role;
             - {'did_pattern': 'data:raw*', 'keys': ['quality', 'datatype'], 'operations': ['read', 'write']} for a
