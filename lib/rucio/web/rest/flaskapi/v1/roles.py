@@ -169,8 +169,10 @@ class RolePermission(ErrorHandlingMethodView):
     The `keys` of a metadata permission are a list or a comma-separated string, '*' standing for every key and
     no keys for none: such a permission only makes the matching DIDs visible, and only takes `["read"]`. Its
     `operations` may be empty (`---`), which withdraws what the role would otherwise be granted on these keys.
-    Granting a metadata permission which exists already replaces its operations. Removing metadata permissions
-    takes the `did_pattern` and the `keys`, and removes nothing (404) if one of the keys has no permission.
+    Its operations are completed as those of a DID permission, "write" including "read": ["write"] is stored and
+    listed as ["read", "write"]. Granting a metadata permission which exists already replaces its operations.
+    Removing metadata permissions takes the `did_pattern` and the `keys`, and removes nothing (404) if one of the
+    keys has no permission.
     """
 
     def post(self, role_name: str, permission_type: str):
