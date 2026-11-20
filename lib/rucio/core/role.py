@@ -1059,15 +1059,18 @@ class DidPermissionHandler(PermissionTypeHandler):
 # metadata key of the DIDs a DID pattern matches, see :class:`MetadataPermissionHandler`. Two keys are reserved:
 # METADATA_PERMISSION_ALL_KEYS ('*') covers every key, METADATA_PERMISSION_NO_KEY none at all.
 #
+# As for the DID permissions, the operations are levels: WRITE includes READ, so a permission grants none ('--'),
+# READ ('r-') or WRITE ('rw') on a key. They are completed when the permission is granted, see :func:`_complete_operations`.
+#
 # Within a role, the narrower subject wins. For a key of a DID: the rows of the role naming that very key decide;
 # if none matches the DID, its '*' rows; if none matches either, its DID permissions, as without metadata permissions
 # (READ on the DID to read every key, DELETE on it to write them, as its most specific DID pattern decides). Within one level, the most specific DID pattern
 # decides, see :func:`_did_pattern_specificity`. A row granting no operation therefore withdraws the key from the
 # DID permissions of its role. Across roles, what they grant adds up: a role never takes away what another grants.
 #
-# A row granting READ, whatever its key, also makes the DIDs its pattern matches visible: they are listed, and
-# read like with READ on them, except for their data (no replica PFN, hence no download), see
-# :func:`has_metadata_visibility`. The keys of a DID visible this way are only those its rows grant.
+# A row granting READ, whatever its key, hence any row granting an operation, also makes the DIDs its pattern
+# matches visible: they are listed, and read like with READ on them, except for their data (no replica PFN, hence no
+# download), see :func:`has_metadata_visibility`. The keys of a DID visible this way are only those its rows grant.
 #
 # Only the roles are looked at here: root, admins, the owner of the scope and the owner of a DID are given every
 # key by the permission policy, see :mod:`rucio.core.permission.generic`, also when it filters the keys of a listing.
@@ -1087,6 +1090,12 @@ METADATA_KEY_SEPARATOR = ","
 # the parameters of a metadata permission, see `MetadataPermissionHandler`
 METADATA_KEYS = "keys"
 METADATA_OPERATIONS = "operations"
+
+# the operations each metadata operation includes, see the comment of the metadata permissions above
+_INCLUDED_METADATA_OPERATIONS: dict[MetadataOperationType, frozenset[MetadataOperationType]] = {
+    MetadataOperationType.READ: frozenset(),
+    MetadataOperationType.WRITE: frozenset({MetadataOperationType.READ}),
+}
 
 
 def _normalize_metadata_keys(keys: Any) -> tuple[str, ...]:
@@ -1152,9 +1161,9 @@ class MetadataPermissionHandler(PermissionTypeHandler):
 
     A permission is given as its 'did_pattern', its 'keys' (a list, or a comma-separated string; '*' for every key,
     none at all for no key) and, to grant it, its 'operations': the operations of `MetadataOperationType`, possibly
-    none. Granting it sets exactly these operations on each key, replacing what the role was granted on it, a key
-    granted no operation being kept, see the comment of the metadata permissions above. Removing it removes the
-    rows of the keys: if one of them has no row, nothing is removed.
+    none, completed with those they include ('write' adds 'read'). Granting it sets exactly these operations on each
+    key, replacing what the role was granted on it, a key granted no operation being kept, see the comment of the
+    metadata permissions above. Removing it removes the rows of the keys: if one of them has no row, nothing is removed.
 
     A permission on no key only makes the DIDs visible, so it must grant READ and only READ. WRITE is never granted
     on the keys altering the DID itself (METADATA_KEYS_NOT_WRITABLE), which are left to the DID permissions; '*'
@@ -1182,7 +1191,7 @@ class MetadataPermissionHandler(PermissionTypeHandler):
 
         if parameters.get(METADATA_OPERATIONS) is None:
             raise InputValidationError("'%s' must be given for a '%s' permission, an empty list to grant none." % (METADATA_OPERATIONS, self.permission_type.value))
-        operations = _normalize_metadata_operations(parameters[METADATA_OPERATIONS])
+        operations = _complete_operations(_normalize_metadata_operations(parameters[METADATA_OPERATIONS]), _INCLUDED_METADATA_OPERATIONS)
         if keys == (METADATA_PERMISSION_NO_KEY,) and operations != {MetadataOperationType.READ}:
             raise InputValidationError("A '%s' permission on no key only makes the DIDs visible, so it must grant '%s' and only '%s'."
                                        % (self.permission_type.value, MetadataOperationType.READ.value, MetadataOperationType.READ.value))
@@ -1579,7 +1588,8 @@ def add_role_permission(
         add_role_permission(role, RolePermissionType.METADATA, {'did_pattern': 'data:*', 'keys': 'quality', 'operations': ['read']}, session=session)
         add_role_permission(role, RolePermissionType.LIMIT, {'rse_expression': 'tier=1', 'global': 10**13}, session=session)
 
-    A permission which exists already is overwritten: a DID or metadata permission gets exactly the operations given.
+    A permission which exists already is overwritten: a DID or metadata permission gets exactly the operations given,
+    completed with the operations they include, e.g. 'write' with 'read', see :func:`_complete_operations`.
 
     :param role: The role to grant the permission to.
     :param permission_type: The type of the permission, e.g. `RolePermissionType.DID`.
