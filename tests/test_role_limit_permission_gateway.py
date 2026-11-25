@@ -99,7 +99,7 @@ class World:
     def role(self, **dates) -> str:
         """A new role held by alice, see :meth:`add_rse`."""
         role = 'rbac-%s' % generate_uuid()[:12]
-        gw_role.add_role(role, issuer='root', vo=self.vo)
+        gw_role.add_role(role, issuer='root', locked=False, vo=self.vo)
         self.roles.append(role)
         # active since a while, so that the role holds whatever the clock does during the test
         dates.setdefault('activates_at', datetime.utcnow() - timedelta(hours=1))
