@@ -1693,7 +1693,7 @@ def is_filter_disabled(account: "InternalAccount", filter_name: str, *, session:
     - its `disable_filters_for_all_accounts`: for every account regardless of its roles,
       even for an account holding no role at all;
     - its `disable_filters_for_all_roles`: for every account holding at least one role;
-    - the 'disable-filters' of a role: for every account holding that role.
+    - the 'disable_filters' of a role: for every account holding that role.
 
     An account only holds a role through an assignment which is active. A reserved role
     never disables a filter, since the policy package cannot define it. The filters are documented
