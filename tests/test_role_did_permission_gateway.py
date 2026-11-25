@@ -146,7 +146,7 @@ class World:
         """Grant `operations` ('r', 'w', 'd', '' for none) on `did_pattern` ('S' standing for the scope) to an account through a role."""
         if role is None or role not in self.roles:
             new_role = 'rbac-%s' % generate_uuid()[:12]
-            _db(core_role.add_role, new_role)
+            _db(core_role.add_role, new_role, locked=False)
             self.roles.append(new_role)
             # active since a while, so that the role holds whatever the clock does during the test
             dates.setdefault('activates_at', datetime.utcnow() - timedelta(hours=1))
