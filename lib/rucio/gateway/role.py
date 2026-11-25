@@ -41,7 +41,7 @@ def add_role(
         issuer: str,
         description: Optional[str] = None,
         assignable: bool = True,
-        locked: bool = False,
+        locked: bool = True,
         vo: str = DEFAULT_VO) -> None:
     """
     Add a new role.
