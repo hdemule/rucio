@@ -493,7 +493,7 @@ def _stub_disabled_filters(monkeypatch, roles=None, all_roles=frozenset(), all_a
 def policy_role(db_session):
     """Add a new role for the test, and remove it again afterwards together with its account assignments."""
     role = 'policy-%s' % generate_uuid()
-    core_role.add_role(role, session=db_session)
+    core_role.add_role(role, locked=False, session=db_session)
     yield role
     # a failing test may leave the transaction aborted, which would make the cleaning fail too
     db_session.rollback()
