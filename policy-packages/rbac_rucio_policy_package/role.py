@@ -16,12 +16,12 @@
 #
 # By default, every listing below filters out the items whose scope the account may not READ
 # (through a role, scope ownership or admin/root privileges). A role disables a filter by naming
-# it in its "disable-filters": the accounts holding that role (through an assignment which has
-# not expired yet) then get the listing unfiltered. A role without "disable-filters" disables
+# it in its "disable_filters": the accounts holding that role (through an assignment which has
+# not expired yet) then get the listing unfiltered. A role without "disable_filters" disables
 # nothing, and a filter is disabled as soon as one role of the account disables it.
 #
 # A filter can be disabled at three levels, from the most specific to the most general:
-#   1. "disable-filters" of a role                => accounts holding that role.
+#   1. "disable_filters" of a role                => accounts holding that role.
 #   2. "disable_filters_for_all_roles"            => accounts holding AT LEAST ONE role, whichever it is.
 #   3. "disable_filters_for_all_accounts"         => EVERY account, EVEN ACCOUNTS WITHOUT ANY ROLE.
 # A filter is disabled for an account as soon as one of the levels which applies to it disables it.
@@ -63,7 +63,7 @@
 #     {
 #         "name": "user",
 #         "description": "...",
-#         "disable-filters": ["list_scopes", "list_content"],
+#         "disable_filters": ["list_scopes", "list_content"],
 #     },
 
 # The permissions of the roles are not defined here but in the database, see `rucio role permission list ROLE`
@@ -72,17 +72,17 @@ roles = [
     {
         "name": "user",
         "description": "Reads and writes the DIDs of scope atlas, reads those of scope archive, and some metadata keys of scope physics without their data. Limited on the dev RSEs.",
-        "disable-filters": [],
+        "disable_filters": [],
     },
     {
         "name": "moderator",
         "description": "Reads the DIDs of scope physics and curates their metadata, except their project and the provenance of the raw files.",
-        "disable-filters": [],
+        "disable_filters": [],
     },
     {
         "name": "superuser",
         "description": "Reads every DID of every scope, with all its metadata.",
-        "disable-filters": [],
+        "disable_filters": [],
     },
 ]
 
