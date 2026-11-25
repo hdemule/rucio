@@ -211,7 +211,7 @@ def _check_suspicious_replicas_readable(pfns: list[Union[str, dict[str, Any]]], 
     """
     if not pfns or not rucio.core.permission.is_listing_filtered(issuer, 'declare_suspicious_file_replicas', session=session):
         return
-    can_access = rucio.core.permission.did_filter(issuer, 'declare_suspicious_file_replicas', session=session, reads_data=True)
+    can_access = rucio.core.permission.did_filter(issuer, 'declare_suspicious_file_replicas', session=session)
     if isinstance(pfns[0], str):
         _, pfns_by_rse, _ = replica.get_pfn_to_rse(pfns, vo=issuer.vo, session=session)
         located = [pfn for rse_pfns in pfns_by_rse.values() for pfn in rse_pfns]
