@@ -110,7 +110,7 @@ class World:
         if role in self.roles:
             return role  # type: ignore[return-value]
         new_role = 'rbac-%s' % generate_uuid()[:12]
-        _db(core_role.add_role, new_role)
+        _db(core_role.add_role, new_role, locked=False)
         self.roles.append(new_role)
         # active since a while, so that the role holds whatever the clock does during the test
         dates.setdefault('activates_at', datetime.utcnow() - timedelta(hours=1))
