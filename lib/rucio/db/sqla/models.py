@@ -398,7 +398,7 @@ class Roles(BASE, ModelBase):
     role: Mapped[str] = mapped_column(String(64))
     description: Mapped[Optional[str]] = mapped_column(Text)
     assignable: Mapped[bool] = mapped_column(Boolean, default=True)
-    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked: Mapped[bool] = mapped_column(Boolean, default=True)
     _table_args = (PrimaryKeyConstraint('role', name='ROLES_PK'),
                    CheckConstraint('ROLE IS NOT NULL', name='ROLES_ROLE_NN'),
                    CheckConstraint('ASSIGNABLE IS NOT NULL', name='ROLES_ASSIGNABLE_NN'),

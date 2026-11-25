@@ -51,7 +51,7 @@ def upgrade():
                              sa.Column('role', sa.String(64)),
                              sa.Column('description', sa.Text),
                              sa.Column('assignable', sa.Boolean, nullable=False, default=True),
-                             sa.Column('locked', sa.Boolean, nullable=False, default=False),
+                             sa.Column('locked', sa.Boolean, nullable=False, default=True),
                              sa.Column('created_at', sa.DateTime, default=datetime.datetime.utcnow),
                              sa.Column('updated_at', sa.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow))
         create_primary_key('ROLES_PK', 'roles', ['role'])
