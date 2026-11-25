@@ -245,7 +245,7 @@ def list_roles(session: "Session") -> list[dict[str, Any]]:
     ]
 
 
-def add_role(role: str, description: Optional[str] = None, assignable: bool = True, locked: bool = False, *, session: "Session") -> None:
+def add_role(role: str, description: Optional[str] = None, assignable: bool = True, locked: bool = True, *, session: "Session") -> None:
     """
     Add a new role to the system.
 
