@@ -94,7 +94,7 @@ class RoleClient(BaseClient):
             role: str,
             description: Optional[str] = None,
             assignable: bool = True,
-            locked: bool = False) -> None:
+            locked: bool = True) -> None:
         """
         Add a new role.
 
