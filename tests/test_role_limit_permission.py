@@ -50,7 +50,7 @@ def role_factory(db_session):
 
     def _make_role(*accounts, **assignment):
         role = 'rse-quota-%s' % generate_uuid()
-        core_role.add_role(role, session=db_session)
+        core_role.add_role(role, locked=False, session=db_session)
         created.append(role)
         for account in accounts:
             core_role.add_account_role(account, role, session=db_session, **assignment)
