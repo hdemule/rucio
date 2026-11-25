@@ -75,7 +75,7 @@ class RoleList(ErrorHandlingMethodView):
         parameters = json_parameters(optional=True)
         description = param_get(parameters, 'description', default=None)
         assignable = param_get(parameters, 'assignable', default=True)
-        locked = param_get(parameters, 'locked', default=False)
+        locked = param_get(parameters, 'locked', default=True)
 
         try:
             add_role(
