@@ -197,7 +197,7 @@ def _parse_roles(roles: Any, module_name: str) -> dict[str, dict[str, Any]]:
 
         parsed[name] = {
             'description': definition.get('description'),
-            'disable_filters': _parse_disable_filters(definition.get('disable-filters'), "'disable-filters' of role '%s'" % name, module_name),
+            'disable_filters': _parse_disable_filters(definition.get('disable_filters'), "'disable_filters' of role '%s'" % name, module_name),
         }
 
     return parsed
@@ -209,7 +209,7 @@ def _parse_disable_filters(disable_filters: Any, source: str, module_name: str) 
 
     Filtering is the default: each listing drops the items in scopes the account may not read.
     A policy package disables filters for the accounts holding a role, through the optional
-    'disable-filters' of the role definition, for every account holding at least one role, through
+    'disable_filters' of the role definition, for every account holding at least one role, through
     the optional `disable_filters_for_all_roles` attribute of its role module, or for every account
     of the instance, through the optional `disable_filters_for_all_accounts` attribute of its role module,
     see :func:`rucio.core.role.is_filter_disabled`.
