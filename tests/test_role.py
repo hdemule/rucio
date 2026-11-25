@@ -420,20 +420,20 @@ def test_add_reserved_role_rest(rest_client, auth_token):
 
 @pytest.mark.parametrize('definition, expected', [
     ({'description': 'no filter disabled'}, frozenset()),
-    ({'disable-filters': []}, frozenset()),
-    ({'disable-filters': ['list_scopes', ' list_content ']}, frozenset({'list_scopes', 'list_content'})),
+    ({'disable_filters': []}, frozenset()),
+    ({'disable_filters': ['list_scopes', ' list_content ']}, frozenset({'list_scopes', 'list_content'})),
 ])
 def test_parse_roles_disable_filters(definition, expected):
-    """ROLE (CORE): A policy package role disables no filter, unless it names them in its 'disable-filters'."""
+    """ROLE (CORE): A policy package role disables no filter, unless it names them in its 'disable_filters'."""
     roles = permission._parse_roles([dict(definition, name='user')], 'policy.role')
     assert roles['user']['disable_filters'] == expected
 
 
 @pytest.mark.parametrize('disable_filters', ['list_scopes', [''], ['list_scopes', 42], {'list_scopes': True}])
 def test_parse_roles_invalid_disable_filters(disable_filters):
-    """ROLE (CORE): A policy package role whose 'disable-filters' is not a list of filter names is refused."""
+    """ROLE (CORE): A policy package role whose 'disable_filters' is not a list of filter names is refused."""
     with pytest.raises(ErrorLoadingPolicyPackage):
-        permission._parse_roles([{'name': 'user', 'disable-filters': disable_filters}], 'policy.role')
+        permission._parse_roles([{'name': 'user', 'disable_filters': disable_filters}], 'policy.role')
 
 
 @pytest.fixture
