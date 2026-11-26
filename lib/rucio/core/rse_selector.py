@@ -86,7 +86,7 @@ class RSESelector:
         use_roles = core_role.is_rbac_enabled()
         # admins are exempt from quotas: the accounts with the 'admin' attribute, and with RBAC, root and the holders of the admin role
         is_admin = has_account_attribute(account=account, key='admin', session=session)\
-            or (use_roles and (account.external == 'root' or core_role.has_admin_role(account=account, session=session)))
+            or (use_roles and (account.external == 'root' or core_role.has_account_admin_role(account=account, session=session)))
         if is_admin or ignore_account_limit:
             for rse in self.rses:
                 rse['quota_left'] = float('inf')
