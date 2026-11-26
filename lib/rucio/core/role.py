@@ -431,6 +431,9 @@ def add_account_role(
     :param force: Assign the role even if it is not assignable.
     :param activates_at: An optional date from which the assignment grants the role. None means from now on.
     :param session: The database session.
+    :raises AccountNotFound: If the account does not exist.
+    :raises RoleNotFound: If the role does not exist.
+    :raises Duplicate: If the account already has the role assigned.
     :raises RoleAssignmentDisabled: If the role is not assignable and `force` is not given.
     :raises InputValidationError: If a date is not valid, or if the assignment would expire before it activates.
     """
@@ -446,15 +449,13 @@ def add_account_role(
     session.add(models.AccountRoleAssociation(account=account, role=role, activates_at=activates_at, expires_at=expires_at))
     try:
         session.commit()
-    except IntegrityError as error:
+    except IntegrityError:
         session.rollback()
-        if _violates_constraint(error, "ACCOUNT_ROLE_MAP_ACCOUNT_FK"):
+        # look the account and the role up rather than parsing the error, since SQLite does not name the violated constraint
+        if session.execute(select(models.Account.account).where(models.Account.account == account)).scalar_one_or_none() is None:
             raise AccountNotFound("Account '%s' does not exist." % account)
-        if _violates_constraint(error, "ACCOUNT_ROLE_MAP_ROLE_FK"):
-            raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_constraint(error, "ACCOUNT_ROLE_MAP_PK"):
-            raise Duplicate("Account '%s' already has role '%s'." % (account, role))
-        raise Duplicate("Either account '%s' or role '%s' does not exist, or account '%s' already has role '%s'." % (account, role, account, role))
+        _ensure_role_exists(role, session)
+        raise Duplicate("Account '%s' already has role '%s'." % (account, role))
 
 
 def delete_account_role(account: "InternalAccount", role: str, force: bool = False, *, session: "Session") -> None:
