@@ -373,17 +373,20 @@ def test_list_account_roles_reserved_role(reserved_role, db_session, root_accoun
         core_role.delete_account_role(root_account, reserved_role, force=True, session=db_session)
 
 
-@pytest.mark.parametrize('expires_at, valid', [
-    (None, True),
-    (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1), True),
-    (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1), False),
+@pytest.mark.parametrize('activates_in, expires_in, active', [
+    (None, None, True),
+    (timedelta(days=-1), timedelta(days=1), True),
+    (timedelta(days=-2), timedelta(days=-1), False),
+    (timedelta(days=1), None, False),
 ])
-def test_has_account_valid_role(reserved_role, db_session, root_account, expires_at, valid):
-    """ROLE (CORE): An account only holds a role through an assignment which has not expired yet."""
-    assert not core_role.has_account_valid_role(root_account, reserved_role, session=db_session)
-    core_role.add_account_role(root_account, reserved_role, expires_at=expires_at, activates_at=None if expires_at is None else expires_at - timedelta(days=1), force=True, session=db_session)
+def test_has_account_active_role(reserved_role, db_session, root_account, activates_in, expires_in, active):
+    """ROLE (CORE): An account only holds a role through an assignment which is active: activated already and not expired yet."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert not core_role.has_account_active_role(root_account, reserved_role, session=db_session)
+    core_role.add_account_role(root_account, reserved_role, activates_at=None if activates_in is None else now + activates_in,
+                               expires_at=None if expires_in is None else now + expires_in, force=True, session=db_session)
     try:
-        assert core_role.has_account_valid_role(root_account, reserved_role, session=db_session) is valid
+        assert core_role.has_account_active_role(root_account, reserved_role, session=db_session) is active
     finally:
         core_role.delete_account_role(root_account, reserved_role, force=True, session=db_session)
 
