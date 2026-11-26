@@ -30,8 +30,9 @@ RESERVED_KEYS = ['scope', 'name', 'account', 'did_type', 'is_open', 'monotonic',
 
 DEFAULT_VO = 'def'
 
-# Roles managed by Rucio itself, created along with the schema. These roles are always locked, not assignable, and can never be
-# deleted nor altered, except for their assignable state.
+# Roles managed by Rucio itself, created along with the schema, not assignable. They are not regular roles: what they confer is
+# built into Rucio (e.g. the admin role makes its holders admins), so they are always locked, can never be deleted, and nothing but
+# their assignable state can be changed, even forced.
 ADMIN_ROLE = 'admin'
 RESERVED_ROLES = [ADMIN_ROLE]
 
