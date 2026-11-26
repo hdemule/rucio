@@ -272,14 +272,24 @@ def test_list_role_accounts(policy_role, random_account_factory, db_session):
     assert entries[second]['expires_at'] == expires_at
 
 
-def test_add_account_role_errors(policy_role, random_account, vo, db_session):
-    """ROLE (CORE): A role cannot be assigned to an account which does not exist, nor can a role which does not exist, nor twice the same role."""
+@pytest.mark.parametrize('missing_role', [False, True])
+def test_add_account_role_unknown_account(policy_role, vo, db_session, missing_role):
+    """ROLE (CORE): A role cannot be assigned to an account which does not exist, whether or not the role exists."""
+    account = InternalAccount('missing%s' % generate_uuid()[:8], vo=vo)
+    role = 'missing-%s' % generate_uuid() if missing_role else policy_role
     with pytest.raises(AccountNotFound):
-        core_role.add_account_role(InternalAccount('missing%s' % generate_uuid()[:8], vo=vo), policy_role, session=db_session)
+        core_role.add_account_role(account, role, session=db_session)
+
+
+def test_add_account_role_unknown_role(random_account, db_session):
+    """ROLE (CORE): A role which does not exist cannot be assigned to an account."""
     with pytest.raises(RoleNotFound):
         core_role.add_account_role(random_account, 'missing-%s' % generate_uuid(), session=db_session)
     assert _held_roles(random_account, db_session) == set()
 
+
+def test_add_account_role_twice(policy_role, random_account, db_session):
+    """ROLE (CORE): The same role cannot be assigned twice to an account, and the first assignment is kept."""
     core_role.add_account_role(random_account, policy_role, session=db_session)
     with pytest.raises(Duplicate):
         core_role.add_account_role(random_account, policy_role, session=db_session)
