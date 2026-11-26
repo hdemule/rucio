@@ -282,11 +282,11 @@ def sync_account_roles(account: str, roles: Any, issuer: str, dry_run: bool = Fa
 
 def clean_expired_account_roles(issuer: str, dry_run: bool = False, vo: str = DEFAULT_VO) -> dict[str, Any]:
     """
-    Remove the expired role assignments of every account of the VO.
+    Remove the expired role assignments of every account.
 
     :param issuer: The account issuing the command.
     :param dry_run: Only report what would be removed, without writing to the database.
-    :param vo: The VO of the issuing account, whose accounts are cleaned.
+    :param vo: The VO of the issuing account.
     :returns: The report of the cleaning, see :func:`rucio.core.role.clean_expired_account_roles`.
     """
     operation = DatabaseOperationType.READ if dry_run else DatabaseOperationType.WRITE
@@ -295,7 +295,7 @@ def clean_expired_account_roles(issuer: str, dry_run: bool = False, vo: str = DE
         if not auth_result.allowed:
             raise AccessDenied('Account %s does not have permission to clean the expired role assignments.' % issuer)
 
-        return core_role.clean_expired_account_roles(vo=vo, dry_run=dry_run, session=session)
+        return core_role.clean_expired_account_roles(dry_run=dry_run, session=session)
 
 
 def list_role_permissions(role: str, issuer: str, vo: str = DEFAULT_VO) -> list[dict[str, str]]:
