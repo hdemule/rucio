@@ -74,11 +74,6 @@ def is_rbac_enabled() -> bool:
 # Helpers
 # ----------------------------------------------------------------------------------------------
 
-def _violates_constraint(error: IntegrityError, constraint_name: str) -> bool:
-    """Best-effort match of a named DB constraint against the raised IntegrityError text."""
-    return constraint_name.lower() in str(error.orig or error).lower()
-
-
 def _normalize_description(description: Optional[str]) -> Optional[str]:
     """
     Normalise a role description before it is stored.
