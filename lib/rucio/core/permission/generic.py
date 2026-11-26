@@ -1554,7 +1554,7 @@ def perm_list_role_permissions(issuer: "InternalAccount", kwargs: dict[str, Any]
     :returns: True if account is allowed, otherwise False
     """
     return _is_root(issuer) or _is_admin(issuer, session)\
-        or role_core.has_account_valid_role(account=issuer, role=kwargs['role'], session=session)
+        or role_core.has_account_active_role(account=issuer, role=kwargs['role'], session=session)
 
 
 def perm_read_data(issuer: "InternalAccount", kwargs: dict[str, Any], session: "Session") -> bool:
