@@ -385,7 +385,7 @@ class ExpiredAccountRoles(ErrorHandlingMethodView):
         ---
         summary: Clean expired account roles
         description: |
-          Remove the expired role assignments of every account of the VO, whatever the role.
+          Remove the expired role assignments of every account, whatever the role.
           With `dry_run`, only report what would be removed.
         tags:
           - Role
