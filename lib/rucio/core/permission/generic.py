@@ -184,7 +184,7 @@ def _is_admin(issuer: "InternalAccount", session: "Session") -> bool:
     :returns: True if account is admin, otherwise False
     """
     return has_account_attribute(account=issuer, key='admin', session=session)\
-        or (_use_roles() and role_core.has_admin_role(account=issuer, session=session))
+        or (_use_roles() and role_core.has_account_admin_role(account=issuer, session=session))
 
 
 def _did_exists(scope: "InternalScope", name: str, session: "Session") -> bool:
