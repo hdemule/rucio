@@ -630,12 +630,12 @@ def check_role_permissions(role: str, expected: frozenset[tuple[str, str]]) -> "
 
 def check_account_roles(account: str, expected: set[str]) -> "Callable[[], Optional[str]]":
     def check() -> Optional[str]:
-        from rucio.core.role import has_account_valid_role, list_account_roles
+        from rucio.core.role import has_account_active_role, list_account_roles
         with db_session(DatabaseOperationType.READ) as session:
             # only an active assignment grants a role: activated already and not expired yet
             held = {
                 role['role'] for role in list_account_roles(_account(account), session=session)
-                if has_account_valid_role(_account(account), role['role'], session=session)
+                if has_account_active_role(_account(account), role['role'], session=session)
             }
         if expected and expected - held:
             return 'does not hold %s' % ', '.join(sorted(expected - held))
