@@ -32,7 +32,7 @@ DEFAULT_VO = 'def'
 
 # Roles managed by Rucio itself, created along with the schema, not assignable. They are not regular roles: what they confer is
 # built into Rucio (e.g. the admin role makes its holders admins), so they are always locked, can never be deleted, and nothing but
-# their assignable state can be changed, even forced.
+# their assignable state can be changed, even forced. In particular, no permission can be granted to them nor removed from them.
 ADMIN_ROLE = 'admin'
 RESERVED_ROLES = [ADMIN_ROLE]
 
