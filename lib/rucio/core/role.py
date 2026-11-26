@@ -418,7 +418,7 @@ def list_role_accounts(role: str, session: "Session") -> list[dict[str, Any]]:
     ]
 
 
-def has_account_valid_role(account: "InternalAccount", role: str, session: "Session") -> bool:
+def has_account_active_role(account: "InternalAccount", role: str, session: "Session") -> bool:
     """
     Tell whether the account holds the role through an assignment which is active: activated already and not expired yet.
 
@@ -434,7 +434,7 @@ def has_account_valid_role(account: "InternalAccount", role: str, session: "Sess
     return session.execute(stmt).first() is not None
 
 
-def has_admin_role(account: "InternalAccount", *, session: "Session") -> bool:
+def has_account_admin_role(account: "InternalAccount", *, session: "Session") -> bool:
     """
     Tell whether the account holds the reserved admin role through an assignment which is active.
 
@@ -443,7 +443,7 @@ def has_admin_role(account: "InternalAccount", *, session: "Session") -> bool:
     :param account: The account to check.
     :param session: The database session.
     """
-    return has_account_valid_role(account=account, role=ADMIN_ROLE, session=session)
+    return has_account_active_role(account=account, role=ADMIN_ROLE, session=session)
 
 
 def add_account_role(
