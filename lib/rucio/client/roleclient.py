@@ -383,7 +383,7 @@ class RoleClient(BaseClient):
 
     def clean_expired_account_roles(self, dry_run: bool = False) -> dict[str, Any]:
         """
-        Remove the expired role assignments of every account of the VO, whatever the role.
+        Remove the expired role assignments of every account, whatever the role.
 
         Parameters
         ----------
