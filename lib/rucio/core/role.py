@@ -52,17 +52,17 @@ from rucio.common.exception import (
     RoleReserved,
 )
 from rucio.common.schema import get_schema_value
-from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import DATE_FORMAT, str_to_date
 from rucio.db.sqla import models
 from rucio.db.sqla.constants import DidOperationType, RolePermissionOperationType, RolePermissionType
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
 
     from sqlalchemy.orm import Session
     from sqlalchemy.sql.elements import ColumnElement
 
+    from rucio.common.types import InternalAccount, InternalScope
 
 # Marks a date of a role assignment which is to be left as it is, see :func:`set_account_role_dates`.
 KEEP: Any = object()
@@ -641,8 +641,8 @@ class PermissionTypeHandler:
     """
     Everything the generic permission functions need to know about one permission type.
 
-    A subclass names the parameter holding the target of a permission (`target_attribute`) and its
-    tables (`tables`), and implements how a permission is validated, granted, removed and listed.
+    A subclass names the parameter holding the target of a permission (`target_attribute`),
+    and implements how a permission is validated, granted, removed and listed.
     The methods writing to the database do not commit.
     """
     permission_type: ClassVar[RolePermissionType]
@@ -650,8 +650,6 @@ class PermissionTypeHandler:
     target_attribute: ClassVar[str]
     # how the target is called in messages
     target_label: ClassVar[str]
-    # the `role_<type>_permission_map` models
-    tables: ClassVar[tuple[Any, ...]]
 
     def normalize_target(self, target: Any, *, session: "Session") -> Any:
         """
@@ -938,7 +936,6 @@ class DidPermissionHandler(PermissionTypeHandler):
     """
     permission_type = RolePermissionType.DID
     model = models.RoleDidPermissionAssociation
-    tables = (models.RoleDidPermissionAssociation,)
     target_attribute = "did_pattern"
     target_label = "DID pattern"
 
@@ -1019,11 +1016,6 @@ def _split_target(handler: PermissionTypeHandler, parameters: "Mapping[str, Any]
     return parameters.pop(handler.target_attribute), parameters
 
 
-def _violates_table_constraint(error: IntegrityError, handler: PermissionTypeHandler, suffix: str) -> bool:
-    """Tell whether the IntegrityError comes from the constraint of one of the tables of a permission type, e.g. its '_PK'."""
-    return any(_violates_constraint(error, "%s_%s" % (table.__tablename__.upper(), suffix)) for table in handler.tables)
-
-
 def list_role_permissions(role: str, *, session: "Session") -> list[dict[str, Any]]:
     """
     List the permissions granted to a role, of every type.
@@ -1086,14 +1078,11 @@ def add_role_permission(
     except Duplicate:
         session.rollback()
         raise
-    except IntegrityError as error:
+    except IntegrityError:
         session.rollback()
-        described = handler.describe(target, parameters)
-        if _violates_table_constraint(error, handler, "ROLE_FK"):
-            raise RoleNotFound("Role '%s' does not exist." % role)
-        if _violates_table_constraint(error, handler, "PK"):
-            raise Duplicate("Role '%s' already has %s." % (role, described))
-        raise Duplicate("Either role '%s' does not exist, or it already has %s." % (role, described))
+        # look the role up rather than parsing the error, since SQLite does not name the violated constraint
+        _ensure_role_exists(role, session)
+        raise Duplicate("Role '%s' already has %s." % (role, handler.describe(target, parameters)))
 
 
 def delete_role_permission(
