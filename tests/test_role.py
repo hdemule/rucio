@@ -588,8 +588,8 @@ def _held_roles(account, session):
 
 
 @pytest.mark.parametrize('dry_run', [False, True])
-def test_clean_expired_account_roles(policy_role, reserved_role, random_account_factory, vo, db_session, dry_run):
-    """ROLE (CORE): Cleaning removes the expired assignments of every account of the VO, whatever the role, but keeps the valid ones; a dry run only reports them."""
+def test_clean_expired_account_roles(policy_role, reserved_role, random_account_factory, db_session, dry_run):
+    """ROLE (CORE): Cleaning removes the expired assignments of every account, whatever the role, but keeps the valid ones; a dry run only reports them."""
     first, second = random_account_factory(), random_account_factory()
     valid_role = 'valid-%s' % generate_uuid()
     core_role.add_role(valid_role, session=db_session)
@@ -598,7 +598,7 @@ def test_clean_expired_account_roles(policy_role, reserved_role, random_account_
         _assign_expired(second, reserved_role, db_session)
         core_role.add_account_role(second, valid_role, session=db_session)
 
-        report = core_role.clean_expired_account_roles(vo=vo, dry_run=dry_run, session=db_session)
+        report = core_role.clean_expired_account_roles(dry_run=dry_run, session=db_session)
 
         assert report['dry_run'] is dry_run
         removed = {(entry['account'], entry['role']) for entry in report['removed']}
@@ -614,14 +614,6 @@ def test_clean_expired_account_roles(policy_role, reserved_role, random_account_
         db_session.execute(delete(models.AccountRoleAssociation).where(models.AccountRoleAssociation.role.in_([valid_role, reserved_role])))
         db_session.execute(delete(models.Roles).where(models.Roles.role == valid_role))
         db_session.commit()
-
-
-def test_clean_expired_account_roles_other_vo(policy_role, random_account, db_session):
-    """ROLE (CORE): Cleaning the expired assignments of another VO leaves those of the account's VO alone."""
-    _assign_expired(random_account, policy_role, db_session)
-    report = core_role.clean_expired_account_roles(vo='zzz', session=db_session)
-    assert all(entry['account'] != random_account.external for entry in report['removed'])
-    assert _held_roles(random_account, db_session) == {policy_role}
 
 
 def test_clean_expired_account_roles_route():
