@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import pytest
 
-from rucio.common.exception import InputValidationError, RolePermissionNotFound
+from rucio.common.exception import InputValidationError, RoleNotFound, RolePermissionNotFound
 from rucio.common.types import InternalAccount, InternalScope
 from rucio.common.utils import generate_uuid
 from rucio.core import permission as core_permission
@@ -124,6 +124,12 @@ def test_did_permission_replaces_its_operations(role_factory, db_session):
         core_role.delete_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:tmp*', 'operations': []}, session=db_session)
     with pytest.raises(InputValidationError):
         core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operations': 'read'}, session=db_session)
+
+
+def test_did_permission_unknown_role(db_session):
+    """ROLE DID PERMISSION (CORE): A DID permission cannot be granted to a role which does not exist."""
+    with pytest.raises(RoleNotFound):
+        core_role.add_role_permission('missing-%s' % generate_uuid(), RolePermissionType.DID, {'did_pattern': 'data:raw*', 'operations': ['read']}, session=db_session)
 
 
 @pytest.mark.parametrize(('operations', 'stored'), [
