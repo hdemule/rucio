@@ -246,15 +246,18 @@ def test_ownership_needs_write_on_the_did(random_account, grant, catalogue, gene
     grant('mock:%(prefix)s_new*', 'w')
     # setting a key leading to its removal alters the DID
     assert not generic.perm_set_metadata(random_account, {'scope': MOCK, 'name': own, 'key': 'lifetime'}, db_session)
-    assert not generic.perm_read_data(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert not generic.perm_list_replicas(random_account, {'scope': MOCK, 'name': own}, db_session)
 
     grant('mock:%(prefix)s_own*', 'r')
     assert not generic.perm_set_metadata(random_account, {'scope': MOCK, 'name': own, 'key': 'lifetime'}, db_session)
-    assert generic.perm_read_data(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert generic.perm_list_replicas(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert not generic.did_filter(random_account, 'list_dids', db_session, operation=DidOperationType.DELETE)(MOCK, own)
 
+    # ownership and WRITE make DELETE
     grant('mock:%(prefix)s_own*', 'w')
     assert generic.perm_set_metadata(random_account, {'scope': MOCK, 'name': own, 'key': 'lifetime'}, db_session)
-    assert generic.perm_read_data(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert generic.perm_list_replicas(random_account, {'scope': MOCK, 'name': own}, db_session)
+    assert generic.did_filter(random_account, 'list_dids', db_session, operation=DidOperationType.DELETE)(MOCK, own)
 
 
 def test_filtering_listings_per_did(random_account, grant, catalogue, generic, db_session):
@@ -628,17 +631,50 @@ def test_read_only_area_in_a_writable_scope(random_account, grant, catalogue, ge
     catalogue.add(calib, owner='someone else')
     grant('rbac_other:%(prefix)s*', 'rwd')
     grant('rbac_other:%(prefix)s_raw*', 'r')
-    assert generic.perm_read_data(random_account, {'scope': OTHER, 'name': raw}, db_session)
+    assert generic.perm_list_replicas(random_account, {'scope': OTHER, 'name': raw}, db_session)
     # setting a key leading to its removal alters the DID
     assert not generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': raw, 'key': 'lifetime'}, db_session)
     assert generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': calib, 'key': 'lifetime'}, db_session)
     assert not generic.perm_add_did(random_account, {'scope': OTHER, 'name': '%s_raw2' % grant.prefix}, db_session)
     assert generic.perm_add_did(random_account, {'scope': OTHER, 'name': '%s_calib2' % grant.prefix}, db_session)
-    # the metadata keys are set like the DID is altered
-    assert not generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': raw, 'key': 'project'}, db_session)
-    assert generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': calib, 'key': 'project'}, db_session)
+    # the metadata keys fall back to the deciding DID permission
+    assert not core_role.can_write_metadata_keys(random_account, OTHER, raw, ['project'], session=db_session)
+    assert core_role.can_write_metadata_keys(random_account, OTHER, calib, ['project'], session=db_session)
     items = [{'scope': OTHER, 'name': name} for name in (raw, calib)]
     assert [item['name'] for item in core_permission.filter_dids(items, random_account, 'list_dids', session=db_session, operation=DidOperationType.DELETE)] == [calib]
+
+
+def test_owner_with_write_has_metadata_like_delete(random_account, role_factory, grant, catalogue, generic, db_session):
+    """ROLE DID PERMISSION (CORE): Owning a DID with WRITE on it grants DELETE on it, nothing more: the metadata keys fall back to it, but a metadata permission deciding a key decides it for the owner too."""
+    own, other = '%s_own' % grant.prefix, '%s_other' % grant.prefix
+    catalogue.add(own, owner=random_account)
+    catalogue.add(other, owner='someone else')
+    role = role_factory(random_account)
+    pattern = 'rbac_other:%s*' % grant.prefix
+    core_role.add_role_permission(role, RolePermissionType.DID, {'did_pattern': pattern, 'operations': ['read', 'write']}, session=db_session)
+    # a metadata permission granting nothing on 'project'
+    core_role.add_role_permission(role, RolePermissionType.METADATA, {'did_pattern': pattern, 'keys': ['project'], 'operations': []}, session=db_session)
+
+    def sets(name: str, key: str) -> bool:
+        return generic.perm_set_metadata(random_account, {'scope': OTHER, 'name': name, 'key': key}, db_session)
+
+    def deletes(name: str, key: str) -> bool:
+        return generic.perm_delete_metadata(random_account, {'scope': OTHER, 'name': name, 'key': key}, db_session)
+
+    # the owner sets and deletes the keys no metadata permission decides, and those removing the DID, as with DELETE
+    assert sets(own, 'datatype')
+    assert deletes(own, 'datatype')
+    assert sets(own, 'lifetime')
+    # a metadata permission deciding a key decides it for the owner too, which neither writes nor reads it
+    assert not sets(own, 'project')
+    assert not deletes(own, 'project')
+    key_filter = generic.MetadataKeyFilter(random_account, db_session, filtered=True)
+    assert key_filter.is_readable(OTHER, own, 'datatype')
+    assert not key_filter.is_readable(OTHER, own, 'project')
+    # WRITE alone, on a DID of another account, alters none of its keys
+    assert not sets(other, 'datatype')
+    assert not deletes(other, 'datatype')
+    assert not sets(other, 'lifetime')
 
 
 @pytest.mark.parametrize('rbac', [False, True], indirect=True)
