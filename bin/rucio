@@ -26,7 +26,7 @@ from rucio.common.utils import setup_logger
 
 
 def run_command(args, use_multi_host_functionality):
-    commands = ("account", "config", "did", "replica", "rse", "rule", "scope", "subscription", "ping", "whoami", "lifetime-exception", "upload", "download", "opendata", "data")
+    commands = ("account", "config", "did", "replica", "rse", "rule", "scope", "subscription", "ping", "whoami", "lifetime-exception", "upload", "download", "opendata", "data", "role")
     if (any(arg in commands for arg in sys.argv)) or args.help or args.version:
         main(standalone_mode=not use_multi_host_functionality)  # pylint: disable=E1120
 
