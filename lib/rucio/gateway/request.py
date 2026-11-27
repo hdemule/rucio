@@ -31,7 +31,51 @@ from rucio.gateway import permission
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
 
+    from sqlalchemy.orm import Session
+
     from rucio.db.sqla.constants import RequestState
+
+
+def _check_request_permission(
+    action: str,
+    scope: str,
+    name: str,
+    rse: str,
+    issuer: str,
+    vo: str,
+    *,
+    session: "Session",
+) -> str:
+    """
+    Check the permission to get a request of a DID to a destination RSE, before telling whether the RSE exists.
+
+    The permission is about the DID, so an account which may not get it is refused whatever the RSE: an unknown RSE
+    is only reported to an account which is allowed, like a DID or a request which does not exist. The permission is
+    then given the 'rse_id' as usual, None if the RSE does not exist.
+
+    :param action: The action to check, 'get_request_by_did' or 'get_request_history_by_did'.
+    :param scope: The scope of the data identifier as a string.
+    :param name: The name of the data identifier as a string.
+    :param rse: The destination RSE of the request as a string.
+    :param issuer: Issuing account as a string.
+    :param vo: The VO to act on.
+    :param session: The database session in use.
+    :returns: The id of the RSE.
+    :raises AccessDenied: If the account may not get the request.
+    :raises RSENotFound: If the account may get it, but the RSE does not exist.
+    """
+    try:
+        rse_id, rse_not_found = get_rse_id(rse=rse, vo=vo, session=session), None
+    except exception.RSENotFound as error:
+        rse_id, rse_not_found = None, error
+
+    kwargs = {'scope': scope, 'name': name, 'rse': rse, 'rse_id': rse_id, 'issuer': issuer}
+    auth_result = permission.has_permission(issuer=issuer, vo=vo, action=action, kwargs=kwargs, session=session)
+    if not auth_result.allowed:
+        raise exception.AccessDenied(f'{issuer} cannot retrieve the request DID {scope}:{name} to RSE {rse}. {auth_result.message}')
+    if rse_not_found is not None:
+        raise rse_not_found
+    return rse_id
 
 
 def get_request_by_did(
@@ -52,12 +96,7 @@ def get_request_by_did(
     :returns: Request as a dictionary.
     """
     with db_session(DatabaseOperationType.READ) as session:
-        rse_id = get_rse_id(rse=rse, vo=vo, session=session)
-
-        kwargs = {'scope': scope, 'name': name, 'rse': rse, 'rse_id': rse_id, 'issuer': issuer}
-        auth_result = permission.has_permission(issuer=issuer, vo=vo, action='get_request_by_did', kwargs=kwargs, session=session)
-        if not auth_result.allowed:
-            raise exception.AccessDenied(f'{issuer} cannot retrieve the request DID {scope}:{name} to RSE {rse}. {auth_result.message}')
+        rse_id = _check_request_permission('get_request_by_did', scope=scope, name=name, rse=rse, issuer=issuer, vo=vo, session=session)
 
         internal_scope = InternalScope(scope, vo=vo)
         req = request.get_request_by_did(internal_scope, name, rse_id, session=session)
@@ -83,12 +122,7 @@ def get_request_history_by_did(
     :returns: Request as a dictionary.
     """
     with db_session(DatabaseOperationType.READ) as session:
-        rse_id = get_rse_id(rse=rse, vo=vo, session=session)
-
-        kwargs = {'scope': scope, 'name': name, 'rse': rse, 'rse_id': rse_id, 'issuer': issuer}
-        auth_result = permission.has_permission(issuer=issuer, vo=vo, action='get_request_history_by_did', kwargs=kwargs, session=session)
-        if not auth_result.allowed:
-            raise exception.AccessDenied(f'{issuer} cannot retrieve the request DID {scope}:{name} to RSE {rse}. {auth_result.message}')
+        rse_id = _check_request_permission('get_request_history_by_did', scope=scope, name=name, rse=rse, issuer=issuer, vo=vo, session=session)
 
         internal_scope = InternalScope(scope, vo=vo)
         req = request.get_request_history_by_did(internal_scope, name, rse_id, session=session)
